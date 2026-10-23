@@ -13,7 +13,10 @@ use rusix::{
 /// Builds the service binary with the Cargo lockfile and its native runtime tools.
 pub(super) fn native(pkgs: &NixValue, apps: &NixPath) -> Package {
     let lib = pkgs.clone().select("lib");
-    let source = airlock_build::Workspace::new(apps.clone()).source(&lib, EXECUTABLE);
+    let workspace = airlock_build::Workspace::new(apps.clone());
+    let source = workspace.package_source(EXECUTABLE, true, &[]);
+    let mut flags: Vec<NixValue> = source.arguments().into_iter().map(NixValue::from).collect();
+    flags.extend(["--bin".into(), EXECUTABLE.into()]);
 
     let tools = NixValue::list(
         [
@@ -39,15 +42,13 @@ pub(super) fn native(pkgs: &NixValue, apps: &NixPath) -> Package {
         nix_record! {
             "pname": EXECUTABLE,
             "version": env!("CARGO_PKG_VERSION"),
-            "src": source,
+            "src": source.source(&lib),
             // Snapshot only the lockfile, even when apps arrived as a store-backed string.
             "cargoLock": nix_record! {
                 "lockFile": apps.join_relative("Cargo.lock")
                     .expect("lockfile path is relative").snapshot(),
             },
-            "cargoBuildFlags": NixValue::list([
-                "-p".into(), EXECUTABLE.into(), "--bin".into(), EXECUTABLE.into(),
-            ]),
+            "cargoBuildFlags": NixValue::list(flags),
             "doCheck": false,
             "nativeBuildInputs": NixValue::list([pkgs.clone().select("makeWrapper")]),
             "postInstall": install,
