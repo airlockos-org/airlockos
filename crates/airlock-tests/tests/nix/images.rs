@@ -257,6 +257,20 @@ fn usb_startup_gates_are_acyclic_and_preserve_health_budgets() -> Result<()> {
         })
     );
     let units = report["units"].as_object().unwrap();
+    let guest = &units["airlock-boot-guest@.service"];
+    assert_eq!(guest["type"], "oneshot");
+    assert_eq!(guest["remain"], true);
+    assert_eq!(guest["wantedBy"], json!([]));
+    assert_eq!(guest["failure"], json!([]));
+    includes(
+        &guest["start"],
+        "airlock-start-qube-ready %i /run/airlock/startup/topology.json",
+    );
+    assert!(guest["timeout"].as_u64().unwrap() >= airlock_machine_core::boot::GUEST_HELPER_SECONDS);
+    includes(
+        &guest["condition"][0],
+        "test ! -e /run/airlock/boot-supervisor/recovery-required.json",
+    );
     let mut edges: BTreeMap<&str, BTreeSet<&str>> = units
         .keys()
         .map(|name| (name.as_str(), BTreeSet::new()))

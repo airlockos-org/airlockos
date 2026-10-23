@@ -11,6 +11,40 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 /// Bound simultaneous guest boots to avoid exhausting memory during startup.
 const BOOT_START_CONCURRENCY: usize = 2;
 
+/// Start the ordinary assistant alongside home only when its headless providers are already ready.
+fn parallel_assistant(topology: &Topology, foreground: &[GuestName]) -> Result<Option<GuestName>> {
+    let home: GuestName = "usr-home".parse()?;
+    let assistant: GuestName = "usr-assistant".parse()?;
+    let Some(home_position) = foreground.iter().position(|name| *name == home) else {
+        return Ok(None);
+    };
+    let Some(domain) = topology.domains.get(&assistant) else {
+        return Ok(None);
+    };
+    if foreground.contains(&assistant)
+        || domain.prefs.get("autostart") != Some(&Value::Bool(true))
+        || domain.features.get("airlock-role") != Some(&json!("usr-assistant"))
+    {
+        return Ok(None);
+    }
+
+    let dependencies = planning::dependencies(topology, true)?;
+    let available = foreground[..home_position]
+        .iter()
+        .filter(|name| name.as_str() != "sys-gui")
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    Ok(dependencies
+        .get(&assistant)
+        .is_none_or(|parents| parents.is_subset(&available))
+        .then_some(assistant))
+}
+
+/// Name the systemd-owned readiness helper; the validated guest name needs no instance escaping.
+fn guest_unit(name: &GuestName) -> String {
+    format!("airlock-boot-guest@{name}.service")
+}
+
 /// Group independent starts while preserving every declared provider relationship.
 fn start_batches(
     starts: &[GuestName],
@@ -82,6 +116,55 @@ mod tests {
             start_batches(&starts, &BTreeSet::from([net, firewall]), &dependencies)?,
             vec![vec![assistant, home], vec![controller]]
         );
+        Ok(())
+    }
+
+    /// A GUI link can wait for handoff; network and other service providers must precede home.
+    #[test]
+    fn assistant_overlap_preserves_declared_providers_and_autostart() -> Result<()> {
+        let backend = json!({
+            "type":"nix-closure",
+            "system":{"source":"/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-system"},
+            "root":{"source":"/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-root/root.img"},
+            "kernel":{"name":"qubes-kernel"},
+            "store":{"source":"/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-closure",
+                "mode":"shared-closure", "device":"/dev/xvde", "blobDevice":"/dev/xvdf",
+                "mountpoint":"/nix/store", "viewBackend":"erofs-objectmap"}
+        });
+        let mut raw = json!({"schema":"airlock.qubes-topology.v1", "domains":{}});
+        for name in [
+            "sys-net",
+            "sys-firewall",
+            "sys-gui",
+            "usr-home",
+            "usr-assistant",
+            "sys-ctrl",
+        ] {
+            raw["domains"][name] = json!({"class":"StandaloneVM", "backend":backend,
+                "netvm":null, "prefs":{"guivm":null}});
+        }
+        raw["domains"]["sys-firewall"]["netvm"] = json!("sys-net");
+        raw["domains"]["usr-home"]["netvm"] = json!("sys-firewall");
+        raw["domains"]["usr-home"]["features"] = json!({"airlock-boot-foreground":"1"});
+        raw["domains"]["usr-assistant"]["netvm"] = json!("sys-firewall");
+        raw["domains"]["usr-assistant"]["features"] = json!({"airlock-role":"usr-assistant"});
+        raw["domains"]["usr-assistant"]["prefs"] = json!({"autostart":true,"guivm":"sys-gui"});
+
+        let inputs = BootInputs::new(raw.clone())?;
+        let foreground = airlock_machine_core::boot::foreground_guests(inputs.topology())?;
+        assert_eq!(
+            parallel_assistant(inputs.topology(), &foreground)?,
+            Some("usr-assistant".parse()?)
+        );
+
+        let mut deferred_provider = raw.clone();
+        deferred_provider["domains"]["usr-assistant"]["netvm"] = json!("sys-ctrl");
+        let inputs = BootInputs::new(deferred_provider)?;
+        assert_eq!(parallel_assistant(inputs.topology(), &foreground)?, None);
+
+        raw["domains"]["usr-assistant"]["prefs"]["autostart"] = json!(false);
+        let inputs = BootInputs::new(raw)?;
+        assert_eq!(parallel_assistant(inputs.topology(), &foreground)?, None);
         Ok(())
     }
 }
@@ -503,12 +586,15 @@ impl Coordinator {
         );
         let started = Instant::now();
         let gui_names = airlock_machine_core::boot::foreground_guests(selected.inputs.topology())?;
+        let assistant = parallel_assistant(selected.inputs.topology(), &gui_names)?;
+        let mut configured = gui_names.clone();
+        configured.extend(assistant.iter().cloned());
         let names = if gui {
-            gui_names.clone()
+            configured.clone()
         } else {
             planning::ordered(selected.inputs.topology())?
                 .into_iter()
-                .filter(|n| !gui_names.contains(n))
+                .filter(|n| !configured.contains(n))
                 .collect()
         };
         let runtime = runtime()?;
@@ -532,7 +618,7 @@ impl Coordinator {
             }
         } else {
             ensure!(
-                self.boot_cached(&selected, &gui_names)?,
+                self.boot_cached(&selected, &configured)?,
                 "GUI configuration changed after startup; repair in recovery"
             );
         }
@@ -600,6 +686,30 @@ impl Coordinator {
                             ),
                         );
                     }
+                    if name.as_str() == "usr-home"
+                        && let Some(assistant) = &assistant
+                    {
+                        // systemd owns both bounded helpers across the GPU handoff. Join only
+                        // home here; background autostart joins the same assistant job later.
+                        self.runner
+                            .text("systemctl", &["start", "--no-block", &guest_unit(name)])?;
+                        if let Err(error) = self.runner.text(
+                            "systemctl",
+                            &["start", "--no-block", &guest_unit(assistant)],
+                        ) {
+                            eprintln!("could not schedule early {assistant}: {error:#}");
+                            crate::boot::guest_checkpoint(
+                                assistant,
+                                crate::boot::GuestState::Failed,
+                                &format!("could not schedule startup: {error:#}"),
+                            )?;
+                        }
+                        ensure!(
+                            self.join_boot_guest(name)?,
+                            "{name} startup was not scheduled"
+                        );
+                        continue;
+                    }
                     self.runner.run(
                         "airlock-start-qube-ready",
                         &[
@@ -660,6 +770,43 @@ impl Coordinator {
         Ok(report)
     }
 
+    /// Join an existing readiness job without restarting failures or accepting an unstarted unit.
+    fn join_boot_guest(&self, name: &GuestName) -> Result<bool> {
+        let deadline =
+            Instant::now() + Duration::from_secs(airlock_machine_core::boot::GUEST_HELPER_SECONDS);
+        let unit = guest_unit(name);
+        loop {
+            let properties = self.runner.run(
+                "systemctl",
+                &[
+                    "show".into(),
+                    "--property=ActiveState".into(),
+                    "--property=Job".into(),
+                    unit.as_str().into(),
+                ],
+                Duration::from_secs(10),
+                &[],
+            )?;
+            let state = properties
+                .lines()
+                .find_map(|line| line.strip_prefix("ActiveState="))
+                .context("startup unit did not report ActiveState")?;
+            let job = properties
+                .lines()
+                .find_map(|line| line.strip_prefix("Job="))
+                .context("startup unit did not report Job")?;
+            let queued = job.split_whitespace().next().is_some_and(|id| id != "0");
+            match state {
+                "active" => return Ok(true),
+                "inactive" if !queued => return Ok(false),
+                "activating" | "inactive" => {}
+                state => bail!("{name} startup unit is {state}; inspect {unit}"),
+            }
+            ensure!(Instant::now() < deadline, "{name} startup unit timed out");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
     /// Observe the original selected boot inputs and keep machine mutation excluded until publication.
     /// The callback consumes opaque evidence while both machine and supervisor locks are held.
     pub(crate) fn accept_boot<T>(
@@ -703,6 +850,19 @@ impl Coordinator {
             .parse()?;
         let selected = self.boot_selection(setup, topology)?;
         self.enforce_trash(selected.inputs.topology())?;
+        if selected
+            .inputs
+            .topology()
+            .domains
+            .keys()
+            .any(|name| name.as_str() == "sys-gui")
+        {
+            let foreground =
+                airlock_machine_core::boot::foreground_guests(selected.inputs.topology())?;
+            if let Some(assistant) = parallel_assistant(selected.inputs.topology(), &foreground)? {
+                self.join_boot_guest(&assistant)?;
+            }
+        }
         let running = self.running()?;
         ensure!(
             required

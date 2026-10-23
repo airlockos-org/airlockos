@@ -691,17 +691,24 @@ fn namespace_candidate_binding_checks_pool_identity_and_baseline() -> Result<()>
     Ok(())
 }
 
-/// Boot cache reuses matching setup but refuses a lost private disk or a foreign alias to managed storage.
+/// Scoped boot overlaps home and assistant, joins readiness once and checks storage before cache reuse.
 #[test]
 #[ignore = "requires explicitly prepared bubblewrap and unprivileged user namespaces"]
 fn namespace_boot_cache_checks_persistent_disks_before_reuse() -> Result<()> {
     let mut machine = Machine::new()?;
-    machine.configure_boot(false)?;
     let path = machine.physical(&machine.baseline).join("topology.json");
     let mut topology = read(&path)?;
     topology["domains"]["usr-home"]["features"]["airlock-boot-foreground"] = json!("1");
-    save(path, &topology)?;
-    save(machine.path("etc/qubes-topology.json"), &topology)?;
+    let mut assistant = declaration("usr-assistant", 1);
+    assistant["features"]["airlock-role"] = json!("usr-assistant");
+    assistant["prefs"]["guivm"] = json!("sys-gui");
+    topology["domains"]["usr-assistant"] = assistant;
+    save(&path, &topology)?;
+    machine.configure_boot(false)?;
+    machine.data["boot_unit_states"] = json!({
+        "usr-home":["inactive", "active"], "usr-assistant":["activating", "active"]
+    });
+    machine.persist()?;
     let first = machine.run(&["boot-setup", "--gui", SETUP, "--apply"], None, true)?;
     assert_eq!(first["scope"], "gui");
     assert_eq!(first["reused"], false);
@@ -712,11 +719,44 @@ fn namespace_boot_cache_checks_persistent_disks_before_reuse() -> Result<()> {
             .contains(&json!("usr-home"))
     );
     assert!(
-        machine
-            .calls()?
-            .iter()
-            .any(|call| call[0] == "airlock-start-qube-ready" && call[1] == "usr-home")
+        first["domains"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("usr-assistant"))
     );
+    let calls = machine.calls()?;
+    let starts = calls
+        .iter()
+        .filter(|call| call[0] == "systemctl" && call[1] == "start")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        starts,
+        vec![
+            &json!([
+                "systemctl",
+                "start",
+                "--no-block",
+                "airlock-boot-guest@usr-home.service"
+            ]),
+            &json!([
+                "systemctl",
+                "start",
+                "--no-block",
+                "airlock-boot-guest@usr-assistant.service"
+            ])
+        ]
+    );
+    // Home may finish while the assistant remains in progress. The foreground
+    // command must neither join its readiness nor start it a second time.
+    assert!(!calls.iter().any(|call| call[0] == "systemctl"
+        && call[1] == "show"
+        && call.as_array().unwrap().last()
+            == Some(&json!("airlock-boot-guest@usr-assistant.service"))));
+    assert_eq!(
+        read(machine.path("data.json"))?["boot_unit_states"]["usr-assistant"],
+        json!(["activating", "active"])
+    );
+
     assert_eq!(
         machine.run(
             &["boot-setup", "--background", SETUP, "--apply"],
@@ -725,6 +765,25 @@ fn namespace_boot_cache_checks_persistent_disks_before_reuse() -> Result<()> {
         )?["status"],
         "passed"
     );
+
+    machine.data = read(machine.path("data.json"))?;
+    machine.data["boot_unit_states"]["usr-assistant"] = json!(["failed"]);
+    machine.persist()?;
+    error(
+        &machine.run(&["boot-start"], None, false)?,
+        "usr-assistant startup unit is failed",
+    );
+
+    machine.data = read(machine.path("data.json"))?;
+    machine.data["boot_unit_states"]["usr-assistant"] = json!(["activating", "active"]);
+    machine.persist()?;
+    machine.run(&["boot-start"], None, true)?;
+    assert!(
+        !machine.calls()?.iter().any(|call| call[0] == "qvm-start"
+            && call.as_array().unwrap().contains(&json!("usr-assistant"))),
+        "background must join the submitted job"
+    );
+
     assert_eq!(
         machine.run(&["boot-setup", "--gui", SETUP, "--apply"], None, true)?["reused"],
         true

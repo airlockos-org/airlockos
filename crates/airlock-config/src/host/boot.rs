@@ -17,7 +17,10 @@ pub(super) fn module(source: &NixPath, workspace: &Workspace) -> NixValue {
         let service = Tool::Dom0
             .build(&context.pkgs, workspace, source)
             .as_expression();
-        let config = service.bind(|service| configuration(&context, service));
+        let start_ready = Tool::StartReady
+            .build(&context.pkgs, workspace, source)
+            .as_expression();
+        let config = service.bind(|service| configuration(&context, service, start_ready));
         let declaration = nix_record! {
             "options": nix_record! {
                 "airlock": nix_record! {
@@ -52,7 +55,7 @@ pub(super) fn module(source: &NixPath, workspace: &Workspace) -> NixValue {
 }
 
 /// Compose startup gates, failure recording and recovery consoles around the native supervisor.
-fn configuration(context: &ModuleContext, service: NixValue) -> NixValue {
+fn configuration(context: &ModuleContext, service: NixValue, start_ready: NixValue) -> NixValue {
     let package = |name| context.pkgs.clone().select(name);
     let when = |condition, value| {
         context
@@ -118,6 +121,29 @@ fn configuration(context: &ModuleContext, service: NixValue) -> NixValue {
                 .call(GUEST_HELPER_SECONDS as i64),
         );
     let mut services = vec![
+        (
+            "airlock-boot-guest@",
+            when(
+                split.clone(),
+                nix_record! {
+                    "description": "Start and verify Airlock boot guest %i",
+                    // No installation target or ordering against setup: the coordinator
+                    // submits these only after the selected configuration and providers
+                    // are ready, and can finish the desktop while the assistant continues.
+                    "serviceConfig": nix_record! {
+                        "Type": "oneshot",
+                        "RemainAfterExit": true,
+                        "ExecCondition": NixValue::list([gate.clone()]),
+                        "ExecStart": nix_text!(
+                            "{start_ready}/bin/airlock-start-qube-ready %i /run/airlock/startup/topology.json",
+                            start_ready = start_ready,
+                        ),
+                        "TimeoutStartSec": GUEST_HELPER_SECONDS as i64,
+                        "TimeoutStopSec": 15_i64,
+                    },
+                },
+            ),
+        ),
         (
             "airlock-boot-shutdown-record",
             nix_record! {

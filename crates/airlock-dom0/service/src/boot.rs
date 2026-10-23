@@ -437,6 +437,35 @@ impl Supervisor {
             "background services may only be retried from a degraded desktop before shutdown"
         );
 
+        // Clear only failed early jobs. The background coordinator will retry them
+        // through its normal readiness helper; running jobs remain owned by systemd.
+        let runner = Runner::default();
+        let failed = runner.capture(
+            "systemctl",
+            &[
+                "is-failed".into(),
+                "--quiet".into(),
+                "airlock-boot-guest@usr-assistant.service".into(),
+            ],
+            Duration::from_secs(10),
+            &[],
+        )?;
+        ensure!(
+            !failed.limited,
+            "checking assistant startup unit exceeded limits"
+        );
+        if failed.status.success() {
+            runner.run(
+                "systemctl",
+                &[
+                    "reset-failed".into(),
+                    "airlock-boot-guest@usr-assistant.service".into(),
+                ],
+                Duration::from_secs(10),
+                &[],
+            )?;
+        }
+
         Runner::default().run(
             "systemctl",
             &[
@@ -500,11 +529,32 @@ impl Supervisor {
     }
 
     fn guest(&self, name: GuestName, phase: GuestState, detail: &str) -> Result<()> {
+        let critical = if phase == GuestState::Failed {
+            let path = std::env::var_os("AIRLOCK_BOOT_TOPOLOGY")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| "/run/airlock/startup/topology.json".into());
+            if path.try_exists()? {
+                let inputs = BootInputs::new(state::configuration(&path)?)?;
+                !inputs
+                    .topology()
+                    .domains
+                    .keys()
+                    .any(|name| name.as_str() == "sys-gui")
+                    || !inputs.topology().domains.contains_key(&name)
+                    || airlock_machine_core::boot::foreground_guests(inputs.topology())?
+                        .contains(&name)
+            } else {
+                true
+            }
+        } else {
+            false
+        };
+
         {
             let _lock = self.lock()?;
             let mut value = self.current()?;
             value.guests.insert(name.clone(), phase);
-            let status = if phase == GuestState::Failed && !value.desktop_ready {
+            let status = if critical && !value.desktop_ready {
                 Status::Failed
             } else {
                 value.status

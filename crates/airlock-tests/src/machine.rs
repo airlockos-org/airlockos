@@ -575,7 +575,40 @@ pub fn execute(root: &Path, program: &str, original: &[String]) -> Result<()> {
             ensure!(worker.wait()?.success(), "prepared validation failed");
             result?;
         }
-        "nix-env" | "systemctl" | "airlock-start-qube-ready" => {}
+        "systemctl" => {
+            if arguments.first().map(String::as_str) == Some("show")
+                && let Some(name) = last()?
+                    .strip_prefix("airlock-boot-guest@")
+                    .and_then(|name| name.strip_suffix(".service"))
+            {
+                let states = data["boot_unit_states"][name]
+                    .as_array_mut()
+                    .context("supply boot unit states for the scoped boot fixture")?;
+                let state = states
+                    .first()
+                    .and_then(Value::as_str)
+                    .context("boot unit state")?
+                    .to_owned();
+                if states.len() > 1 {
+                    states.remove(0);
+                }
+                println!("ActiveState={state}");
+                // An inactive unit may still have its submitted start job queued.
+                println!(
+                    "Job={job}",
+                    job = if state == "inactive" {
+                        "1 /fixture/job/1"
+                    } else {
+                        ""
+                    }
+                );
+                if state == "active" && !data["running"].as_array().unwrap().contains(&json!(name))
+                {
+                    data["running"].as_array_mut().unwrap().push(json!(name));
+                }
+            }
+        }
+        "nix-env" | "airlock-start-qube-ready" => {}
         _ => bail!("unexpected machine peer {program}"),
     }
     // The concurrent validation driver must not overwrite data its child updated.

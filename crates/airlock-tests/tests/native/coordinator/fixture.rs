@@ -458,21 +458,26 @@ impl Machine {
         topology["domains"]["sys-gui"] = declaration("sys-gui", 1);
         save(self.path("etc/qubes-topology.json"), &topology)?;
         save(baseline.join("topology.json"), &topology)?;
-        self.data["selected"]["sys-gui"] = json!(1);
         self.data["running"]
             .as_array_mut()
             .unwrap()
             .push(json!("sys-gui"));
-        let mut info = self.data["generations"]["usr-home:1"].clone();
-        info["domain"] = json!("sys-gui-runtime-store");
-        info["system"] = json!(store("sys-gui-system", 1));
-        info["root_source"] = json!(format!(
-            "{source}/root.img",
-            source = store("sys-gui-root", 1)
-        ));
-        info["closure_source"] = json!(store("sys-gui-closure", 1));
-        info["approval"]["source"] = info["closure_source"].clone();
-        self.data["generations"]["sys-gui:1"] = info;
+        for name in topology["domains"].as_object().unwrap().keys() {
+            self.data["selected"][name] = json!(1);
+            if name == "usr-home" {
+                continue;
+            }
+            let mut info = self.data["generations"]["usr-home:1"].clone();
+            info["domain"] = json!(format!("{name}-runtime-store"));
+            info["system"] = json!(store(&format!("{name}-system"), 1));
+            info["root_source"] = json!(format!(
+                "{source}/root.img",
+                source = store(&format!("{name}-root"), 1)
+            ));
+            info["closure_source"] = json!(store(&format!("{name}-closure"), 1));
+            info["approval"]["source"] = info["closure_source"].clone();
+            self.data["generations"][format!("{name}:1")] = info;
+        }
         self.persist()?;
         let mut xml = String::from(
             r#"<qubes><labels/><pools>
@@ -481,7 +486,7 @@ impl Machine {
 </pools><properties/><domains>
 <domain id="domain-0" class="AdminVM"><properties><property name="label">black</property></properties></domain>"#,
         );
-        for name in ["usr-home", "sys-gui"] {
+        for name in topology["domains"].as_object().unwrap().keys() {
             xml.push_str(&format!(
                 r#"<domain><properties><property name="name">{name}</property></properties>
 <features/><tags/><volume-config>"#

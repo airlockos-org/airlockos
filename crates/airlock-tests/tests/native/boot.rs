@@ -329,6 +329,17 @@ fn namespace_boot_retry_and_recovery_ack_have_distinct_authority() -> Result<()>
     boot.run(&["degraded"])?;
     boot.run(&["retry-services"])?;
     assert_eq!(boot.record("boot")?["status"], "working");
+    let calls = boot.peers.calls()?;
+    let reset = calls
+        .iter()
+        .position(|call| call["command"] == "systemctl" && call["args"][0] == "reset-failed")
+        .context("failed assistant job reset")?;
+    let restart = calls
+        .iter()
+        .position(|call| call["command"] == "systemctl" && call["args"][1] == "restart")
+        .context("background retry")?;
+    assert!(reset < restart);
+
     boot.run(&["degraded"])?;
     boot.run(&["shutdown-requested"])?;
     assert!(
@@ -551,13 +562,13 @@ fn optional_packaged_startup_helper_has_complete_runtime_dependencies() -> Resul
     Ok(())
 }
 
-/// Desktop publication requires the home VM and healthy network forwarding as well as the GUI.
+/// Desktop publication requires home and network health while an early assistant failure stays separate.
 #[test]
 #[ignore = "requires explicitly prepared bubblewrap and unprivileged user namespaces"]
 fn namespace_desktop_readiness_requires_home_and_network() -> Result<()> {
     use crate::coordinator::fixture::{declaration, store};
 
-    for failure in ["", "home", "network"] {
+    for failure in ["", "home", "network", "assistant"] {
         let mut boot = Boot::new("foreground")?;
         let mut home = declaration("usr-home", 1);
         home["features"]["airlock-boot-foreground"] = json!("1");
@@ -567,13 +578,15 @@ fn namespace_desktop_readiness_requires_home_and_network() -> Result<()> {
         fs::write(
             boot.peers.path("topology.json"),
             serde_json::to_vec(&json!({"schema":"airlock.qubes-topology.v1","domains":{
-                "sys-gui":declaration("sys-gui", 1), "usr-home":home, "sys-net":network
+                "sys-gui":declaration("sys-gui", 1), "usr-home":home, "sys-net":network,
+                "usr-assistant":declaration("usr-assistant", 1)
             }}))?,
         )?;
         boot.peers.rules(
             "qvm-check",
             json!([
                 {"args":["--running","usr-home"],"exit":if failure == "home" {1} else {0}},
+                {"args":["--running","usr-assistant"],"exit":if failure == "assistant" {1} else {0}},
                 {}
             ]),
         )?;
@@ -586,17 +599,28 @@ fn namespace_desktop_readiness_requires_home_and_network() -> Result<()> {
             {"prefix":["-d","sys-gui"]}
         ]))?;
         boot.run(&["prepare"])?;
+        if failure == "assistant" {
+            boot.run(&["guest", "usr-assistant", "failed", "early startup failed"])?;
+            assert_eq!(boot.record("foreground")?["status"], "working");
+        }
         let output = common::run(&mut boot.command(&["desktop-ready"])?, None)?;
+        let desktop_ready = failure.is_empty() || failure == "assistant";
         assert_eq!(
             output.status.success(),
-            failure.is_empty(),
+            desktop_ready,
             "{failure}: {error}",
             error = String::from_utf8_lossy(&output.stderr)
         );
-        assert_eq!(
-            boot.record("foreground")?["desktop_ready"],
-            failure.is_empty()
-        );
+        assert_eq!(boot.record("foreground")?["desktop_ready"], desktop_ready);
+        if failure == "assistant" {
+            let output = common::run(&mut boot.command(&["complete", "all ready"])?, None)?;
+            assert!(
+                !output.status.success(),
+                "assistant failure cannot become complete"
+            );
+            boot.run(&["degraded"])?;
+            assert_eq!(boot.record("foreground")?["status"], "degraded");
+        }
     }
     Ok(())
 }

@@ -18,6 +18,7 @@ pub(super) fn startup_contract(inputs: NixValue) -> NixValue {
             let services = host.clone().select_segments(["systemd", "services"]);
             let units = [
                 "airlock-setup-config",
+                "airlock-boot-guest@",
                 "airlock-input-boot-guard",
                 "airlock-start-gui-gpu",
                 "airlock-gui-input-events",
@@ -38,12 +39,19 @@ pub(super) fn startup_contract(inputs: NixValue) -> NixValue {
                         ("after", unit.clone().select("after")),
                         ("before", unit.clone().select("before")),
                         ("requires", unit.clone().select("requires")),
+                        ("wantedBy", unit.clone().select("wantedBy")),
                         (
                             "failure",
                             unit.select("unitConfig")
                                 .attr_or("OnFailure", NixValue::list([])),
                         ),
                         ("start", config.clone().select("ExecStart")),
+                        ("type", config.clone().attr_or("Type", NixValue::null())),
+                        ("remain", config.clone().attr_or("RemainAfterExit", false)),
+                        (
+                            "condition",
+                            config.clone().attr_or("ExecCondition", NixValue::list([])),
+                        ),
                         (
                             "pre",
                             config.clone().attr_or("ExecStartPre", NixValue::list([])),
