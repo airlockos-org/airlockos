@@ -13,11 +13,14 @@ use rusix::{
 /// Linking the pinned libpython supports both Qubes imports and embedded offline image calls.
 pub fn qubes(pkgs: &NixValue, workspace: &Workspace) -> Package {
     let python = pkgs.clone().select("python3");
+    let source = workspace.package_source("airlock-qubes-python", true, &[]);
+    let mut flags: Vec<NixValue> = source.arguments().into_iter().map(NixValue::from).collect();
+    flags.push("--lib".into());
     let native = pkgs.clone().select("rustPlatform.buildRustPackage").call(nix_record! {
         "pname": "airlock-qubes", "version": env!("CARGO_PKG_VERSION"),
-        "src": workspace.source(&pkgs.clone().select("lib"), "airlock-qubes-python"),
+        "src": source.source(&pkgs.clone().select("lib")),
         "cargoLock": nix_record! { "lockFile": workspace.file("Cargo.lock").snapshot() },
-        "cargoBuildFlags": NixValue::list(["-p".into(), "airlock-qubes-python".into(), "--lib".into()]),
+        "cargoBuildFlags": NixValue::list(flags),
         "nativeBuildInputs": NixValue::list([pkgs.clone().select("pkg-config")]),
         "buildInputs": NixValue::list([python.clone(), pkgs.clone().select("udev")]),
         "PYO3_PYTHON": nix_text!("{python}/bin/python3", python = python.clone()),

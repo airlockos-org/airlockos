@@ -28,4 +28,4 @@ mod workspace;
 
 pub use applications::Application;
 
-pub use workspace::Workspace;
+pub use workspace::{CheckedPackageSource, Workspace};

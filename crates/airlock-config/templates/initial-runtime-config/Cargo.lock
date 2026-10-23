@@ -6,9 +6,17 @@ version = 4
 name = "airlock-build"
 version = "0.1.0"
 dependencies = [
+ "airlock-build-plan",
  "airlock-desktop",
  "rusix",
  "toml",
+]
+
+[[package]]
+name = "airlock-build-plan"
+version = "0.1.0"
+dependencies = [
+ "vstd",
 ]
 
 [[package]]

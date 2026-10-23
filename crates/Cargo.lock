@@ -50,10 +50,18 @@ dependencies = [
 name = "airlock-build"
 version = "0.1.0"
 dependencies = [
+ "airlock-build-plan",
  "airlock-desktop",
  "rusix",
  "tempfile",
  "toml",
+]
+
+[[package]]
+name = "airlock-build-plan"
+version = "0.1.0"
+dependencies = [
+ "vstd",
 ]
 
 [[package]]

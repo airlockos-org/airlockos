@@ -2,11 +2,16 @@
 //! Target-specific dependencies are conservatively included; development dependencies are excluded.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     path::{Component, Path},
     sync::OnceLock,
 };
 use toml::Value;
+
+#[cfg(test)]
+use std::collections::BTreeSet;
+
+mod lowering;
 
 /// One local package, including vendored authoring libraries outside the application workspace.
 struct Package {
@@ -33,6 +38,7 @@ const MANIFESTS: &[(&str, &str)] = manifests![
     "airlock-common/machine-planning",
     "airlock-common/provisioning",
     "airlock-common/build",
+    "airlock-common/build-plan",
     "airlock-common/desktop",
     "airlock-common/qubes",
     "airlock-qubes-python",
@@ -54,7 +60,7 @@ const MANIFESTS: &[(&str, &str)] = manifests![
 fn packages() -> &'static BTreeMap<String, Package> {
     static PACKAGES: OnceLock<BTreeMap<String, Package>> = OnceLock::new();
     PACKAGES.get_or_init(|| {
-        MANIFESTS
+        let packages: BTreeMap<_, _> = MANIFESTS
             .iter()
             .map(|&(directory, contents)| {
                 let manifest: Value =
@@ -68,7 +74,24 @@ fn packages() -> &'static BTreeMap<String, Package> {
                     },
                 )
             })
-            .collect()
+            .collect();
+        assert_eq!(
+            packages.len(),
+            MANIFESTS.len(),
+            "duplicate package identity in source inventory"
+        );
+        let workspace: Value = toml::from_str(include_str!("../../../../Cargo.toml")).unwrap();
+        for member in workspace["workspace"]["members"]
+            .as_array()
+            .expect("explicit workspace membership")
+        {
+            let member = member.as_str().expect("explicit workspace member path");
+            assert!(
+                packages.values().any(|package| package.directory == member),
+                "workspace member absent from source inventory: {member}"
+            );
+        }
+        packages
     })
 }
 
@@ -110,201 +133,43 @@ fn dependencies(manifest: &Value) -> Vec<(&str, &Value)> {
         .collect()
 }
 
-/// Expand named feature aliases, preserving dependency activation and forwarding tokens.
-fn expanded(manifest: &Value, requested: &BTreeSet<String>) -> BTreeSet<String> {
-    let mut result = requested.clone();
-    loop {
-        let previous = result.clone();
-        for name in &previous {
-            if let Some(values) = manifest
-                .get("features")
-                .and_then(|features| features.get(name))
-                .and_then(Value::as_array)
-            {
-                result.extend(
-                    values
-                        .iter()
-                        .map(|value| value.as_str().unwrap().to_owned()),
-                );
-            }
-        }
-        if result == previous {
-            return result;
-        }
-    }
-}
-
-/// Match Cargo's optional-dependency activation, including implicit and explicitly suppressed features.
-fn enabled(manifest: &Value, name: &str, dependency: &Value, features: &BTreeSet<String>) -> bool {
-    if dependency.get("optional").and_then(Value::as_bool) != Some(true)
-        || features.contains(&format!("dep:{name}"))
-        || features.iter().any(|feature| {
-            feature
-                .strip_prefix(name)
-                .is_some_and(|tail| tail.starts_with('/'))
-        })
-    {
-        return true;
-    }
-
-    let definitions = manifest.get("features").and_then(Value::as_table);
-    let suppressed = definitions.is_some_and(|definitions| {
-        definitions.contains_key(name)
-            || definitions
-                .values()
-                .filter_map(Value::as_array)
-                .flatten()
-                .any(|value| value.as_str() == Some(&format!("dep:{name}")))
-    });
-    !suppressed && features.contains(name)
-}
-
-/// Unify requested local features until no newly activated dependency adds implementation sources.
-fn closure(
-    packages: &BTreeMap<String, Package>,
+/// Interpret declarations outside the proof boundary, then use the verified solver and projection.
+pub(super) fn checked(
     package: &str,
     default_features: bool,
     features: &[&str],
-) -> BTreeMap<String, BTreeSet<String>> {
-    assert!(
-        packages.contains_key(package),
-        "package belongs to the source inventory"
-    );
-
-    let mut requested: BTreeSet<String> = features
-        .iter()
-        .map(|feature| (*feature).to_owned())
-        .collect();
-    if default_features {
-        requested.insert("default".into());
-    }
-    let mut selected = BTreeMap::from([(package.to_owned(), requested)]);
-
-    loop {
-        let previous = selected.clone();
-        for (name, requested) in &previous {
-            let package = &packages[name];
-            let features = expanded(&package.manifest, requested);
-            for (alias, dependency) in dependencies(&package.manifest) {
-                if dependency.get("workspace").and_then(Value::as_bool) == Some(true) {
-                    let contents = if package.directory.starts_with("vendor/rusix/") {
-                        include_str!("../../../../vendor/rusix/Cargo.toml")
-                    } else {
-                        include_str!("../../../../Cargo.toml")
-                    };
-                    let workspace: Value = toml::from_str(contents).unwrap();
-                    assert!(
-                        workspace["workspace"]
-                            .get("dependencies")
-                            .and_then(|dependencies| dependencies.get(alias))
-                            .and_then(|dependency| dependency.get("path"))
-                            .is_none(),
-                        "inherited local dependencies require source inventory support"
-                    );
-                }
-                let Some(path) = dependency.get("path").and_then(Value::as_str) else {
-                    continue;
-                };
-                if !enabled(&package.manifest, alias, dependency, &features) {
-                    continue;
-                }
-
-                let directory = relative(package.directory, path);
-                let target = packages
-                    .iter()
-                    .find(|(_, package)| package.directory == directory)
-                    .expect("local dependency belongs to the source inventory")
-                    .0;
-                let requested = selected.entry(target.clone()).or_default();
-                if dependency.get("default-features").and_then(Value::as_bool) != Some(false) {
-                    requested.insert("default".into());
-                }
-                if let Some(values) = dependency.get("features").and_then(Value::as_array) {
-                    requested.extend(
-                        values
-                            .iter()
-                            .map(|value| value.as_str().unwrap().to_owned()),
-                    );
-                }
-                for feature in &features {
-                    if let Some((name, feature)) = feature.split_once('/')
-                        && (name == alias || name.strip_suffix('?') == Some(alias))
-                    {
-                        requested.insert(feature.to_owned());
-                    }
-                }
-            }
-        }
-        if selected == previous {
-            return selected;
-        }
-    }
+) -> airlock_build_plan::CheckedPackageSource {
+    lowering::checked(packages(), package, default_features, features)
 }
 
-/// Return resolution inputs plus the implementation and explicit embedded assets of selected crates.
-pub(super) fn sources(
-    package: &str,
-    default_features: bool,
-    features: &[&str],
-) -> BTreeSet<String> {
-    let packages = packages();
-    let selected = closure(packages, package, default_features, features);
-    let mut files = BTreeSet::from([
-        "Cargo.toml".into(),
-        "Cargo.lock".into(),
-        "vendor/rusix/Cargo.toml".into(),
-        // Cargo discovers these library targets even when resolving an unrelated workspace member.
-        // Retaining the entry files avoids fabricated sources or edits to vendored manifests.
-        "vendor/rusix/crates/rusix/src/lib.rs".into(),
-        "vendor/rusix/crates/rusix-derive/src/lib.rs".into(),
-    ]);
-    files.extend(
-        packages
-            .values()
-            .map(|package| format!("{directory}/Cargo.toml", directory = package.directory)),
-    );
-
-    for name in selected.keys() {
-        let package = &packages[name];
-        let directory = package.directory;
-        files.insert(format!("{directory}/src"));
-        if package.manifest["package"]
-            .get("build")
-            .and_then(Value::as_bool)
-            != Some(false)
-        {
-            let build = package.manifest["package"]
-                .get("build")
-                .and_then(Value::as_str)
-                .unwrap_or("build.rs");
-            files.insert(format!("{directory}/{build}"));
-        }
-        match name.as_str() {
-            "airlock-build" => {
-                files.insert("airlock-tests/fixtures/memory_accounting.c".into());
-            }
-            "airlock-config" => {
-                files.insert("verus.json".into());
-            }
-            "airlock-sys-ctrl-gui" => {
-                files.insert(format!("{directory}/examples"));
-            }
-            "airlock-desktop" => {
-                files.insert(format!("{directory}/assets"));
-            }
-            "airlock-tests" => {
-                files.insert(format!("{directory}/fixtures/memory_accounting.c"));
-                files.insert(format!("{directory}/fixtures/gui"));
-            }
-            _ => {}
-        }
-    }
-    files
+/// Materialize exactly the production-selected paths for isolated Cargo tests.
+#[cfg(test)]
+fn sources(package: &str, defaults: bool, features: &[&str]) -> BTreeSet<String> {
+    let plan = checked(package, defaults, features);
+    (0..plan.file_count())
+        .map(|i| plan.file(i).unwrap().path.clone())
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Production profiles and distinct minimal/authoring feature configurations share the same checks.
+    fn profiles() -> Vec<(&'static str, bool, Vec<&'static str>)> {
+        packages()
+            .keys()
+            .map(|name| (name.as_str(), true, Vec::new()))
+            .chain([
+                ("airlock-image", false, vec![]),
+                ("airlock-dom0-service", false, vec![]),
+                ("airlock-tests", false, vec![]),
+                ("airlock-sys-gui-service", false, vec!["authoring"]),
+                ("airlock-nix-core", true, vec!["artifacts"]),
+                ("airlock-diagnostics", true, vec!["runtime"]),
+            ])
+            .collect()
+    }
 
     /// Materialize exactly the chosen file set; do not supply omitted implementation entry points.
     fn copy_input(source: &Path, destination: &Path) -> std::io::Result<()> {
@@ -324,55 +189,38 @@ mod tests {
     /// Every workspace member must remain resolvable when unrelated implementations are omitted.
     #[test]
     fn inventory_covers_workspace_members() {
-        let root: Value = toml::from_str(include_str!("../../../../Cargo.toml")).unwrap();
-        for member in root["workspace"]["members"].as_array().unwrap() {
+        let original = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for (package, defaults, features) in profiles() {
+            let filtered = tempfile::tempdir().unwrap();
+            for relative in sources(package, defaults, &features) {
+                copy_input(&original.join(&relative), &filtered.path().join(&relative)).unwrap();
+            }
+            let output = std::process::Command::new(env!("CARGO"))
+                .args([
+                    "metadata",
+                    "--offline",
+                    "--locked",
+                    "--no-deps",
+                    "--format-version",
+                    "1",
+                    "--manifest-path",
+                ])
+                .arg(filtered.path().join("Cargo.toml"))
+                .output()
+                .unwrap();
             assert!(
-                packages()
-                    .values()
-                    .any(|package| Some(package.directory) == member.as_str())
+                output.status.success(),
+                "filtered workspace for {package} failed Cargo resolution: {error}",
+                error = String::from_utf8_lossy(&output.stderr)
             );
         }
-
-        let original = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let filtered = tempfile::tempdir().unwrap();
-        for relative in sources("airlock-diagnostics", true, &[]) {
-            copy_input(&original.join(&relative), &filtered.path().join(&relative)).unwrap();
-        }
-        let output = std::process::Command::new(env!("CARGO"))
-            .args([
-                "metadata",
-                "--offline",
-                "--locked",
-                "--no-deps",
-                "--format-version",
-                "1",
-                "--manifest-path",
-            ])
-            .arg(filtered.path().join("Cargo.toml"))
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "filtered workspace failed Cargo resolution: {error}",
-            error = String::from_utf8_lossy(&output.stderr)
-        );
     }
 
     /// Compare local closures with Cargo's actual normal/build dependency resolution, including feature boundaries.
     #[test]
     fn local_feature_closures_match_cargo() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");
-        let cases = packages()
-            .keys()
-            .map(|name| (name.as_str(), true, Vec::new()))
-            .chain([
-                ("airlock-image", false, vec![]),
-                ("airlock-dom0-service", false, vec![]),
-                ("airlock-tests", false, vec![]),
-                ("airlock-sys-gui-service", false, vec!["authoring"]),
-                ("airlock-nix-core", true, vec!["artifacts"]),
-            ]);
-        for (name, defaults, features) in cases {
+        for (name, defaults, features) in profiles() {
             let mut command = std::process::Command::new(env!("CARGO"));
             command
                 .args(["tree", "--locked", "--offline", "--manifest-path"])
@@ -408,8 +256,12 @@ mod tests {
                 .filter(|name| packages().contains_key(*name))
                 .map(str::to_owned)
                 .collect();
-            let expected: BTreeSet<_> = closure(packages(), name, defaults, &features)
-                .into_keys()
+            let plan = checked(name, defaults, &features);
+            let expected: BTreeSet<_> = packages()
+                .keys()
+                .enumerate()
+                .filter(|(index, _)| plan.includes(*index))
+                .map(|(_, name)| name.clone())
                 .collect();
             assert_eq!(
                 actual, expected,

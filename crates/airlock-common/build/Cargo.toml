@@ -11,6 +11,7 @@ description = "Airlock application source selection and package construction"
 path = "src/lib.rs"
 
 [dependencies]
+airlock-build-plan = { path = "../build-plan" }
 airlock-desktop = { path = "../desktop" }
 rusix = { path = "../../vendor/rusix/crates/rusix", default-features = false }
 toml = { version = "1.1", default-features = false, features = ["parse", "serde", "std"] }

@@ -207,24 +207,15 @@ impl Application {
         } else {
             &[]
         };
-        let mut flags = vec!["-p".into(), package.into()];
-        if !default_features {
-            // USB and validation commands never load Qubes' offline Python object model.
-            flags.push("--no-default-features".into());
-        }
+        let source = workspace.package_source(package, default_features, features);
+        let mut flags: Vec<NixValue> = source.arguments().into_iter().map(NixValue::from).collect();
         for binary in binaries {
             flags.extend(["--bin".into(), (*binary).into()]);
-        }
-        if !features.is_empty() {
-            flags.extend(["--features".into(), features.join(",").into()]);
         }
         let mut attributes = vec![
             ("pname", name.into()),
             ("version", env!("CARGO_PKG_VERSION").into()),
-            (
-                "src",
-                workspace.source_with_features(&lib, package, default_features, features),
-            ),
+            ("src", source.source(&lib)),
             (
                 "cargoLock",
                 nix_record! { "lockFile": workspace.file("Cargo.lock").snapshot() },
