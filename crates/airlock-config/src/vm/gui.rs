@@ -250,7 +250,17 @@ impl Gui<'_> {
                 "xdotool",
                 "xterm",
             ]),
-            NixValue::list([launcher.clone(), sync]),
+            NixValue::list([
+                launcher.clone(),
+                sync,
+                airlock_build::desktop::icons(&self.context.pkgs).as_expression(),
+                airlock_build::desktop::identity(
+                    &self.context.pkgs,
+                    airlock_build::desktop::DESKTOP_ID,
+                    "AirlockOS",
+                    airlock_build::desktop::DESKTOP_ID,
+                ),
+            ]),
             self.optional(
                 self.setting("enableXfce"),
                 NixValue::list([
