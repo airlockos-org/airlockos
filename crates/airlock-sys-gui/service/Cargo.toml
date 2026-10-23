@@ -26,6 +26,7 @@ authoring = ["dep:rusix", "dep:airlock-build"]
 path = "src/lib.rs"
 
 [dependencies]
+airlock-desktop = { path = "../../airlock-common/desktop" }
 airlock-build = { path = "../../airlock-common/build", optional = true }
 airlock-machine-core = { path = "../../airlock-common/machine" }
 airlock-nix-core = { path = "../../airlock-common/nix" }

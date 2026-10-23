@@ -17,6 +17,18 @@ const IDENTITY: &str = "738a6af9-8e51-590d-afe4-790b26fbca79";
 
 const TOKEN: &str = "728a6af9-8e51-590d-afe4-790b26fbca79";
 
+/// GNOME receives both a resolvable icon and the installed notification source identity.
+fn assert_notification_identity(call: &Value) {
+    let arguments = call["args"].as_array().unwrap();
+    for expected in [
+        "--app-name=AirlockOS",
+        "--icon=org.airlockos.Airlock",
+        "--hint=string:desktop-entry:org.airlockos.Desktop",
+    ] {
+        assert!(arguments.contains(&json!(expected)), "{call}");
+    }
+}
+
 /// A running display manager must expose a local active graphical login, not just a service process.
 #[test]
 fn boot_health_requires_an_active_graphical_login() -> Result<()> {
@@ -154,6 +166,9 @@ fn boot_notifications_retry_or_dismiss_once() -> Result<()> {
             .env("AIRLOCK_NOTIFY_SEND", peers.path("bin/notify-send"));
         peers.run(&mut command)?;
         let calls = peers.calls()?;
+        for call in calls.iter().filter(|call| call["command"] == "notify-send") {
+            assert_notification_identity(call);
+        }
         assert!(calls.iter().any(|call| {
             call["args"]
                 .as_array()
@@ -388,11 +403,21 @@ fn launcher_retries_readiness_but_submits_the_application_once() -> Result<()> {
             matches!(failure, "timeout" | "workspace" | "application")
         );
         if let Some(notice) = calls.iter().find(|call| call["command"] == "notify-send") {
+            assert_notification_identity(notice);
             let arguments = notice["args"].as_array().unwrap();
-            let title = arguments[2].as_str().unwrap();
+            let separator = arguments
+                .iter()
+                .position(|argument| argument == "--")
+                .unwrap();
+            let title = arguments[separator + 1].as_str().unwrap();
             assert_eq!(title, "Launch not confirmed: Editor in usr-home");
             if failure == "application" {
-                assert!(arguments[3].as_str().unwrap().contains("exit status 42"));
+                assert!(
+                    arguments[separator + 2]
+                        .as_str()
+                        .unwrap()
+                        .contains("exit status 42")
+                );
             }
         }
     }

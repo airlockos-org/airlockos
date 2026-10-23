@@ -158,7 +158,7 @@ fn main() -> Result<()> {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Airlock Control")
             .with_decorations(true)
-            .with_app_id("org.airlock.ctrl")
+            .with_app_id(airlock_desktop::CONTROL_ID)
             .with_icon(branding::logo().context("loading the embedded Airlock logo")?)
             .with_inner_size([1600.0, 820.0])
             .with_min_inner_size([880.0, 600.0]),

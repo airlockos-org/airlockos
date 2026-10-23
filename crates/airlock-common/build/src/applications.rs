@@ -445,6 +445,26 @@ impl Application {
             native
         };
 
+        let package = if matches!(self, Self::ControllerGui | Self::GuiSetup) {
+            let mut paths = vec![package.clone(), crate::desktop::icons(pkgs).as_expression()];
+            if matches!(self, Self::ControllerGui) {
+                paths.push(crate::desktop::identity(
+                    pkgs,
+                    crate::desktop::CONTROL_ID,
+                    "Airlock Control",
+                    crate::desktop::CONTROL_ID,
+                ));
+            }
+
+            pkgs.clone().select("symlinkJoin").call(nix_record! {
+                "name": name,
+                "paths": NixValue::list(paths),
+                "meta": package.select("meta"),
+            })
+        } else {
+            package
+        };
+
         Package::from_expression(package)
     }
 }

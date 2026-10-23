@@ -50,6 +50,7 @@ dependencies = [
 name = "airlock-build"
 version = "0.1.0"
 dependencies = [
+ "airlock-desktop",
  "rusix",
  "tempfile",
  "toml",
@@ -94,6 +95,10 @@ dependencies = [
  "airlock-machine-planning",
  "vstd",
 ]
+
+[[package]]
+name = "airlock-desktop"
+version = "0.1.0"
 
 [[package]]
 name = "airlock-dev"
@@ -245,6 +250,7 @@ dependencies = [
 name = "airlock-sys-ctrl-gui"
 version = "0.1.0"
 dependencies = [
+ "airlock-desktop",
  "airlock-nix-core",
  "anyhow",
  "clap",
@@ -279,6 +285,7 @@ name = "airlock-sys-gui-service"
 version = "0.1.0"
 dependencies = [
  "airlock-build",
+ "airlock-desktop",
  "airlock-machine-core",
  "airlock-nix-core",
  "airlock-vm-service",
@@ -299,6 +306,7 @@ dependencies = [
 name = "airlock-sys-gui-setup"
 version = "0.1.0"
 dependencies = [
+ "airlock-desktop",
  "airlock-vm-service",
  "anyhow",
  "libadwaita",

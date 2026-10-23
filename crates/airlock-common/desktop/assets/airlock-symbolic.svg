@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <title>Airlock</title>
+  <desc>Two right-facing arrows and the doorway boundary, simplified for small monochrome icons.</desc>
+  <g fill="#2e3436">
+    <path d="M3 2L9 4.5L3 7ZM3 9L9 11.5L3 14Z"/>
+    <path d="M11 2H13V14H11Z"/>
+  </g>
+</svg>

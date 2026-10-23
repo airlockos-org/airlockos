@@ -75,6 +75,7 @@ fn sources(root: &Path) -> Result<String> {
         "crates/Cargo.lock",
         "crates/airlock-sys-ctrl/gui/Cargo.toml",
         "crates/airlock-common/nix/Cargo.toml",
+        "crates/airlock-common/desktop/Cargo.toml",
     ]
     .into_iter()
     .map(|name| root.join(name))
@@ -86,6 +87,12 @@ fn sources(root: &Path) -> Result<String> {
         )?;
     }
     collect(&root.join("crates/airlock-common/nix/src"), &mut files)?;
+    for name in ["src", "assets"] {
+        collect(
+            &root.join("crates/airlock-common/desktop").join(name),
+            &mut files,
+        )?;
+    }
     files.sort();
     let mut hash = Sha256::new();
     for path in files {
@@ -218,9 +225,12 @@ mod regression {
             "crates/Cargo.lock",
             "crates/airlock-sys-ctrl/gui/Cargo.toml",
             "crates/airlock-common/nix/Cargo.toml",
+            "crates/airlock-common/desktop/Cargo.toml",
+            "crates/airlock-common/desktop/src/lib.rs",
             "crates/airlock-common/nix/src/lib.rs",
             "crates/airlock-sys-ctrl/gui/src/main.rs",
-            "crates/airlock-sys-ctrl/gui/assets/logo.svg",
+            "crates/airlock-common/desktop/assets/airlock.svg",
+            "crates/airlock-common/desktop/assets/airlock.png",
         ];
         for name in names {
             let path = root.join(name);

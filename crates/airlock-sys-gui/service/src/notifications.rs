@@ -5,6 +5,20 @@ use airlock_vm_service::support;
 use anyhow::Result;
 use std::{process::Command, thread, time::Duration};
 
+/// Attribute every local desktop alert to its installed Airlock application identity.
+pub(crate) fn command() -> Command {
+    let mut command = Command::new(support::tool("AIRLOCK_NOTIFY_SEND", "notify-send"));
+    command.args([
+        "--app-name=AirlockOS".to_owned(),
+        format!("--icon={icon}", icon = airlock_desktop::ICON_NAME),
+        format!(
+            "--hint=string:desktop-entry:{id}",
+            id = airlock_desktop::DESKTOP_ID
+        ),
+    ]);
+    command
+}
+
 fn rpc(service: &str) -> Result<support::Output> {
     support::run(
         Command::new(support::tool("AIRLOCK_QVM_RUN", "qvm-run")).args([
@@ -45,12 +59,11 @@ pub(crate) fn execute() -> Result<()> {
                     }
                 }
                 if state.desktop_ready && state.status == "degraded" {
-                    let mut command =
-                        Command::new(support::tool("AIRLOCK_NOTIFY_SEND", "notify-send"));
+                    let mut command = command();
                     if let Some(identifier) = notification {
                         command.arg(format!("--replace-id={identifier}"));
                     }
-                    let response = support::text(command.args(["--app-name=AirlockOS", "--icon=dialog-warning", "--expire-time=0", "--wait", "--action=retry=Retry", "--action=dismiss=Dismiss", "Some background services could not start", "Your desktop is ready. You can retry starting the background services."]), Duration::from_secs(24 * 60 * 60))?;
+                    let response = support::text(command.args(["--expire-time=0", "--wait", "--action=retry=Retry", "--action=dismiss=Dismiss", "Some background services could not start", "Your desktop is ready. You can retry starting the background services."]), Duration::from_secs(24 * 60 * 60))?;
                     if response != "retry" {
                         return Ok(());
                     }
@@ -77,8 +90,8 @@ pub(crate) fn execute() -> Result<()> {
 
 /// Replace one progress notification instead of leaving a new alert for each startup checkpoint.
 fn progress(summary: &str, detail: &str, previous: Option<u32>, persistent: bool) -> Option<u32> {
-    let mut command = Command::new(support::tool("AIRLOCK_NOTIFY_SEND", "notify-send"));
-    command.args(["--app-name=AirlockOS", "--icon=system-run", "--print-id"]);
+    let mut command = command();
+    command.arg("--print-id");
     command.arg(if persistent {
         "--expire-time=0"
     } else {
@@ -87,7 +100,10 @@ fn progress(summary: &str, detail: &str, previous: Option<u32>, persistent: bool
     if let Some(identifier) = previous {
         command.arg(format!("--replace-id={identifier}"));
     }
-    match support::text(command.args([summary, detail]), Duration::from_secs(5)) {
+    match support::text(
+        command.args(["--", summary, detail]),
+        Duration::from_secs(5),
+    ) {
         Ok(output) => output.parse().ok().or(previous),
         Err(error) => {
             eprintln!("startup notification: {error:#}");

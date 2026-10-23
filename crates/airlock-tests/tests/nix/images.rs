@@ -529,6 +529,14 @@ fn package_usb_lab_keeps_network_dependencies_and_development_authority_explicit
         &report["tailscaleAssistantDesktop"],
         "/bin/airlock-connect-tailscale",
     );
+    includes(
+        &report["tailscaleAssistantDesktop"],
+        "Icon=org.airlockos.Airlock",
+    );
+    includes(
+        &report["tailscaleAssistantDesktop"],
+        "StartupWMClass=org.airlockos.Tailscale",
+    );
 
     let helper = text(&report["tailscaleLocalHelper"]);
     assert_eq!(
@@ -569,6 +577,8 @@ fn package_usb_lab_keeps_network_dependencies_and_development_authority_explicit
 
     let calls = peers.calls()?;
     let args = calls[0]["args"].as_array().unwrap();
+    let class = args.iter().position(|arg| arg == "-class").unwrap();
+    assert_eq!(args[class + 1], "org.airlockos.Tailscale");
     let terminal_command = args.iter().position(|arg| arg == "-e").unwrap();
     assert_eq!(
         &args[terminal_command + 1..],

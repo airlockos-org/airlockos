@@ -156,8 +156,7 @@ fn deliver(job: &Job, target: &GuestName) -> Result<Receipt> {
 fn notify(message: &str) {
     eprintln!("{message}");
     let _ = support::run(
-        Command::new(support::tool("AIRLOCK_NOTIFY_SEND", "notify-send"))
-            .args(["Screen capture", message]),
+        crate::notifications::command().args(["--", "Screen capture", message]),
         None,
         Duration::from_secs(10),
     );

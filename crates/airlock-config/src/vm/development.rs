@@ -85,7 +85,8 @@ pub(super) fn module() -> NixValue {
             "desktopName": "Connect Tailscale",
             "comment": "Connect usr-assistant to Tailscale and display the login URL",
             "exec": nix_text!("{window}/bin/airlock-connect-tailscale", window = enrollment_window.clone()),
-            "icon": "network-workgroup",
+            "icon": airlock_build::desktop::ICON_NAME,
+            "startupWMClass": airlock_build::desktop::TAILSCALE_ID,
             "categories": NixValue::list(["System".into(), "Network".into()]),
         });
 

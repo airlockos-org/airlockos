@@ -136,11 +136,18 @@ fn live_vm_interfaces_svg_icons_body(handler: NixValue, pkgs: NixValue) -> NixVa
             printf '%s\n' "{contacts}/share/icons/hicolor/scalable/apps/org.gnome.Contacts.svg" | {handler} > "$out/contacts.rgba"
             printf '%s\n' "{logs}/share/icons/hicolor/scalable/apps/org.gnome.Logs.svg" | {handler} > "$out/logs.rgba"
             printf '%s\n' "{fonts}/share/icons/hicolor/scalable/apps/org.gnome.font-viewer.svg" | {handler} > "$out/fonts.rgba"
+            export XDG_DATA_DIRS="{icons}/share:{hicolor}/share"
+            printf '%s\n' 'xdgicon:org.airlockos.Airlock' | {handler} > "$out/airlock.rgba"
+            printf '%s\n' 'xdgicon:org.airlockos.Airlock-symbolic' | {handler} > "$out/airlock-symbolic.rgba"
+            printf '%s\n' 'xdgicon:org.airlockos.Setup' | {handler} > "$out/setup.rgba"
+            printf '%s\n' 'xdgicon:org.airlock.ctrl' | {handler} > "$out/control.rgba"
             "#,
             contacts = pkgs.clone().select("gnome-contacts"),
             logs = pkgs.clone().select("gnome-logs"),
             fonts = pkgs.clone().select("gnome-font-viewer"),
             handler = handler,
+            icons = airlock_build::desktop::icons(&pkgs).as_expression(),
+            hicolor = pkgs.clone().select("hicolor-icon-theme"),
         );
 
         pkgs.clone()

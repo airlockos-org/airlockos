@@ -255,6 +255,10 @@ pub(crate) fn contract<const N: usize>(
         "usr-assistant-tailscale-window" => (
             "@xterm@/bin/xterm",
             &[
+                "-class",
+                airlock_build::desktop::TAILSCALE_ID,
+                "-name",
+                "airlock-tailscale",
                 "-hold",
                 "-fa",
                 "DejaVu Sans Mono",

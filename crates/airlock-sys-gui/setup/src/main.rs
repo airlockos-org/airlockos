@@ -85,6 +85,7 @@ impl Session {
         }
 
         let window = adw::ApplicationWindow::builder()
+            .icon_name(airlock_desktop::ICON_NAME)
             .application(app)
             .title(if self.preview {
                 "AirlockOS Setup Preview"
@@ -97,7 +98,7 @@ impl Session {
         let toolbar = adw::ToolbarView::new();
         toolbar.add_top_bar(&adw::HeaderBar::new());
         let page = adw::StatusPage::builder()
-            .icon_name("preferences-system-symbolic")
+            .icon_name(airlock_desktop::ICON_NAME)
             .build();
         toolbar.set_content(Some(&page));
         let actions = gtk::Box::new(gtk::Orientation::Horizontal, 12);
@@ -220,7 +221,7 @@ fn main() -> ExitCode {
         .application_id(if preview {
             "org.airlockos.SetupPreview"
         } else {
-            "org.airlockos.Setup"
+            airlock_desktop::SETUP_ID
         })
         .flags(gio::ApplicationFlags::HANDLES_COMMAND_LINE)
         .build();

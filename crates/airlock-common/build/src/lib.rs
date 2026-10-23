@@ -6,6 +6,8 @@
 
 mod applications;
 
+pub mod desktop;
+
 pub mod adapters;
 
 pub mod tools;

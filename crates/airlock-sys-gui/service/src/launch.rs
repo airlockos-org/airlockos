@@ -65,8 +65,7 @@ fn report(request: &Request, log: Vec<u8>, detail: &str) {
         .strip_prefix(&prefix)
         .unwrap_or(&request.label);
     let _ = support::run(
-        Command::new(support::tool("AIRLOCK_NOTIFY_SEND", "notify-send")).args([
-            "--app-name=Airlock",
+        crate::notifications::command().args([
             "--",
             &format!(
                 "Launch not confirmed: {label} in {target}",

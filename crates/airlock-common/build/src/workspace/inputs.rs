@@ -33,6 +33,7 @@ const MANIFESTS: &[(&str, &str)] = manifests![
     "airlock-common/machine-planning",
     "airlock-common/provisioning",
     "airlock-common/build",
+    "airlock-common/desktop",
     "airlock-common/qubes",
     "airlock-qubes-python",
     "airlock-cli",
@@ -286,8 +287,10 @@ pub(super) fn sources(
                 files.insert("verus.json".into());
             }
             "airlock-sys-ctrl-gui" => {
-                files.insert(format!("{directory}/assets"));
                 files.insert(format!("{directory}/examples"));
+            }
+            "airlock-desktop" => {
+                files.insert(format!("{directory}/assets"));
             }
             "airlock-tests" => {
                 files.insert(format!("{directory}/fixtures/memory_accounting.c"));

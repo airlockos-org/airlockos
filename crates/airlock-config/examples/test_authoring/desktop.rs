@@ -264,6 +264,34 @@ fn desktop_expression_2(
                     ])),
             ),
             ("startup", field_startup),
+            (
+                "identities",
+                NixValue::builtin("listToAttrs").call(
+                    NixValue::builtin("map")
+                        .call(NixValue::function(|package| {
+                            rusix::nix_record! {
+                                "name": package.clone().select("name"),
+                                "value": package.select("text"),
+                            }
+                        }))
+                        .call(
+                            NixValue::builtin("filter")
+                                .call(NixValue::function(|package| {
+                                    NixValue::builtin("elem")
+                                        .call(package.attr_or("name", ""))
+                                        .call(NixValue::list([
+                                            "org.airlockos.Setup.desktop".into(),
+                                            "org.airlockos.Desktop.desktop".into(),
+                                            "org.airlock.ctrl.desktop".into(),
+                                        ]))
+                                }))
+                                .call(
+                                    cfg.clone()
+                                        .select_segments(["environment", "systemPackages"]),
+                                ),
+                        ),
+                ),
+            ),
             ("watcher", field_watcher),
             ("style", field_style),
             (

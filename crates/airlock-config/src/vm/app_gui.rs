@@ -199,7 +199,7 @@ fn configuration(context: &ModuleContext) -> NixValue {
                 // Icon RPCs resolve themes through the active profile even in a headless VM.
                 "pathsToLink": NixValue::list(["/share/icons".into(), "/share/pixmaps".into()]),
                 "systemPackages": NixValue::concat_lists([
-                    NixValue::list([agent.clone()]),
+                    NixValue::list([agent.clone(), airlock_build::desktop::icons(pkgs).as_expression()]),
                     packages(&[
                         "dbus",
                         "hicolor-icon-theme",

@@ -36,16 +36,28 @@ pub(super) fn configuration(inputs: &ModuleContext, service: &super::Deployment)
         .clone()
         .select("makeDesktopItem")
         .call(nix_record! {
-            "name": "airlock-setup",
+            "name": airlock_build::desktop::SETUP_ID,
             "desktopName": "AirlockOS Setup",
             "exec": nix_text!("{setup}/bin/airlock-sys-gui-setup", setup = setup.clone()),
-            "icon": "preferences-system",
+            "icon": airlock_build::desktop::SETUP_ID,
+            "startupWMClass": airlock_build::desktop::SETUP_ID,
             "categories": NixValue::list(["Settings".into()]),
         });
 
     let configuration = nix_record! {
         "environment": nix_record! {
-            "systemPackages": NixValue::list([setup.clone(), launcher]),
+            "systemPackages": NixValue::list([
+                setup.clone(), launcher,
+                airlock_build::desktop::icons(&inputs.pkgs).as_expression(),
+                airlock_build::desktop::identity(
+                    &inputs.pkgs, airlock_build::desktop::DESKTOP_ID, "AirlockOS",
+                    airlock_build::desktop::DESKTOP_ID,
+                ),
+                airlock_build::desktop::identity(
+                    &inputs.pkgs, airlock_build::desktop::CONTROL_ID, "sys-ctrl: Airlock Control",
+                    &format!("sys-ctrl:{id}", id = airlock_build::desktop::CONTROL_ID),
+                ),
+            ]),
             "etc": nix_record! {
                 "xdg/autostart/airlock-boot-notification.desktop": nix_record! {
                     "text": nix_text!(
@@ -53,22 +65,26 @@ pub(super) fn configuration(inputs: &ModuleContext, service: &super::Deployment)
                             [Desktop Entry]
                             Type=Application
                             Name=AirlockOS startup status
+                            Icon={icon}
                             Exec={command}
                             OnlyShowIn=GNOME;
                         "#,
                         command = service.desktop_command(&DesktopCommand::BootNotification),
+                        icon = airlock_build::desktop::ICON_NAME,
                     ),
                 },
-                "xdg/autostart/airlock-setup.desktop": nix_record! {
+                "xdg/autostart/org.airlockos.Setup.desktop": nix_record! {
                     "text": nix_text!(
                         r#"
                             [Desktop Entry]
                             Type=Application
                             Name=AirlockOS Setup
+                            Icon={icon}
                             Exec={setup}/bin/airlock-sys-gui-setup --auto
                             OnlyShowIn=GNOME;
                         "#,
                         setup = setup,
+                        icon = airlock_build::desktop::SETUP_ID,
                     ),
                 },
             },

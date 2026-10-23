@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <title>Airlock</title>
+  <desc>The red Airlock doorway and two arrows, with a reinforced octagonal frame for desktop sizes.</desc>
+  <g fill="#ff5832">
+    <path fill-rule="evenodd" d="M23 8H105L120 23V105L105 120H23L8 105V23ZM26 14H102L114 26V102L102 114H26L14 102V26Z"/>
+    <path d="M34 24H96L106 34V94L96 104H34L24 94H91L96 89V39L91 34H24Z"/>
+    <path d="M73 43L90 53L73 63ZM73 69L90 79L73 89Z"/>
+  </g>
+</svg>

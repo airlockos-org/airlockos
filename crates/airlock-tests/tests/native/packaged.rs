@@ -363,13 +363,25 @@ fn package_icon_rpc_selects_and_renders_application_assets() -> Result<()> {
         let paths = if fixture == "bitmap_icons" {
             vec![output]
         } else {
-            ["contacts", "logs", "fonts"]
-                .into_iter()
-                .map(|name| output.join(format!("{name}.rgba")))
-                .collect()
+            [
+                "contacts",
+                "logs",
+                "fonts",
+                "airlock",
+                "airlock-symbolic",
+                "setup",
+                "control",
+            ]
+            .into_iter()
+            .map(|name| output.join(format!("{name}.rgba")))
+            .collect()
         };
         for path in paths {
-            let bytes = fs::read(path)?;
+            let name = path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            let bytes = fs::read(&path)?;
             let index = bytes
                 .iter()
                 .position(|byte| *byte == b'\n')
@@ -384,6 +396,17 @@ fn package_icon_rpc_selects_and_renders_application_assets() -> Result<()> {
                 assert_eq!(dimensions, [128, 128]);
             }
             assert_eq!(bytes.len() - index - 1, dimensions[0] * dimensions[1] * 4);
+            if matches!(name, "airlock" | "setup" | "control") {
+                assert!(
+                    bytes[index + 1..]
+                        .chunks_exact(4)
+                        .any(|pixel| pixel[0] > 180
+                            && pixel[1] < 150
+                            && pixel[2] < 130
+                            && pixel[3] > 200),
+                    "{name}: themed lookup must return the red emblem rather than a fallback"
+                );
+            }
         }
     }
     Ok(())

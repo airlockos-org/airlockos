@@ -4,7 +4,6 @@ use crate::{launch, startup};
 use airlock_vm_service::support;
 use anyhow::{Result, bail};
 use std::{
-    process::Command,
     thread,
     time::{Duration, Instant},
 };
@@ -28,8 +27,7 @@ pub(crate) fn execute(timeout: u64) -> Result<u8> {
     let result = open(timeout);
     if let Err(error) = &result {
         let _ = support::run(
-            Command::new(support::tool("AIRLOCK_NOTIFY_SEND", "notify-send")).args([
-                "--app-name=Airlock",
+            crate::notifications::command().args([
                 "--",
                 "Tailscale could not be opened",
                 &format!("{error:#}"),
@@ -78,8 +76,7 @@ fn open(timeout: u64) -> Result<u8> {
             println!("{message}");
             if previous.is_empty() {
                 let _ = support::run(
-                    Command::new(support::tool("AIRLOCK_NOTIFY_SEND", "notify-send")).args([
-                        "--app-name=Airlock",
+                    crate::notifications::command().args([
                         "--",
                         "Preparing Tailscale",
                         "Waiting for the network and usr-assistant. The connection window will open in usr-assistant when ready.",

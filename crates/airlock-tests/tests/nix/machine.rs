@@ -639,6 +639,23 @@ fn desktop_profiles_preserve_services_extensions_and_startup() -> Result<()> {
                 .ends_with("/bin/airlock-sys-gui-service")
         );
         assert!(desktop["system"].as_str().unwrap().ends_with(".drv"));
+        let identities = &desktop["identities"];
+        let setup = identities["org.airlockos.Setup.desktop"].as_str().unwrap();
+        assert!(setup.contains("Icon=org.airlockos.Setup\n"));
+        assert!(setup.contains("StartupWMClass=org.airlockos.Setup\n"));
+        let notifications = identities["org.airlockos.Desktop.desktop"]
+            .as_str()
+            .unwrap();
+        assert!(notifications.contains("Icon=org.airlockos.Desktop\n"));
+        assert!(notifications.contains("NoDisplay=true\n"));
+        let review = identities["org.airlock.ctrl.desktop"].as_str().unwrap();
+        assert!(review.contains("StartupWMClass=sys-ctrl:org.airlock.ctrl\n"));
+        assert!(review.contains("Icon=org.airlock.ctrl\n") && review.contains("NoDisplay=true\n"));
+        assert!(
+            review
+                .lines()
+                .any(|line| line.starts_with("Exec=") && line.ends_with("/bin/true"))
+        );
     }
 
     let desktop = &desktops["connected"];
@@ -727,7 +744,7 @@ fn desktop_profiles_preserve_services_extensions_and_startup() -> Result<()> {
     );
     for (filename, command) in [
         (
-            "airlock-setup.desktop",
+            "org.airlockos.Setup.desktop",
             "/bin/airlock-sys-gui-setup --auto\n",
         ),
         (

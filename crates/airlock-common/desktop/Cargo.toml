@@ -1,0 +1,11 @@
+[package]
+name = "airlock-desktop"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "MIT"
+publish = false
+description = "Shared Airlock desktop identities and icon artwork"
+
+[lib]
+path = "src/lib.rs"

@@ -1,7 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" fill="none" role="img" aria-labelledby="title description">
-  <title id="title">Airlock logo — thin red outline experiment</title>
-  <desc id="description">A simplified Airlock emblem with a three-pixel red octagonal outline, a flat red doorway and two right-facing arrows on a transparent background.</desc>
-  <path d="M22 8H106L120 22V106L106 120H22L8 106V22Z" stroke="#ff5832" stroke-width="3" stroke-linejoin="round"/>
-  <path d="M33 22H97L105 31V97L97 105H33L25 97H92L97 92V36L92 30H25Z" fill="#ff5832"/>
-  <path d="M76 45L88 52L76 59ZM76 71L88 78L76 85Z" fill="#ff5832"/>
-</svg>

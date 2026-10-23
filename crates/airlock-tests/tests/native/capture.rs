@@ -450,7 +450,14 @@ fn capture_open_requires_the_matching_receipt_and_session() -> Result<()> {
     )?;
     let calls = capture.calls()?;
     assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0][0], "Screen capture");
+    let arguments = calls[0].as_array().unwrap();
+    let separator = arguments
+        .iter()
+        .position(|argument| argument == "--")
+        .unwrap();
+    assert_eq!(arguments[separator + 1], "Screen capture");
+    assert!(arguments.contains(&json!("--icon=org.airlockos.Airlock")));
+    assert!(arguments.contains(&json!("--hint=string:desktop-entry:org.airlockos.Desktop")));
     Ok(())
 }
 

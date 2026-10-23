@@ -510,7 +510,7 @@ impl Gui<'_> {
             "desktopName": "Start usr-assistant Tailscale",
             "comment": "Enroll usr-assistant in Tailscale and display the login URL",
             "exec": "airlock-start-usr-assistant-tailscale",
-            "icon": "network-workgroup",
+            "icon": airlock_build::desktop::ICON_NAME,
             "categories": strings(&["System", "Network"]),
         });
 
