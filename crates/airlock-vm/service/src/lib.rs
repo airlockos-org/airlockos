@@ -12,3 +12,5 @@ pub mod gpu;
 pub mod session;
 
 pub mod support;
+
+pub mod private_storage;

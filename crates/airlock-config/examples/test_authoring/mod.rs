@@ -130,6 +130,7 @@ pub(super) fn fixture(
                 pool_admission_module::admission_receiver(inputs)
             }
             "gui_gpu_assignment/gpu_selection" => gui_gpu_assignment::gpu_selection(inputs),
+            "gui_gpu_assignment/private_storage" => gui_gpu_assignment::private_storage(inputs),
             "gui_gpu_assignment/hardware_override" => gui_gpu_assignment::hardware_override(inputs),
             "gui_gpu_assignment/preflight_selection" => {
                 gui_gpu_assignment::preflight_selection(inputs)

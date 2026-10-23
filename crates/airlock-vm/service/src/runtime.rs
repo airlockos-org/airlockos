@@ -93,6 +93,8 @@ enum Action {
         #[arg(long)]
         user: String,
     },
+    /// Require the live private-device and home/local mount identities without changing them.
+    PrivateStorageCheck,
     /// Move NetworkManager connections into persistent private storage.
     NetworkManagerState,
     /// Select upstream IPv4/IPv6 firewall rules from QubesDB observations.
@@ -156,25 +158,6 @@ fn bind(source: &Path, destination: &Path) -> Result<()> {
             .arg(destination))?;
     }
     Ok(())
-}
-
-/// Call the upstream home function with fixed shell text and paths passed only as arguments.
-fn home_initializer(bash: &Path, functions: &Path, home: &Path) -> Result<Command> {
-    ensure!(
-        bash.is_absolute(),
-        "private storage Bash path must be absolute"
-    );
-    let mut command = Command::new(bash);
-    command
-        .args([
-            "-eu",
-            "-c",
-            r#". "$1"; initialize_home "$2" ifneeded"#,
-            "airlock-upstream-home",
-        ])
-        .arg(functions)
-        .arg(home);
-    Ok(command)
 }
 
 /// Refuse missing/unknown manifest names and paths outside the explicitly selected private store.
@@ -567,50 +550,10 @@ pub(crate) fn execute(request: Request) -> Result<()> {
                 .into());
         }
         Action::PrivateStorage { agent, bash, user } => {
-            let mut home = home_initializer(
-                &bash,
-                &agent.join("lib/qubes/init/functions"),
-                Path::new("/rw/home"),
-            )?;
-
-            for directory in ["/rw", "/home", "/usr/local", "/var/lib/qubes"] {
-                fs::create_dir_all(directory)?;
-            }
-            ensure!(
-                Path::new("/dev/xvdb").exists(),
-                "Qubes private device /dev/xvdb is not present"
-            );
-            run(&mut Command::new(
-                agent.join("lib/qubes/init/setup-rwdev.sh"),
-            ))?;
-            if !mounted(Path::new("/rw")) {
-                run(Command::new("mount").args([
-                    "-t",
-                    "auto",
-                    "-o",
-                    "defaults,discard,nosuid,nodev",
-                    "/dev/xvdb",
-                    "/rw",
-                ]))?;
-            }
-            run(&mut Command::new(agent.join("lib/qubes/init/setup-rw.sh")))?;
-            run(&mut home)?;
-            if !mounted(Path::new("/home")) {
-                bind(Path::new("/rw/home"), Path::new("/home"))?;
-                run(Command::new("mount").args(["-o", "remount,bind,nosuid,nodev", "/home"]))?;
-            }
-            run(Command::new("install").args([
-                "-d",
-                "-m",
-                "0700",
-                "-o",
-                &user,
-                "-g",
-                "users",
-                &format!("/home/{user}"),
-            ]))?;
-            fs::create_dir_all("/rw/usrlocal")?;
-            bind(Path::new("/rw/usrlocal"), Path::new("/usr/local"))?;
+            airlock_vm_service::private_storage::initialize(&agent, &bash, &user)?;
+        }
+        Action::PrivateStorageCheck => {
+            airlock_vm_service::private_storage::observe()?;
         }
         Action::NetworkManagerState => network_state()?,
         Action::Firewall { agent } => {
@@ -691,39 +634,6 @@ pub(crate) fn execute(request: Request) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// An explicit Bash works without PATH, preserves literal paths and propagates upstream failure.
-    #[test]
-    fn private_home_uses_declared_bash_without_path() -> Result<()> {
-        let bash = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-            .map(|directory| directory.join("bash"))
-            .find(|path| path.is_file())
-            .context("prepare Bash before running the home initialization regression")?;
-        let bash = fs::canonicalize(bash)?;
-        let directory = tempfile::tempdir()?;
-        let functions = directory.path().join("functions ' literal");
-        let home = directory.path().join("home $(false) ' literal");
-        fs::write(
-            &functions,
-            r#"
-initialize_home() {
-    printf '%s\n' "$1" "$2" > "$1"
-}
-"#,
-        )?;
-        let mut command = home_initializer(&bash, &functions, &home)?;
-        run(command.env_clear().env("PATH", directory.path()))?;
-        assert_eq!(
-            fs::read_to_string(&home)?,
-            format!("{home}\nifneeded\n", home = home.display())
-        );
-
-        fs::write(&functions, "initialize_home() { return 23; }\n")?;
-        let mut command = home_initializer(&bash, &functions, &home)?;
-        assert!(run(command.env_clear().env("PATH", directory.path())).is_err());
-        assert!(home_initializer(Path::new("bash"), &functions, &home).is_err());
-        Ok(())
-    }
 
     /// Missing, extra and path-escaping objects cannot produce a passing guest isolation result.
     #[test]

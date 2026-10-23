@@ -357,6 +357,7 @@ name = "airlock-vm-service"
 version = "0.1.0"
 dependencies = [
  "airlock-machine-core",
+ "airlock-machine-planning",
  "airlock-nix-core",
  "anyhow",
  "clap",

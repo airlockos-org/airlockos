@@ -27,6 +27,34 @@ fn truth(value: &Value) -> bool {
     }
 }
 
+/// Both GUI modes and ordinary guest sessions fail closed and reobserve storage before login.
+#[test]
+#[ignore = "requires explicitly prepared offline Nix sources"]
+fn login_requires_successful_private_storage_and_live_mount_checks() -> Result<()> {
+    let nix = context()?;
+    let report = inspect(&nix, "gui_gpu_assignment/private_storage", json!({}))?;
+    for profile in report.as_object().unwrap().values() {
+        let expected = text(&profile["sessions"]["check"]);
+        assert!(expected.ends_with("/bin/airlock-vm-service runtime private-storage-check"));
+        for (name, service) in profile.as_object().unwrap() {
+            for dependency in ["requires", "after"] {
+                assert!(contains(
+                    &service[dependency],
+                    &json!("airlock-qubes-rw-init.service")
+                ));
+            }
+            assert!(contains(&service["check"], &json!(expected)));
+            if name == "display" {
+                assert!(contains(
+                    &service["requires"],
+                    &json!("systemd-user-sessions.service")
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Combine ordered commands only when an invariant spans the generated service command sequence.
 fn join(value: &Value, separator: &str) -> String {
     value

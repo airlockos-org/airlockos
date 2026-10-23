@@ -20,3 +20,6 @@ pub mod admission;
 
 /// Content correspondence and complete evidence for administrative configuration validation.
 pub mod validation;
+
+/// Live private-device and home-mount checks used before guest initialization and readiness.
+pub mod private_storage;

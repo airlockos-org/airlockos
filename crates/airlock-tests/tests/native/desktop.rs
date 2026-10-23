@@ -29,66 +29,32 @@ fn assert_notification_identity(call: &Value) {
     }
 }
 
-/// A running display manager must expose a local active graphical login, not just a service process.
+/// A failed private-storage service prevents graphical probes, even if a display manager could run.
 #[test]
-fn boot_health_requires_an_active_graphical_login() -> Result<()> {
-    for (state, observation, accepted) in [
-        (
-            "greeter",
-            "Class=greeter\nType=wayland\nState=active\nActive=yes\nRemote=no\nSeat=seat0\n",
-            true,
-        ),
-        (
-            "user",
-            "Class=user\nType=x11\nState=active\nActive=yes\nRemote=no\nSeat=seat0\n",
-            true,
-        ),
-        (
-            "console",
-            "Class=user\nType=tty\nState=active\nActive=yes\nRemote=no\nSeat=seat0\n",
-            false,
-        ),
-        (
-            "remote",
-            "Class=user\nType=x11\nState=active\nActive=yes\nRemote=yes\nSeat=\n",
-            false,
-        ),
-        (
-            "inactive",
-            "Class=greeter\nType=wayland\nState=online\nActive=no\nRemote=no\nSeat=seat0\n",
-            false,
-        ),
-        ("no-session", "", false),
-        ("failed-manager", "", false),
-    ] {
-        let mut peers = Peers::new()?;
-        peers.rules("systemctl", json!([{"args":["is-active","--quiet","display-manager.service"], "exit":if state == "failed-manager" {1} else {0}}]))?;
-        peers.rules("loginctl", json!([
-            {"args":["list-sessions","--no-legend","--no-pager"], "stdout":if state == "no-session" {""} else {"c1 42 gdm seat0 tty1\n"}},
-            {"prefix":["show-session","c1"], "stdout":observation}
-        ]))?;
-        let output = common::run(
-            peers
-                .command(common::binary(
-                    "AIRLOCK_VM_SERVICE_BIN",
-                    "airlock-vm-service",
-                ))?
-                .args(["boot-health", "desktop"]),
-            None,
-        )?;
-        assert_eq!(
-            output.status.success(),
-            accepted,
-            "{state}: {error}",
-            error = String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(
-            !peers
-                .calls()?
-                .iter()
-                .any(|call| call["args"].as_array().unwrap().contains(&json!("start")))
-        );
-    }
+fn boot_health_refuses_failed_private_storage_before_graphical_probes() -> Result<()> {
+    let mut peers = Peers::new()?;
+    peers.rules(
+        "systemctl",
+        json!([{
+            "args":["is-active", "--quiet", "airlock-qubes-rw-init.service"], "exit":1
+        }]),
+    )?;
+    let output = common::run(
+        peers
+            .command(common::binary(
+                "AIRLOCK_VM_SERVICE_BIN",
+                "airlock-vm-service",
+            ))?
+            .args(["boot-health", "desktop"]),
+        None,
+    )?;
+    assert!(!output.status.success());
+    let calls = peers.calls()?;
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0]["args"],
+        json!(["is-active", "--quiet", "airlock-qubes-rw-init.service"])
+    );
     Ok(())
 }
 

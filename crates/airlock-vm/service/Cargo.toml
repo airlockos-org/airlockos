@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 airlock-machine-core = { path = "../../airlock-common/machine" }
+airlock-machine-planning = { path = "../../airlock-common/machine-planning" }
 airlock-nix-core = { path = "../../airlock-common/nix", features = ["runtime"] }
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }

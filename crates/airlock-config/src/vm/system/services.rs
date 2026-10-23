@@ -83,6 +83,18 @@ pub(super) fn configuration(system: &System<'_>, nix: &NixValue, programs: &NixV
             },
         },
         "airlock-config-inputs-mount": system.when(system.imports_inputs(), input_mount(system)),
+        // Ordering alone permits login after a failed initialization. Also reobserve live mounts
+        // when sessions are enabled, rather than treating RemainAfterExit as persistence evidence.
+        "systemd-user-sessions": nix_record! {
+            "requires": strings(&["airlock-qubes-rw-init.service"]),
+            "after": strings(&["airlock-qubes-rw-init.service"]),
+            "serviceConfig": nix_record! {
+                "ExecStartPre": nix_text!(
+                    "{service}/bin/airlock-vm-service runtime private-storage-check",
+                    service = system.native(),
+                ),
+            },
+        },
         "airlock-config-guest-init": system.when(
             system.configuration_role(),
             initialization(system, nix, programs),

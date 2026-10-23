@@ -10,6 +10,17 @@ contracts. This crate has no dependency on deployment authorization.
 Cargo executes the same Rust bodies checked by Verus. The crate owns its name,
 index and mask conversions, so callers cannot replace a graph's identity table.
 
+Guest initialization and health probes also use this crate's private-storage checks.
+`PrivateMount` requires the expected block device at `/rw`; `ReadyStorage` additionally
+requires unique, writable ext4 mounts of that filesystem's `/home` and `/usrlocal`
+roots at `/home` and `/usr/local`, with `nosuid,nodev`. Device initialization is
+refused while the private device or a destination is mounted. The guest adapter
+reads live mountinfo, rejects source-directory overmounts and checks directory
+aliases; login dependencies and pre-start checks enforce failure propagation.
+These are snapshot guarantees. Kernel observations, mountinfo decoding, systemd,
+upstream Qubes helpers and filesystem durability remain outside the proof boundary;
+concurrent privileged mount changes can invalidate an observation.
+
 Before evaluation, the [authoring snapshot](../../airlock-config/src/model.rs)
 uses `Relationships::ordered` to check its typed VM references. After
 [NixOS normalization](../../airlock-config/src/topology/normalize.rs),

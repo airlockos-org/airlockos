@@ -1,7 +1,7 @@
 //! Compose the physical GNOME display and the existing nested Qubes display relay.
 //! The relay retains its small X11 session; physical desktop policy belongs to the GNOME component.
 
-use airlock_build::Workspace;
+use airlock_build::{Application, Workspace};
 use airlock_sys_gui_service::authoring::{self, Sources};
 use rusix::{
     interop::{
@@ -17,11 +17,14 @@ pub(super) fn module(source: &NixPath, workspace: &Workspace) -> NixValue {
     ContextualModule::new(|context| {
         let sources = Sources::new(workspace.root());
         let deployment = authoring::deployment(&context.pkgs, &sources);
+        let vm_service = Application::VmService
+            .build(&context.pkgs, workspace)
+            .as_expression();
         let gui = Gui { context: &context };
         let configuration = deployment
             .package()
             .as_expression()
-            .bind(|service| gui.configuration(service));
+            .bind(|service| gui.configuration(service, vm_service.clone()));
 
         ModuleBody::new(gui.when(gui.setting("enable"), configuration))
             .key("airlock.vm.gui")
@@ -152,7 +155,7 @@ impl Gui<'_> {
     }
 
     /// Share the application launcher between menu synchronization and web-link routing.
-    fn configuration(&self, service: NixValue) -> NixValue {
+    fn configuration(&self, service: NixValue, vm_service: NixValue) -> NixValue {
         let launcher = self.script(
             "airlock-launch-qube-app",
             crate::commands::contract(
@@ -176,11 +179,11 @@ impl Gui<'_> {
             true,
         );
 
-        launcher.bind(|launcher| self.install(service, launcher))
+        launcher.bind(|launcher| self.install(service, vm_service, launcher))
     }
 
     /// Install GUI packages, display services, Qubes RPCs and application refresh timers.
-    fn install(&self, service: NixValue, launcher: NixValue) -> NixValue {
+    fn install(&self, service: NixValue, vm_service: NixValue, launcher: NixValue) -> NixValue {
         let hybrid = self.setting("displayMode").equals("hybrid");
         let agent = self.package("qubes-gui-agent-linux");
         let login = self.script(
@@ -371,11 +374,20 @@ impl Gui<'_> {
                     "display-manager": nix_record! {
                         "wantedBy": self
                             .force(self.optional(physical_boot, strings(&["graphical.target"]))),
-                        "requires": qubes_gui.clone(),
+                        "requires": NixValue::concat_lists([
+                            strings(&["airlock-qubes-rw-init.service", "systemd-user-sessions.service"]),
+                            qubes_gui.clone(),
+                        ]),
                         "after": NixValue::concat_lists([
                             strings(&["airlock-qubes-rw-init.service"]),
                             qubes_gui,
                         ]),
+                        "serviceConfig": nix_record! {
+                            "ExecStartPre": nix_text!(
+                                "{service}/bin/airlock-vm-service runtime private-storage-check",
+                                service = vm_service,
+                            ),
+                        },
                     },
                     "qubes-gui-agent": nix_record! {
                         "enable": hybrid.clone(),

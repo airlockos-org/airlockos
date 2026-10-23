@@ -12,6 +12,41 @@ pub(super) fn gpu_selection(inputs: NixValue) -> NixValue {
         .bind(gui_gpu_assignment_gpu_selection_5)
 }
 
+/// Inspect login's live-storage gates without realizing packages or service-script contents.
+pub(super) fn private_storage(inputs: NixValue) -> NixValue {
+    let configurations = NixValue::builtin("getFlake")
+        .call(inputs.select("root").to_text())
+        .select("nixosConfigurations");
+    let service = |config: NixValue, name: &str| {
+        let unit = config.select_segments(["systemd", "services", name]);
+        NixValue::record([
+            ("requires", unit.clone().select("requires")),
+            ("after", unit.clone().select("after")),
+            (
+                "check",
+                unit.select_segments(["serviceConfig", "ExecStartPre"]),
+            ),
+        ])
+    };
+    let mut profiles = Vec::new();
+    for (profile, configuration, graphical) in [
+        ("physical", "airlock-domain-sys-gui-usb-gui-lab", true),
+        ("hybrid", "airlock-domain-sys-gui-usb", true),
+        ("personal", "airlock-domain-usr-home", false),
+    ] {
+        let config = configurations
+            .clone()
+            .select(configuration)
+            .select("config");
+        let mut services = vec![("sessions", service(config.clone(), "systemd-user-sessions"))];
+        if graphical {
+            services.push(("display", service(config, "display-manager")));
+        }
+        profiles.push((profile, NixValue::record(services)));
+    }
+    NixValue::record(profiles)
+}
+
 /// Inspect evaluated configuration for test machine hardware module replaces lab gpu assignment.
 pub(super) fn hardware_override(inputs: NixValue) -> NixValue {
     NixValue::builtin("getFlake")

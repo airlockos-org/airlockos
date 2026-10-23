@@ -1,6 +1,9 @@
 //! Observe the graphical login and admitted worker mounts without starting services.
 
-use airlock_vm_service::support;
+use airlock_vm_service::{
+    private_storage::{self, ReadyStorage},
+    support,
+};
 use anyhow::{Context, Result, ensure};
 use clap::{Args, Subcommand, ValueEnum};
 use serde_json::Value;
@@ -21,7 +24,7 @@ pub(crate) struct Request {
 
 #[derive(Subcommand)]
 enum Action {
-    /// Require the display manager and an active local graphical greeter or user session.
+    /// Require live private storage, the display manager and an active local graphical session.
     Desktop,
     /// Require this worker's service, mounted store layers and authenticated readiness identity.
     BuildStore {
@@ -61,17 +64,15 @@ fn query(program: &str, arguments: &[&str], deadline: Instant) -> Result<String>
 }
 
 /// A running GDM process alone does not establish that its graphical login has started.
-fn desktop(deadline: Instant) -> Result<()> {
+fn desktop(
+    _storage: ReadyStorage,
+    mut query: impl FnMut(&str, &[&str]) -> Result<String>,
+) -> Result<()> {
     query(
         "systemctl",
         &["is-active", "--quiet", "display-manager.service"],
-        deadline,
     )?;
-    let sessions = query(
-        "loginctl",
-        &["list-sessions", "--no-legend", "--no-pager"],
-        deadline,
-    )?;
+    let sessions = query("loginctl", &["list-sessions", "--no-legend", "--no-pager"])?;
     ensure!(sessions.lines().count() <= 64, "too many login sessions");
     for line in sessions.lines() {
         let id = line
@@ -95,7 +96,6 @@ fn desktop(deadline: Instant) -> Result<()> {
                 "--property=Remote",
                 "--property=Seat",
             ],
-            deadline,
         );
         // A session may disappear while a greeter hands over to the logged-in user.
         let Ok(observation) = observation else {
@@ -122,7 +122,17 @@ fn desktop(deadline: Instant) -> Result<()> {
 pub(crate) fn execute(request: Request) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(10);
     match request.action {
-        Action::Desktop => desktop(deadline),
+        Action::Desktop => {
+            query(
+                "systemctl",
+                &["is-active", "--quiet", "airlock-qubes-rw-init.service"],
+                deadline,
+            )?;
+            let storage = private_storage::observe()?;
+            desktop(storage, |program, arguments| {
+                query(program, arguments, deadline)
+            })
+        }
         Action::BuildStore {
             domain,
             root,
@@ -151,6 +161,92 @@ pub(crate) fn execute(request: Request) -> Result<()> {
                 "worker build store belongs to another role"
             );
             Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use airlock_machine_planning::private_storage::{Device, Mount, PrivateMount};
+
+    /// Construct the same opaque evidence as the live adapter, using an inert kernel observation.
+    fn storage() -> ReadyStorage {
+        let device = Device {
+            major: 202,
+            minor: 16,
+        };
+        let mounts = [
+            ("/", "/rw"),
+            ("/home", "/home"),
+            ("/usrlocal", "/usr/local"),
+        ]
+        .map(|(root, target)| Mount {
+            device,
+            root: root.into(),
+            target: target.into(),
+            filesystem: "ext4".into(),
+            writable: true,
+            nosuid: true,
+            nodev: true,
+        })
+        .into_iter()
+        .collect();
+        PrivateMount::check(device, mounts)
+            .unwrap()
+            .ready()
+            .unwrap()
+    }
+
+    /// Persistent mounts do not make a console, remote session or inactive display a healthy desktop.
+    #[test]
+    fn desktop_requires_a_local_active_graphical_login() {
+        for (state, observation, accepted) in [
+            (
+                "greeter",
+                "Class=greeter\nType=wayland\nState=active\nActive=yes\nRemote=no\nSeat=seat0\n",
+                true,
+            ),
+            (
+                "user",
+                "Class=user\nType=x11\nState=active\nActive=yes\nRemote=no\nSeat=seat0\n",
+                true,
+            ),
+            (
+                "console",
+                "Class=user\nType=tty\nState=active\nActive=yes\nRemote=no\nSeat=seat0\n",
+                false,
+            ),
+            (
+                "remote",
+                "Class=user\nType=x11\nState=active\nActive=yes\nRemote=yes\nSeat=\n",
+                false,
+            ),
+            (
+                "inactive",
+                "Class=greeter\nType=wayland\nState=online\nActive=no\nRemote=no\nSeat=seat0\n",
+                false,
+            ),
+            ("no-session", "", false),
+            ("failed-manager", "", false),
+        ] {
+            let result = desktop(storage(), |program, arguments| match (program, arguments) {
+                ("systemctl", ["is-active", "--quiet", "display-manager.service"]) => {
+                    ensure!(state != "failed-manager", "inactive display");
+                    Ok(String::new())
+                }
+                ("loginctl", ["list-sessions", "--no-legend", "--no-pager"]) => {
+                    Ok(if state == "no-session" {
+                        ""
+                    } else {
+                        "c1 42 gdm seat0 tty1\n"
+                    }
+                    .into())
+                }
+                ("loginctl", ["show-session", "c1", ..]) => Ok(observation.into()),
+                _ => anyhow::bail!("unexpected desktop probe"),
+            });
+            assert_eq!(result.is_ok(), accepted, "{state}: {result:?}");
         }
     }
 }
