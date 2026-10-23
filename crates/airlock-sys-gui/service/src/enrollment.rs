@@ -1,6 +1,6 @@
 //! Keep enrollment interactive while explaining startup delays and Qubes transport failures.
 
-use crate::startup;
+use crate::{launch, startup};
 use airlock_vm_service::support;
 use anyhow::{Result, bail};
 use std::{
@@ -23,8 +23,27 @@ fn ready_for_enrollment(state: &startup::Status) -> bool {
         })
 }
 
-/// Wait only for read-only startup evidence; submit the enrollment RPC exactly once afterward.
+/// Report bootstrap failures without opening a local GUI-domain terminal.
 pub(crate) fn execute(timeout: u64) -> Result<u8> {
+    let result = open(timeout);
+    if let Err(error) = &result {
+        let _ = support::run(
+            Command::new(support::tool("AIRLOCK_NOTIFY_SEND", "notify-send")).args([
+                "--app-name=Airlock",
+                "--",
+                "Tailscale could not be opened",
+                &format!("{error:#}"),
+            ]),
+            None,
+            Duration::from_secs(5),
+        );
+    }
+
+    result
+}
+
+/// Wait for read-only startup evidence, then launch the assistant's application once.
+fn open(timeout: u64) -> Result<u8> {
     let deadline = Instant::now() + Duration::from_secs(timeout);
     let mut previous = String::new();
     loop {
@@ -57,6 +76,18 @@ pub(crate) fn execute(timeout: u64) -> Result<u8> {
         };
         if message != previous {
             println!("{message}");
+            if previous.is_empty() {
+                let _ = support::run(
+                    Command::new(support::tool("AIRLOCK_NOTIFY_SEND", "notify-send")).args([
+                        "--app-name=Airlock",
+                        "--",
+                        "Preparing Tailscale",
+                        "Waiting for the network and usr-assistant. The connection window will open in usr-assistant when ready.",
+                    ]),
+                    None,
+                    Duration::from_secs(5),
+                );
+            }
             previous = message;
         }
         thread::sleep(
@@ -66,28 +97,20 @@ pub(crate) fn execute(timeout: u64) -> Result<u8> {
         );
     }
 
-    println!("Network and usr-assistant are ready. Requesting Tailscale enrollment...");
-    // Inherit the terminal so route/DNS errors and the browser login URL appear immediately.
-    // The upstream timeout bounds transport and login without replaying an uncertain request.
-    let status = Command::new(support::tool("AIRLOCK_TIMEOUT", "timeout"))
-        .args(["--foreground", "--kill-after=5s", "180s"])
-        .arg(support::tool("AIRLOCK_QVM_RUN", "qvm-run"))
-        .args([
-            "--pass-io",
-            "--no-gui",
-            "--service",
-            "usr-assistant",
-            "airlock.DevTailscaleUp",
-        ])
-        .status()?;
-    let code = status
-        .code()
-        .and_then(|v| u8::try_from(v).ok())
-        .unwrap_or(1);
+    println!("Network and usr-assistant are ready. Opening Tailscale in usr-assistant...");
+    // The normal launch path owns session readiness, trusted VM identity and workspace rollback.
+    // Application lifetime is unbounded; enrollment itself retains its own two-minute timeout.
+    let code = launch::execute(launch::Request {
+        label: "usr-assistant: Connect Tailscale".into(),
+        target: "usr-assistant".parse()?,
+        service: Some("qubes.StartApp+airlock-tailscale".into()),
+        workspace: true,
+        readiness_timeout: 90,
+    })?;
     match code {
-        0 => println!("Tailscale enrollment completed."),
+        0 => {}
         124 => eprintln!(
-            "The enrollment request timed out. Check startup and network connectivity before retrying; the request was not automatically repeated."
+            "The assistant's graphical session did not become ready; enrollment was not requested."
         ),
         126 => eprintln!(
             "Qubes could not complete the request. A refusal can mean a policy restriction or an interrupted control service; it does not establish that Tailscale rejected the login. Check the details above and retry after startup is stable."

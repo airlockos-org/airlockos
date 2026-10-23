@@ -122,6 +122,8 @@ enum Action {
     ExistingUplinks,
     /// Enroll the development assistant after bounded network checks.
     TailscaleUp,
+    /// Enroll through the assistant user's exact sudo helper, without cross-VM caller authority.
+    TailscaleUpLocal,
 }
 
 /// Capture one small upstream command without unbounded inherited pipes.
@@ -364,6 +366,22 @@ fn tailscale() -> Result<()> {
                 .is_empty(),
         "unauthorized Tailscale enrollment caller or argument"
     );
+
+    enroll_tailscale()
+}
+
+/// Perform the same bounded enrollment for the fixed local sudo helper.
+fn tailscale_local() -> Result<()> {
+    ensure!(
+        rustix::process::geteuid().is_root(),
+        "local Tailscale enrollment requires the installed privileged helper"
+    );
+
+    enroll_tailscale()
+}
+
+/// Check the assistant's network path before invoking the upstream interactive login once.
+fn enroll_tailscale() -> Result<()> {
     println!("Checking the Internet connection from usr-assistant...");
     ensure!(
         !text(Command::new("ip").args(["-4", "route", "show", "default"]))?.is_empty(),
@@ -665,6 +683,7 @@ pub(crate) fn execute(request: Request) -> Result<()> {
             }
         }
         Action::TailscaleUp => tailscale()?,
+        Action::TailscaleUpLocal => tailscale_local()?,
     }
     Ok(())
 }

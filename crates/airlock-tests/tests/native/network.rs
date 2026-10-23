@@ -89,6 +89,42 @@ fn development_enrollment_reports_each_network_failure() -> Result<()> {
         assert_eq!(output.status.success(), failure.is_empty());
         assert_eq!(fixture.path().join("enrolled").exists(), failure.is_empty());
     }
+
+    // A caller spelling cannot replace local privilege; sudo admits the one installed helper.
+    let fixture = fixture(json!({}))?;
+    let mut local = Command::new(common::binary(
+        "AIRLOCK_VM_SERVICE_BIN",
+        "airlock-vm-service",
+    ));
+    local
+        .args(["runtime", "tailscale-up-local"])
+        .env("QREXEC_REMOTE_DOMAIN", "sys-gui")
+        .env("AIRLOCK_TEST_NETWORK_ROOT", fixture.path())
+        .env(
+            "PATH",
+            format!(
+                "{bin}:{path}",
+                bin = fixture.path().join("bin").display(),
+                path = std::env::var("PATH")?
+            ),
+        );
+
+    let output = common::run(&mut local, None)?;
+    assert_eq!(
+        output.status.success(),
+        rustix::process::geteuid().is_root()
+    );
+    assert_eq!(
+        fixture.path().join("enrolled").exists(),
+        rustix::process::geteuid().is_root()
+    );
+    if !rustix::process::geteuid().is_root() {
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("requires the installed privileged helper")
+        );
+        assert!(!fixture.path().join("calls.jsonl").exists());
+    }
     Ok(())
 }
 
@@ -119,8 +155,21 @@ fn desktop_enrollment_waits_for_startup_and_explains_refusal() -> Result<()> {
             {"contains":"airlock.BootStatus","exists":"status-seen","stdout":ready.to_string()},
             {"contains":"airlock.BootStatus","exists":"transport-seen","stdout":pending.to_string(),"write":{"status-seen":""}},
             {"contains":"airlock.BootStatus","exit":126,"stderr":"Request refused","write":{"transport-seen":""}},
-            {"contains":"airlock.DevTailscaleUp","exit":outcome,"stdout":if outcome == 0 {"Login URL: https://login.example.test/fixture\n"} else {""},"stderr":if outcome == 126 {"Request refused"} else {""}}
+            {"contains":"airlock.AppSessionReady"},
+            {"contains":"qubes.StartApp+airlock-tailscale","exit":outcome,"stderr":if outcome == 126 {"Request refused"} else {""}}
         ]))?;
+        peers.rules("desktop-qrexec", json!([
+            {"contains":"admin.vm.feature.Get+supported-rpc.airlock.AppSessionReady","stdout":"0\u{0000}1"},
+            {"contains":"admin.vm.property.Get+uuid","stdout":"0\u{0000}default=False type=str 738a6af9-8e51-590d-afe4-790b26fbca79"}
+        ]))?;
+        peers.rules("workspace-bus", json!([
+            {"contains":"org.airlock.Workspaces.Prepare","stdout":"('728a6af9-8e51-590d-afe4-790b26fbca79',)"},
+            {"contains":"org.airlock.Workspaces.Cancel"}
+        ]))?;
+        for name in ["systemd-cat", "notify-send"] {
+            peers.rules(name, json!([{}]))?;
+        }
+
         let output = common::run(
             peers
                 .command(common::binary(
@@ -128,7 +177,11 @@ fn desktop_enrollment_waits_for_startup_and_explains_refusal() -> Result<()> {
                     "airlock-sys-gui-service",
                 ))?
                 .args(["tailscale-enrollment", "--startup-timeout", "10"])
-                .env("AIRLOCK_QVM_RUN", peers.path("bin/qvm-run")),
+                .env("AIRLOCK_QVM_RUN", peers.path("bin/qvm-run"))
+                .env("AIRLOCK_QREXEC_CLIENT_VM", peers.path("bin/desktop-qrexec"))
+                .env("AIRLOCK_GDBUS", peers.path("bin/workspace-bus"))
+                .env("AIRLOCK_SYSTEMD_CAT", peers.path("bin/systemd-cat"))
+                .env("AIRLOCK_NOTIFY_SEND", peers.path("bin/notify-send")),
             None,
         )?;
         assert_eq!(
@@ -143,20 +196,41 @@ fn desktop_enrollment_waits_for_startup_and_explains_refusal() -> Result<()> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stdout.contains("Preparing usr-assistant"));
         assert!(stdout.contains("Network and usr-assistant are ready"));
-        assert_eq!(stdout.contains("Login URL:"), outcome == 0);
         if outcome == 126 {
             assert!(stderr.contains("policy restriction or an interrupted control service"));
         }
-        assert_eq!(
-            peers
-                .calls()?
+
+        let calls = peers.calls()?;
+        let count = |argument: &str| {
+            calls
                 .iter()
-                .filter(|call| call["args"]
+                .filter(|call| call["args"].as_array().unwrap().contains(&json!(argument)))
+                .count()
+        };
+        assert_eq!(count("qubes.StartApp+airlock-tailscale"), 1);
+        assert_eq!(count("org.airlock.Workspaces.Prepare"), 1);
+        assert_eq!(
+            count("org.airlock.Workspaces.Cancel"),
+            usize::from(outcome != 0)
+        );
+        let launch = calls
+            .iter()
+            .find(|call| {
+                call["args"]
                     .as_array()
                     .unwrap()
-                    .contains(&json!("airlock.DevTailscaleUp")))
-                .count(),
-            1
+                    .contains(&json!("qubes.StartApp+airlock-tailscale"))
+            })
+            .unwrap();
+        assert_eq!(
+            launch["args"],
+            json!([
+                "--auto",
+                "--gui",
+                "--service",
+                "usr-assistant",
+                "qubes.StartApp+airlock-tailscale"
+            ])
         );
     }
     Ok(())
@@ -171,6 +245,7 @@ fn desktop_enrollment_requires_successful_startup() -> Result<()> {
             "qvm-run",
             json!([{"contains":"airlock.BootStatus","stdout":json!({"status":state,"desktop_ready":true,"detail":"Preparing usr-home"}).to_string()}]),
         )?;
+        peers.rules("notify-send", json!([{}]))?;
         let output = common::run(
             peers
                 .command(common::binary(
@@ -178,7 +253,8 @@ fn desktop_enrollment_requires_successful_startup() -> Result<()> {
                     "airlock-sys-gui-service",
                 ))?
                 .args(["tailscale-enrollment", "--startup-timeout", "1"])
-                .env("AIRLOCK_QVM_RUN", peers.path("bin/qvm-run")),
+                .env("AIRLOCK_QVM_RUN", peers.path("bin/qvm-run"))
+                .env("AIRLOCK_NOTIFY_SEND", peers.path("bin/notify-send")),
             None,
         )?;
         assert!(!output.status.success());
@@ -187,8 +263,14 @@ fn desktop_enrollment_requires_successful_startup() -> Result<()> {
             !call["args"]
                 .as_array()
                 .unwrap()
-                .contains(&json!("airlock.DevTailscaleUp"))
+                .contains(&json!("qubes.StartApp+airlock-tailscale"))
         }));
+        assert!(
+            peers
+                .calls()?
+                .iter()
+                .any(|call| call["command"] == "notify-send")
+        );
     }
     Ok(())
 }

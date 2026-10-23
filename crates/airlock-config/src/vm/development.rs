@@ -52,12 +52,57 @@ pub(super) fn module() -> NixValue {
             nix_record! {
                 "program": nix_text!("{native}/bin/airlock-vm-service", native = native.clone()),
                 "args": NixValue::list(["runtime".into(), "tailscale-up".into()]),
-                "prefix_env": nix_record! { "PATH": tailscale_path },
+                "prefix_env": nix_record! { "PATH": tailscale_path.clone() },
             },
             false,
         );
 
+        // The assistant's ordinary user elevates only this fixed enrollment operation.
+        // Qrexec cannot connect a VM back to itself, so its existing RPC is for remote callers.
+        let local_enrollment = airlock_build::native::command(
+            pkgs,
+            "airlock-tailscale-enroll",
+            nix_record! {
+                "program": nix_text!("{native}/bin/airlock-vm-service", native = native.clone()),
+                "args": NixValue::list(["runtime".into(), "tailscale-up-local".into()]),
+                "prefix_env": nix_record! { "PATH": tailscale_path },
+            },
+            false,
+        );
+        let enrollment_window = airlock_build::native::writer(pkgs, true)
+            .call("airlock-connect-tailscale")
+            .call(crate::commands::contract(
+                pkgs,
+                "usr-assistant-tailscale-window",
+                [
+                    ("xterm", package("xterm")),
+                    ("enrollment", local_enrollment.clone()),
+                ],
+            ));
+
+        let enrollment_desktop = package("makeDesktopItem").call(nix_record! {
+            "name": "airlock-tailscale",
+            "desktopName": "Connect Tailscale",
+            "comment": "Connect usr-assistant to Tailscale and display the login URL",
+            "exec": nix_text!("{window}/bin/airlock-connect-tailscale", window = enrollment_window.clone()),
+            "icon": "network-workgroup",
+            "categories": NixValue::list(["System".into(), "Network".into()]),
+        });
+
         let configuration = nix_record! {
+            "security": nix_record! {
+                "sudo": nix_record! {
+                    "extraRules": NixValue::list([nix_record! {
+                        "users": NixValue::list([user.clone()]),
+                        "runAs": "root",
+                        "commands": NixValue::list([nix_record! {
+                            // Sudo's empty argument string admits only an invocation without arguments.
+                            "command": nix_text!(r#"{enrollment} """#, enrollment = local_enrollment),
+                            "options": NixValue::list(["NOPASSWD".into()]),
+                        }]),
+                    }]),
+                },
+            },
             "services": nix_record! {
                 "tailscale": nix_record! {
                     "enable": true,
@@ -93,15 +138,18 @@ pub(super) fn module() -> NixValue {
                 },
             },
             "environment": nix_record! {
-                "systemPackages": packages(&[
-                    "codex",
-                    "gnome-console",
-                    "gnumake",
-                    "jq",
-                    "python3",
-                    "ripgrep",
-                    "uv",
-                    "zellij",
+                "systemPackages": NixValue::concat_lists([
+                    packages(&[
+                        "codex",
+                        "gnome-console",
+                        "gnumake",
+                        "jq",
+                        "python3",
+                        "ripgrep",
+                        "uv",
+                        "zellij",
+                    ]),
+                    NixValue::list([enrollment_window, enrollment_desktop]),
                 ]),
                 "sessionVariables": nix_record! {
                     "CODEX_HOME": cfg.clone().select("codexHome"),

@@ -16,17 +16,17 @@ use std::{
 #[derive(Args)]
 pub(crate) struct Request {
     /// Human-readable application name used only in failure notifications.
-    label: String,
+    pub(super) label: String,
     /// VM selected by the installed launcher or the user's explicit menu refresh.
-    target: GuestName,
+    pub(super) target: GuestName,
     /// Qubes RPC submitted once after readiness; omission only waits for the session.
-    service: Option<String>,
+    pub(super) service: Option<String>,
     /// Reserve a GNOME workspace immediately before submitting the application.
     #[arg(long)]
-    workspace: bool,
+    pub(super) workspace: bool,
     /// Total readiness budget, including feature discovery, qrexec, and retry delays.
     #[arg(long, default_value_t = 90, value_parser = clap::value_parser!(u64).range(1..=90))]
-    readiness_timeout: u64,
+    pub(super) readiness_timeout: u64,
 }
 
 /// Retain bounded failure evidence even if repeated readiness helpers are noisy.

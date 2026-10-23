@@ -207,6 +207,32 @@ fn usb_lab_network_and_development_access_body(captures: Bindings) -> NixValue {
     let tailscale_launcher = captures.get("tailscale_launcher");
 
     {
+        let assistant_package = |name: &str| {
+            NixValue::builtin("head").call(
+                NixValue::builtin("filter")
+                    .call(NixValue::function(|package| {
+                        package.attr_or("name", "").equals(name)
+                    }))
+                    .call(
+                        dev.clone()
+                            .select_segments(["environment", "systemPackages"]),
+                    ),
+            )
+        };
+        let assistant_window =
+            assistant_package("airlock-connect-tailscale").select("airlockCommand");
+        let local_enrollment = NixValue::builtin("elemAt")
+            .call(assistant_window.clone().select("args"))
+            .call(
+                NixValue::builtin("sub")
+                    .call(NixValue::builtin("length").call(assistant_window.clone().select("args")))
+                    .call(1_i64),
+            );
+        let assistant_desktop = NixValue::builtin("readFile").call(NixValue::concat_text([
+            assistant_package("airlock-tailscale.desktop").to_text(),
+            "/share/applications/airlock-tailscale.desktop".into(),
+        ]));
+
         let field_tailscale_desktop = NixValue::builtin("readFile").call(NixValue::concat_text([
             tailscale_desktop.clone().to_text(),
             NixValue::from("/share/applications/airlock-start-usr-assistant-tailscale.desktop"),
@@ -736,6 +762,18 @@ fn usb_lab_network_and_development_access_body(captures: Bindings) -> NixValue {
                 ])),
             ),
             ("tailscaleDesktop", field_tailscale_desktop),
+            ("tailscaleAssistantDesktop", assistant_desktop),
+            ("tailscaleWindow", assistant_window),
+            ("tailscaleLocalHelper", local_enrollment.clone()),
+            (
+                "tailscaleLocalEnrollment",
+                native_contract(local_enrollment),
+            ),
+            (
+                "tailscaleSudo",
+                dev.clone()
+                    .select_segments(["security", "sudo", "extraRules"]),
+            ),
             (
                 "tailscaleHandler",
                 native_contract(dev.clone().select_segments([

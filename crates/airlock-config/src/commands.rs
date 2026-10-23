@@ -252,7 +252,7 @@ pub(crate) fn contract<const N: usize>(
             &["tailscale-enrollment"],
             false,
         ),
-        "usr-assistant-tailscale-launcher" => (
+        "usr-assistant-tailscale-window" => (
             "@xterm@/bin/xterm",
             &[
                 "-hold",
@@ -265,6 +265,8 @@ pub(crate) fn contract<const N: usize>(
                 "-T",
                 "Start usr-assistant Tailscale",
                 "-e",
+                "/run/wrappers/bin/sudo",
+                "-n",
                 "@enrollment@",
             ],
             false,

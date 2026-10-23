@@ -500,7 +500,67 @@ fn package_usb_lab_keeps_network_dependencies_and_development_authority_explicit
         &report["tailscalePolicy"],
         "airlock.DevTailscaleUp * @anyvm @anyvm deny",
     );
+    assert!(
+        text(&report["tailscaleLauncher"]["program"]).ends_with("/bin/airlock-sys-gui-service")
+    );
+    assert_eq!(
+        report["tailscaleLauncher"]["args"],
+        json!(["tailscale-enrollment"])
+    );
+    includes(
+        &report["tailscaleAssistantDesktop"],
+        "Name=Connect Tailscale",
+    );
+    includes(
+        &report["tailscaleAssistantDesktop"],
+        "/bin/airlock-connect-tailscale",
+    );
+
+    let helper = text(&report["tailscaleLocalHelper"]);
+    assert_eq!(
+        report["tailscaleLocalEnrollment"]["args"],
+        json!(["runtime", "tailscale-up-local"])
+    );
+    let sudo_command = format!(r#"{helper} """#);
+    let sudo_rule = report["tailscaleSudo"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|rule| {
+            rule["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|command| command["command"] == sudo_command)
+        })
+        .context("missing local enrollment sudo rule")?;
+    assert_eq!(sudo_rule["users"], json!(["user"]));
+    assert_eq!(sudo_rule["runAs"], "root");
+    assert_eq!(
+        sudo_rule["commands"],
+        json!([{"command":sudo_command,"options":["NOPASSWD"]}])
+    );
+
+    // Run the authored window contract with an inert terminal; sudo stays inside the VM window.
     let temporary = tempfile::tempdir()?;
+    let mut window = report["tailscaleWindow"].clone();
+    assert!(text(&window["program"]).ends_with("/bin/xterm"));
+    let mut peers = common::peers::Peers::new()?;
+    peers.rules("enrollment-terminal", json!([{}]))?;
+    window["program"] = json!(peers.path("bin/enrollment-terminal"));
+    let mut launch = common::launcher(temporary.path(), &window)?;
+    peers.environment(&mut launch)?;
+
+    common::run(&mut launch, None)?.checked()?;
+
+    let calls = peers.calls()?;
+    let args = calls[0]["args"].as_array().unwrap();
+    let terminal_command = args.iter().position(|arg| arg == "-e").unwrap();
+    assert_eq!(
+        &args[terminal_command + 1..],
+        &[json!("/run/wrappers/bin/sudo"), json!("-n"), json!(helper)]
+    );
+
     let mut enrollment = report["tailscaleHandler"].clone();
     assert_eq!(enrollment["args"], json!(["runtime", "tailscale-up"]));
     // Execute the actual native guard with an untrusted caller or service argument.

@@ -494,23 +494,14 @@ impl Gui<'_> {
         NixValue::list([command, desktop])
     }
 
-    /// Keep development-only Tailnet enrollment in its existing explicit terminal shortcut.
+    /// Keep bootstrap readiness on the GUI side while the assistant owns the enrollment window.
     fn enrollment(&self, service: &NixValue) -> NixValue {
-        let enrollment = self.script(
+        let launcher = self.script(
             "airlock-start-usr-assistant-tailscale",
             crate::commands::contract(
                 &self.context.pkgs,
                 "usr-assistant-tailscale-enrollment",
                 [("service", service.clone())],
-            ),
-            false,
-        );
-        let launcher = self.script(
-            "airlock-start-usr-assistant-tailscale",
-            crate::commands::contract(
-                &self.context.pkgs,
-                "usr-assistant-tailscale-launcher",
-                [("xterm", self.package("xterm")), ("enrollment", enrollment)],
             ),
             true,
         );
