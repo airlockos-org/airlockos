@@ -408,7 +408,13 @@ fn nix(action: &str, prepared: &Prepared, offline: bool) -> Command {
 fn preflight(request: &Request, offline: bool) -> Result<Prepared> {
     clean(&request.repo)?;
     private(&request.state)?;
-    private(&request.store)?;
+    // The builder service owns the mount hierarchy. Its root stays root-owned
+    // and non-writable while Nix writes through the admitted overlay backend.
+    ensure!(
+        request.store.is_dir(),
+        "private Nix store root is missing or not a directory: {store}",
+        store = request.store.display()
+    );
     let stat = rustix::fs::statvfs(&request.store)?;
     let available = stat
         .f_bavail

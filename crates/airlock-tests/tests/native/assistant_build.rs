@@ -5,7 +5,7 @@ use airlock_tests::repository::{Repository, git};
 use anyhow::Result;
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::fs;
+use std::{fs, os::unix::fs::PermissionsExt};
 
 /// Run the installed native worker with isolated source, store and manifest paths.
 fn command(peers: &Peers) -> Result<std::process::Command> {
@@ -31,6 +31,8 @@ fn command(peers: &Peers) -> Result<std::process::Command> {
 
 /// Fake only the build tools; Git identity, native failure propagation, metadata parsing and the sender barrier remain real.
 fn setup(peers: &mut Peers, failure: &str) -> Result<()> {
+    fs::create_dir(peers.path("store"))?;
+
     peers.rules("make", json!([{"stdout": "path:/prepared-machine\n"}]))?;
     peers.rules(
         "stat",
@@ -50,9 +52,24 @@ fn setup(peers: &mut Peers, failure: &str) -> Result<()> {
 fn assistant_admission_stops_before_sending_on_failure() -> Result<()> {
     let source = Repository::new()?;
     let machine = source.root.join("airlock-machine");
-    for failure in ["preflight", "build", "interrupt", "json", "closure"] {
+    for failure in [
+        "store-missing",
+        "store-file",
+        "preflight",
+        "build",
+        "interrupt",
+        "json",
+        "closure",
+    ] {
         let mut peers = Peers::new()?;
         setup(&mut peers, failure)?;
+        if matches!(failure, "store-missing" | "store-file") {
+            fs::remove_dir(peers.path("store"))?;
+            if failure == "store-file" {
+                fs::write(peers.path("store"), b"not a mounted store")?;
+            }
+        }
+
         let mut command = command(&peers)?;
         command
             .args(["build", "admit", "usr-home"])
@@ -62,6 +79,13 @@ fn assistant_admission_stops_before_sending_on_failure() -> Result<()> {
         let result = common::run(&mut command, None)?;
         assert!(!result.status.success(), "{failure}");
         assert!(!peers.path("unexpected-send").exists());
+        if matches!(failure, "store-missing" | "store-file") {
+            assert!(peers.calls()?.is_empty());
+            assert!(
+                String::from_utf8_lossy(&result.stderr)
+                    .contains("private Nix store root is missing or not a directory")
+            );
+        }
         if failure != "closure" {
             assert!(!peers.calls()?.iter().any(|call| {
                 call["args"]
@@ -80,7 +104,7 @@ fn assistant_admission_stops_before_sending_on_failure() -> Result<()> {
     Ok(())
 }
 
-/// Offline builds pass exact pinned source overrides and reject a changed lock before invoking the builder.
+/// Offline builds preserve protected mount permissions, pass exact pinned inputs and reject a changed lock.
 #[test]
 fn assistant_offline_build_binds_input_lock() -> Result<()> {
     let source = Repository::new()?;
@@ -89,6 +113,7 @@ fn assistant_offline_build_binds_input_lock() -> Result<()> {
     setup(&mut peers, "")?;
     let input = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-source";
     fs::create_dir_all(peers.path("store").join(input.trim_start_matches('/')))?;
+    fs::set_permissions(peers.path("store"), fs::Permissions::from_mode(0o555))?;
     let hash = format!(
         "{hash:x}",
         hash = Sha256::digest(fs::read(machine.join("flake.lock"))?)
@@ -108,6 +133,13 @@ fn assistant_offline_build_binds_input_lock() -> Result<()> {
         String::from_utf8(execute()?.checked()?)?.trim(),
         "/nix/store/test-system"
     );
+    let store_mode = fs::metadata(peers.path("store"))?.permissions().mode() & 0o777;
+    fs::set_permissions(peers.path("store"), fs::Permissions::from_mode(0o755))?;
+    assert_eq!(
+        store_mode, 0o555,
+        "preflight must preserve the builder service's protected mount hierarchy"
+    );
+
     let calls = peers.calls()?;
     let args = calls
         .iter()
