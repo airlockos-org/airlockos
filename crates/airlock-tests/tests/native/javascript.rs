@@ -188,7 +188,11 @@ fn javascript_workspaces_preserve_ownership_and_review_attention() -> Result<()>
     ] {
         javascript("workspace", scenario, json!({}), shell)?;
     }
-    for wm_class in ["sys-ctrl:airlock-ctrl", "sys-ctrl:org.airlock.ctrl"] {
+    for wm_class in [
+        "sys-ctrl:airlock-sys-ctrl-gui",
+        "sys-ctrl:airlock-ctrl",
+        "sys-ctrl:org.airlock.ctrl",
+    ] {
         javascript(
             "workspace",
             "new_control_review_switches_workspace_and_focuses_once",
@@ -197,12 +201,12 @@ fn javascript_workspaces_preserve_ownership_and_review_attention() -> Result<()>
         )?;
     }
     for options in [
-        json!({"origin": {"kind": "vm", "name": "usr-home"}, "wmClass": "sys-ctrl:airlock-ctrl"}),
-        json!({"origin": {"kind": "unknown"}, "wmClass": "sys-ctrl:airlock-ctrl"}),
-        json!({"origin": {"kind": "local", "name": "sys-gui"}, "wmClass": "sys-ctrl:airlock-ctrl"}),
+        json!({"origin": {"kind": "vm", "name": "usr-home"}, "wmClass": "sys-ctrl:airlock-sys-ctrl-gui"}),
+        json!({"origin": {"kind": "unknown"}, "wmClass": "sys-ctrl:airlock-sys-ctrl-gui"}),
+        json!({"origin": {"kind": "local", "name": "sys-gui"}, "wmClass": "sys-ctrl:airlock-sys-ctrl-gui"}),
         json!({"wmClass": "sys-ctrl:org.gnome.Console"}),
-        json!({"wmClass": "sys-ctrl:airlock-ctrl-spoof"}),
-        json!({"wmClass": "org.airlock.ctrl"}),
+        json!({"wmClass": "sys-ctrl:airlock-sys-ctrl-gui-spoof"}),
+        json!({"wmClass": "airlock-sys-ctrl-gui"}),
         json!({"kind": 1}),
         json!({"transient": true}),
     ] {

@@ -25,7 +25,8 @@ const WORKSPACE_XML = `<node><interface name="org.airlock.Workspaces">
 const TYPES = [Meta.WindowType.NORMAL, Meta.WindowType.DIALOG, Meta.WindowType.MODAL_DIALOG];
 // Qubes prefixes both WM_CLASS fields with the originating VM name. The X11
 // backend uses the executable name; app-id based backends use org.airlock.ctrl.
-const REVIEW_CLASSES = new Set(['sys-ctrl:airlock-ctrl-gui', 'sys-ctrl:airlock-ctrl', 'sys-ctrl:org.airlock.ctrl']);
+const REVIEW_CLASSES = new Set(['sys-ctrl:airlock-sys-ctrl-gui', 'sys-ctrl:airlock-ctrl-gui',
+    'sys-ctrl:airlock-ctrl', 'sys-ctrl:org.airlock.ctrl']);
 
 export default class VMWorkspacesExtension extends Extension {
     enable() {

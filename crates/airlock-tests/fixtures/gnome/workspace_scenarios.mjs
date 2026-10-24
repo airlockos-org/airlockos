@@ -126,7 +126,7 @@ function reviewDesktop(){
  ext._sync();home.workspace.activate();
  return {ext,home,terminal};
 }
-function openReview(ext,{origin={kind:'vm',name:'sys-ctrl'},wmClass='sys-ctrl:airlock-ctrl',kind=0,transient=false}={}){
+function openReview(ext,{origin={kind:'vm',name:'sys-ctrl'},wmClass='sys-ctrl:airlock-sys-ctrl-gui',kind=0,transient=false}={}){
  const window=new Window(wm.current,kind);
  Object.assign(window,{origin,wmClass,parent:transient?[...allWindows][0]:null,title:'Airlock Control'});
  actors.push({meta_window:window});
@@ -173,7 +173,7 @@ function reviewDesktop(){
  ext._sync();home.workspace.activate();
  return {ext,home,terminal};
 }
-function openReview(ext,{origin={kind:'vm',name:'sys-ctrl'},wmClass='sys-ctrl:airlock-ctrl',kind=0,transient=false}={}){
+function openReview(ext,{origin={kind:'vm',name:'sys-ctrl'},wmClass='sys-ctrl:airlock-sys-ctrl-gui',kind=0,transient=false}={}){
  const window=new Window(wm.current,kind);
  Object.assign(window,{origin,wmClass,parent:transient?[...allWindows][0]:null,title:'Airlock Control'});
  actors.push({meta_window:window});
@@ -206,7 +206,7 @@ function reviewDesktop(){
  ext._sync();home.workspace.activate();
  return {ext,home,terminal};
 }
-function openReview(ext,{origin={kind:'vm',name:'sys-ctrl'},wmClass='sys-ctrl:airlock-ctrl',kind=0,transient=false}={}){
+function openReview(ext,{origin={kind:'vm',name:'sys-ctrl'},wmClass='sys-ctrl:airlock-sys-ctrl-gui',kind=0,transient=false}={}){
  const window=new Window(wm.current,kind);
  Object.assign(window,{origin,wmClass,parent:transient?[...allWindows][0]:null,title:'Airlock Control'});
  actors.push({meta_window:window});
@@ -216,7 +216,7 @@ function openReview(ext,{origin={kind:'vm',name:'sys-ctrl'},wmClass='sys-ctrl:ai
 const mapWindow=window=>global.window_manager.emit('map',{meta_window:window});
 const order=scenario.order;
 const {ext,home}=reviewDesktop();
-const review=openReview(ext,{origin:UNKNOWN,wmClass:order==='class-after-map'?null:'sys-ctrl:airlock-ctrl'});
+const review=openReview(ext,{origin:UNKNOWN,wmClass:order==='class-after-map'?null:'sys-ctrl:airlock-sys-ctrl-gui'});
 if(order!=='identity-before-map')mapWindow(review);
 assert.equal(activations.length,0);
 review.origin={kind:'vm',name:'sys-ctrl'};
@@ -226,7 +226,7 @@ if(order==='identity-before-map'){
  mapWindow(review);
 }else if(order==='class-after-map'){
  assert.equal(activations.length,0);
- review.wmInstance='sys-ctrl:airlock-ctrl';review.emit('notify::wm-class');
+ review.wmInstance='sys-ctrl:airlock-sys-ctrl-gui';review.emit('notify::wm-class');
 }
 assert.equal(activations.length,1);
 assert.equal(wm.current,review.workspace);
@@ -253,7 +253,7 @@ function reviewDesktop(){
  ext._sync();home.workspace.activate();
  return {ext,home,terminal};
 }
-function openReview(ext,{origin={kind:'vm',name:'sys-ctrl'},wmClass='sys-ctrl:airlock-ctrl',kind=0,transient=false}={}){
+function openReview(ext,{origin={kind:'vm',name:'sys-ctrl'},wmClass='sys-ctrl:airlock-sys-ctrl-gui',kind=0,transient=false}={}){
  const window=new Window(wm.current,kind);
  Object.assign(window,{origin,wmClass,parent:transient?[...allWindows][0]:null,title:'Airlock Control'});
  actors.push({meta_window:window});
@@ -293,7 +293,7 @@ function reviewDesktop(){
  ext._sync();home.workspace.activate();
  return {ext,home,terminal};
 }
-function openReview(ext,{origin={kind:'vm',name:'sys-ctrl'},wmClass='sys-ctrl:airlock-ctrl',kind=0,transient=false}={}){
+function openReview(ext,{origin={kind:'vm',name:'sys-ctrl'},wmClass='sys-ctrl:airlock-sys-ctrl-gui',kind=0,transient=false}={}){
  const window=new Window(wm.current,kind);
  Object.assign(window,{origin,wmClass,parent:transient?[...allWindows][0]:null,title:'Airlock Control'});
  actors.push({meta_window:window});
@@ -329,7 +329,7 @@ function reviewDesktop(){
  ext._sync();home.workspace.activate();
  return {ext,home,terminal};
 }
-function openReview(ext,{origin={kind:'vm',name:'sys-ctrl'},wmClass='sys-ctrl:airlock-ctrl',kind=0,transient=false}={}){
+function openReview(ext,{origin={kind:'vm',name:'sys-ctrl'},wmClass='sys-ctrl:airlock-sys-ctrl-gui',kind=0,transient=false}={}){
  const window=new Window(wm.current,kind);
  Object.assign(window,{origin,wmClass,parent:transient?[...allWindows][0]:null,title:'Airlock Control'});
  actors.push({meta_window:window});
