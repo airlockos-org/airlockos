@@ -223,7 +223,7 @@ test-native-storage-linux:
 
 .PHONY: vm-gui-minimal-image vm-gui-minimal-run vm-gui-minimal-ssh
 
-.PHONY: usb-dev-prepare-inputs usb-builder-offline-check usb-dev-image usb-dev-write usb-dev-provision usb-dev-help
+.PHONY: usb-dev-prepare-inputs usb-builder-offline-check usb-dev-image usb-dev-write usb-dev-help
 
 .PHONY: check-publish
 check-publish:
@@ -263,7 +263,6 @@ image-tools-build:
 USB_PUBLIC_KEY ?= $(HOME)/.ssh/id_ed25519.pub
 USB_INSECURE_DEV_PASSWORD ?= 0
 USB_DEV_PASSWORD_ARGS = $(if $(filter 1,$(USB_INSECURE_DEV_PASSWORD)),--insecure-dev-password,)
-USB_DEV_PROVISION = sudo "$(IMAGE_TOOLS_DIR)/airlock-usb" provision-latest --result-link "$(or $(AIRLOCK_RESULT_LINK_DIR),$(CURDIR)/.airlock)/usb-dev-image" --nix-root "$(AIRLOCK_NIX_ROOT)" --serial "$(USB_SERIAL)" --resize-backup-dir "$(or $(AIRLOCK_LOG_DIR),/var/log/airlock)/usb-root-expansion" --repo "$(CURDIR)" --public-key "$(USB_PUBLIC_KEY)" $(USB_DEV_PASSWORD_ARGS)
 
 .PHONY: usb-dom0-console-image usb-dom0-console-write usb-dev-build-provision
 
@@ -328,11 +327,6 @@ endif
 usb-dev-write: image-tools-build
 	@test -n "$(USB_SERIAL)" || (echo "Set USB_SERIAL to the exact USB serial, e.g. make usb-dev-write USB_SERIAL=YOUR_USB_SERIAL" >&2; exit 2)
 	sudo "$(IMAGE_TOOLS_DIR)/airlock-usb" write-latest --result-link "$(or $(AIRLOCK_RESULT_LINK_DIR),$(CURDIR)/.airlock)/usb-dev-image" --nix-root "$(AIRLOCK_NIX_ROOT)" --serial "$(USB_SERIAL)" --write
-
-usb-dev-provision: image-tools-build
-	@test -n "$(USB_SERIAL)" || (echo "Set USB_SERIAL to the exact USB serial, e.g. make usb-dev-provision USB_SERIAL=YOUR_USB_SERIAL" >&2; exit 2)
-	@test -f "$(USB_PUBLIC_KEY)" || (echo "Missing $(USB_PUBLIC_KEY)" >&2; exit 2)
-	$(USB_DEV_PROVISION)
 
 usb-dev-help: image-tools-build
 	"$(IMAGE_TOOLS_DIR)/airlock-usb" --help

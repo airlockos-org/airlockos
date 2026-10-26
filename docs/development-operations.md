@@ -14,7 +14,8 @@ password hash. sys-gui keeps its existing development password. A failed build
 or a changed committed source cancels provisioning. This combined operation uses
 its own temporary result link, so another build cannot replace its image through
 the shared `usb-dev-image` link. A successful build also updates that shared link
-and its GC root, allowing ordinary provisioning retries to use the new image.
+and its GC root. To retry provisioning, rerun the combined command; unchanged
+build outputs can be reused from cache.
 
 ## Deployment
 

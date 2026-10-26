@@ -167,7 +167,7 @@ pub(crate) fn kernel_size(partition: &Path, expected: u64) -> Result<()> {
     let bytes: u64 = output(Command::new("blockdev").arg("--getsize64").arg(partition))?.parse()?;
     ensure!(
         bytes == expected,
-        "Kernel partition size is stale. Unplug/replug this USB, then rerun usb-dev-provision from scratch; no filesystem resize was attempted."
+        "Kernel partition size is stale. Unplug/replug this USB, then rerun make usb-dev-build-provision with the same USB_SERIAL; no filesystem resize was attempted."
     );
     Ok(())
 }

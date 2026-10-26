@@ -1,23 +1,26 @@
 # Image operations
 
 Run these commands from the parent airlock checkout with its initialized
-component at the committed pin. The source must be clean. Set `AIRLOCK_DATA_ROOT`
-to the external development store location.
+component at the committed pin. Commit the intended source and align its
+application pins. Set `AIRLOCK_DATA_ROOT` to the external development store
+location.
 
 ## Build and provision
 
 ```sh
-make usb-dev-image
 lsblk -o NAME,TRAN,SIZE,MODEL,SERIAL,MOUNTPOINTS
-make usb-dev-provision USB_SERIAL=YOUR_USB_SERIAL
+make usb-dev-build-provision USB_SERIAL=YOUR_USB_SERIAL
 ```
 
 Provisioning erases the selected USB disk. Verify its serial; the provisioner
-unmounts its partitions before writing. `USB_PUBLIC_KEY` selects the SSH public key; provisioning
-prompts for the dom0 password. The provisioner writes the image, grows its root
-filesystem, and installs the committed source and key. It leaves internal disks
-alone. If it reports stale partition information, unplug/replug and restart
-provisioning; do not improvise partition changes or resume a partial write.
+unmounts its partitions before writing. `USB_PUBLIC_KEY` selects the SSH public key.
+Run the combined command as your normal user; it collects sudo authentication and
+the dom0 password before building, then provisions that build's exact result.
+The provisioner writes the image, grows its root filesystem, and installs the
+committed source and key. It leaves internal disks alone. If it reports stale
+partition information, unplug/replug and restart the combined command; unchanged
+build outputs can be reused from cache. Do not
+improvise partition changes or resume a partial write.
 
 `make usb-builder-offline-check` explicitly repeats the pinned offline-builder
 trials. Image assembly runs its own input and storage checks.
