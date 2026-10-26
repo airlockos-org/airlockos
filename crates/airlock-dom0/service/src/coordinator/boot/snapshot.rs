@@ -256,11 +256,11 @@ impl Coordinator {
         }
         let policy = configured_path(
             "AIRLOCK_QUBES_POLICY_DIR",
-            "/var/lib/airlock/qubes-policy.d",
+            airlock_machine_core::services::policy_directory(),
         )?
         .join(
             std::env::var("AIRLOCK_QUBES_MANAGED_POLICY_FILE")
-                .unwrap_or_else(|_| "90-airlock.policy".into()),
+                .unwrap_or_else(|_| airlock_machine_core::services::policy_filename().into()),
         );
         let mut policy_bytes = Vec::new();
         fs::File::open(policy)?

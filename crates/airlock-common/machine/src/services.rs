@@ -4,6 +4,12 @@
 use airlock_nix_core::identity::GuestName;
 use serde::{Deserialize, Serialize};
 
+/// Installed policy-directory contract shared by machine authoring and dom0 publication.
+pub use airlock_machine_planning::ipc_policy::directory as policy_directory;
+
+/// Exact topology-owned policy filename, separate from immutable bootstrap permissions.
+pub use airlock_machine_planning::ipc_policy::filename as policy_filename;
+
 /// Selects the personal VM receiving completed screen captures from a GUI VM.
 /// Authoring serializes this record into NixOS configuration; the sender validates
 /// the same record before using capture RPCs. The target excludes dom0.

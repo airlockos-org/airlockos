@@ -23,3 +23,6 @@ pub mod validation;
 
 /// Live private-device and home-mount checks used before guest initialization and readiness.
 pub mod private_storage;
+
+/// Typed topology-owned IPC policy, exact ordered encoding and publication/refresh bindings.
+pub mod ipc_policy;

@@ -24,7 +24,7 @@ qubes = ["dep:airlock-qubes"]
 
 [dependencies]
 airlock-deployment-core = { path = "../../airlock-common/deployment" }
-airlock-machine-planning = { path = "../../airlock-common/machine-planning" }
+airlock-machine-planning = { path = "../../airlock-common/machine-planning", features = ["wire"] }
 airlock-qubes = { path = "../../airlock-common/qubes", optional = true }
 airlock-machine-core = { path = "../../airlock-common/machine" }
 airlock-nix-core = { path = "../../airlock-common/nix", features = ["artifacts"] }

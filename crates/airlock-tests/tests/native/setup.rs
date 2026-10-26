@@ -390,7 +390,7 @@ fn reconciled_topology_is_idempotent() -> Result<()> {
     Ok(())
 }
 
-/// Policy reload falls back to a restart once, then repeat setup leaves both file and daemon alone.
+/// Policy refresh retries the fixed service even when a previous publication left matching bytes.
 #[test]
 fn policy_reconciliation_has_a_reload_fallback_and_is_idempotent() -> Result<()> {
     let mut desired = topology();
@@ -420,12 +420,85 @@ fn policy_reconciliation_has_a_reload_fallback_and_is_idempotent() -> Result<()>
     fs::write(setup.peers.path("calls.jsonl"), "")?;
     assert_eq!(setup.run("--apply")?["qrexec_policy_changed"], 0);
     assert!(
-        !setup
+        setup
             .peers
             .calls()?
             .iter()
-            .any(|call| call["command"] == "systemctl" && call["args"][0] != "is-active")
+            .any(|call| call["args"] == json!(["reload", "qubes-qrexec-policy-daemon.service"]))
     );
+    Ok(())
+}
+
+/// The direct policy CLI cannot skip a failed refresh, acknowledge an inactive daemon or substitute a target.
+#[test]
+fn policy_cli_retries_published_bytes_and_binds_the_configured_target() -> Result<()> {
+    let mut peers = Peers::new()?;
+    let directory = peers.path("policy.d");
+    fs::create_dir(&directory)?;
+    let target = directory.join("90-airlock.policy");
+    let source = peers.path("topology.json");
+    let mut desired = topology();
+    desired["qrexec_policy"]["rules"] = json!([
+        {"service":"airlock.Probe","argument":"+one","source":"dom0","target":"usr-home","action":"allow"}
+    ]);
+    fs::write(&source, serde_json::to_vec(&desired)?)?;
+    let call =
+        |peers: &Peers, target: &std::path::Path| -> Result<airlock_vm_service::support::Output> {
+            common::run(
+                peers
+                    .command(common::binary("AIRLOCK_DOM0_BIN", "airlock-dom0-service"))?
+                    .args(["setup-config", "policy", "--apply", "--topology"])
+                    .arg(&source)
+                    .arg("--rendered")
+                    .arg(peers.path("preview"))
+                    .arg("--target")
+                    .arg(target)
+                    .env("AIRLOCK_QUBES_POLICY_DIR", &directory),
+                None,
+            )
+        };
+    peers.rules(
+        "systemctl",
+        json!([
+            {"args":["reload","qubes-qrexec-policy-daemon.service"],"exit":1},
+            {"args":["try-restart","qubes-qrexec-policy-daemon.service"],"exit":1}
+        ]),
+    )?;
+    assert!(!call(&peers, &target)?.status.success());
+    let published = fs::read_to_string(&target)?;
+    assert!(published.contains("airlock.Probe +one dom0 usr-home allow\n"));
+
+    peers.rules(
+        "systemctl",
+        json!([
+            {"args":["reload","qubes-qrexec-policy-daemon.service"],"exit":1},
+            {"args":["try-restart","qubes-qrexec-policy-daemon.service"]},
+            {"args":["is-active","--quiet","qubes-qrexec-policy-daemon.service"]}
+        ]),
+    )?;
+    let output = call(&peers, &target)?;
+    assert!(
+        output.status.success(),
+        "{error}",
+        error = String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout)?.trim(), "false");
+    assert_eq!(fs::read_to_string(&target)?, published);
+
+    peers.rules(
+        "systemctl",
+        json!([
+            {"args":["reload","qubes-qrexec-policy-daemon.service"],"exit":1},
+            {"args":["try-restart","qubes-qrexec-policy-daemon.service"]},
+            {"args":["is-active","--quiet","qubes-qrexec-policy-daemon.service"],"exit":1}
+        ]),
+    )?;
+    assert!(!call(&peers, &target)?.status.success());
+    fs::write(peers.path("calls.jsonl"), "")?;
+    let wrong = directory.join("10-other.policy");
+    assert!(!call(&peers, &wrong)?.status.success());
+    assert!(!wrong.exists());
+    assert!(peers.calls()?.is_empty());
     Ok(())
 }
 

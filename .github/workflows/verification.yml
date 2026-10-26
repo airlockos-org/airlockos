@@ -28,7 +28,7 @@ jobs:
       - name: Prepare Cargo sources for offline profile comparisons
         run: cargo fetch --locked --manifest-path crates/Cargo.toml
       - name: Exercise ordinary Cargo compilation, planning and gate behavior
-        run: cargo test --locked --manifest-path crates/Cargo.toml -p airlock-machine-planning -p airlock-deployment-core -p airlock-machine-core -p airlock-nix-core -p airlock-diagnostics -p airlock-provisioning-core -p airlock-build-plan -p airlock-build --features airlock-diagnostics/runtime
+        run: cargo test --locked --manifest-path crates/Cargo.toml -p airlock-machine-planning -p airlock-deployment-core -p airlock-machine-core -p airlock-nix-core -p airlock-diagnostics -p airlock-provisioning-core -p airlock-build-plan -p airlock-build --features airlock-diagnostics/runtime,airlock-machine-planning/wire
       - name: Retain verification output
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

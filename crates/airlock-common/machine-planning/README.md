@@ -21,6 +21,23 @@ These are snapshot guarantees. Kernel observations, mountinfo decoding, systemd,
 upstream Qubes helpers and filesystem durability remain outside the proof boundary;
 concurrent privileged mount changes can invalidate an observation.
 
+Topology-managed IPC rules also cross a typed boundary here. The decoder consumes
+the complete ordered wire declarations and either rejects the policy or preserves
+every field, row and duplicate in its exact text encoding. Services cannot overlap
+the protected bootstrap list; wildcard endpoints are denial-only, and dom0 is an
+explicit source exception rather than an allowed target. Unsupported fields/actions
+fail instead of silently disappearing. JSON decoding is a trusted adapter (`wire`);
+the actual decoding decisions and renderer execute their Verus-checked bodies.
+
+Publication and refresh types retain that complete policy and its exact target.
+The filesystem adapter obtains publication evidence only after fsync/rename and
+readback; the service adapter consumes its request's fixed argument vectors.
+Completion requires matching final readback and a successful running-service
+observation. Repeated apply re-establishes both barriers even for unchanged bytes.
+This is a refresh acknowledgment, not a proof of Qubes' internal cache, global
+policy precedence or immediate revocation of in-flight requests. Static policy
+packages, filesystem/daemon truth and administrative path overrides remain trusted.
+
 Before evaluation, the [authoring snapshot](../../airlock-config/src/model.rs)
 uses `Relationships::ordered` to check its typed VM references. After
 [NixOS normalization](../../airlock-config/src/topology/normalize.rs),

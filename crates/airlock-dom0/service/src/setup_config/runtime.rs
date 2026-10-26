@@ -87,10 +87,10 @@ impl Session {
             .open(&command_log)?;
         let policy_dir = path(
             "AIRLOCK_QUBES_POLICY_DIR",
-            "/var/lib/airlock/qubes-policy.d",
+            airlock_machine_core::services::policy_directory(),
         );
         let policy_name = std::env::var("AIRLOCK_QUBES_MANAGED_POLICY_FILE")
-            .unwrap_or_else(|_| "90-airlock.policy".into());
+            .unwrap_or_else(|_| airlock_machine_core::services::policy_filename().into());
         ensure!(
             Path::new(&policy_name)
                 .file_name()

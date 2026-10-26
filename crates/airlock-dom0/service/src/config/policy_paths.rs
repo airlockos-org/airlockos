@@ -1,5 +1,6 @@
 //! Refresh bootstrap-policy links while retaining the separate runtime-owned topology authority.
 
+use airlock_machine_planning::ipc_policy::CheckedPolicy;
 use anyhow::{Result, ensure};
 use std::{
     fs,
@@ -87,11 +88,11 @@ pub(super) fn execute(
             .write(true)
             .create_new(true)
             .open(&managed_path)?;
-        writeln!(
-            file,
-            "{MARKER}\n# Source: airlock.qubes.topology.qrexec_policy.\n# Bootstrap config transport policy remains in 30-airlock-config.policy."
-        )?;
-        fs::set_permissions(managed_path, fs::Permissions::from_mode(0o644))?;
+        let empty = CheckedPolicy::new(Vec::new());
+        file.write_all(empty.text().as_bytes())?;
+        file.set_permissions(fs::Permissions::from_mode(0o644))?;
+        file.sync_all()?;
+        fs::File::open(&runtime_dir)?.sync_all()?;
     }
     Ok(())
 }

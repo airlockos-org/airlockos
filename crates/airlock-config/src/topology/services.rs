@@ -200,8 +200,14 @@ fn policy(context: &ModuleContext, tools: &NixValue) -> NixValue {
             [
                 ("service", tools.clone().select(Tool::Dom0.export_name())),
                 ("static", "/etc/qubes/policy.d".into()),
-                ("runtime", "/var/lib/airlock/qubes-policy.d".into()),
-                ("managed", "90-airlock.policy".into()),
+                (
+                    "runtime",
+                    airlock_machine_core::services::policy_directory().into(),
+                ),
+                (
+                    "managed",
+                    airlock_machine_core::services::policy_filename().into(),
+                ),
                 ("coreutils", context.pkgs.clone().select("coreutils")),
                 ("find", context.pkgs.clone().select("findutils")),
                 ("grep", context.pkgs.clone().select("gnugrep")),
@@ -230,8 +236,9 @@ fn policy(context: &ModuleContext, tools: &NixValue) -> NixValue {
                 "ExecStart": context.lib.clone().select("mkForce").call(NixValue::list([
                     "".into(),
                     nix_text!(
-                        "{daemon}/bin/qrexec-policy-daemon --policy-path /var/lib/airlock/qubes-policy.d",
+                        "{daemon}/bin/qrexec-policy-daemon --policy-path {directory}",
                         daemon = daemon,
+                        directory = airlock_machine_core::services::policy_directory(),
                     )
                     .into(),
                 ])),

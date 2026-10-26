@@ -12,6 +12,10 @@ path = "src/lib.rs"
 
 [dependencies]
 vstd = "=0.0.0-2026-10-18-0147"
+serde = { version = "1.0", features = ["derive"], optional = true }
+
+[features]
+wire = ["dep:serde"]
 
 [package.metadata.verus]
 verify = true
