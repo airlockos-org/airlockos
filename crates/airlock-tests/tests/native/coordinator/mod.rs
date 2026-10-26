@@ -2,6 +2,8 @@
 
 pub(super) mod fixture;
 
+mod hermit;
+
 use crate::common;
 use anyhow::{Context, Result, ensure};
 use fixture::*;

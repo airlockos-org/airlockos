@@ -425,6 +425,19 @@ pub fn execute(root: &Path, program: &str, original: &[String]) -> Result<()> {
             );
         }
         "airlock-setup-config" => {
+            if let Ok(topology) = option(arguments, "--topology") {
+                let topology: Value = serde_json::from_slice(&fs::read(topology)?)?;
+                for (name, domain) in topology["domains"].as_object().context("fixture domains")? {
+                    if domain["backend"]["type"] == "hermit" {
+                        let artifact: airlock_nix_core::hermit_artifact::Descriptor =
+                            serde_json::from_value(domain["backend"]["artifact"].clone())?;
+                        data["features"][name] = json!({
+                            "airlock-system-source":domain["backend"]["system"]["source"],
+                            "airlock-hermit-artifact":serde_json::to_string(&artifact)?
+                        });
+                    }
+                }
+            }
             if data["native_setup"] != true
                 && let Some(staged) = std::env::var_os("AIRLOCK_STAGED_GENERATIONS")
             {

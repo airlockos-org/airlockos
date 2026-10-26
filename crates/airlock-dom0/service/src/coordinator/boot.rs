@@ -330,11 +330,13 @@ impl Coordinator {
                     .as_ref()
                     .context("prepared image boot generation map is missing")?;
                 ensure!(
-                    mapping.len() == topology.domains.len()
-                        && topology
+                    mapping.keys().collect::<BTreeSet<_>>()
+                        == topology
                             .domains
-                            .keys()
-                            .all(|name| mapping.contains_key(name)),
+                            .iter()
+                            .filter(|(_, domain)| domain.backend.hermit().is_none())
+                            .map(|(name, _)| name)
+                            .collect(),
                     "prepared image boot generation map is incomplete or contains extra VMs"
                 );
             }

@@ -28,7 +28,16 @@ impl Coordinator {
     pub(super) fn supported_apply(&self, r: &Release, p: &Plan) -> Result<()> {
         if r.manifest.guest_transport == Some(GuestTransport::DirectPoolV1) {
             ensure!(
-                r.manifest.staged_generations.len() == r.topology.domains.len(),
+                r.manifest
+                    .staged_generations
+                    .keys()
+                    .collect::<BTreeSet<_>>()
+                    == r.topology
+                        .domains
+                        .iter()
+                        .filter(|(_, domain)| domain.backend.hermit().is_none())
+                        .map(|(name, _)| name)
+                        .collect(),
                 "direct release is missing admitted generations"
             );
         }
