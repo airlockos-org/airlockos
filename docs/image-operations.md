@@ -9,7 +9,7 @@ location.
 
 ```sh
 lsblk -o NAME,TRAN,SIZE,MODEL,SERIAL,MOUNTPOINTS
-make usb-dev-build-provision USB_SERIAL=YOUR_USB_SERIAL
+make usb-dev-install USB_SERIAL=YOUR_USB_SERIAL
 ```
 
 Provisioning erases the selected USB disk. Verify its serial; the provisioner

@@ -160,7 +160,7 @@ fn image_build_rejects_stale_application_content_before_prerequisites() -> Resul
         "usb-dev-image",
         "usb-dom0-console-image",
         "usb-builder-offline-check",
-        "usb-dev-build-provision",
+        "usb-dev-install",
     ] {
         let mut command = Command::new("make");
         command.current_dir(common::root()).args([
@@ -333,7 +333,7 @@ prerequisite:
         "usb-dev-image",
         "usb-dom0-console-image",
         "usb-builder-offline-check",
-        "usb-dev-build-provision",
+        "usb-dev-install",
     ] {
         fs::remove_file(&budget_path)?;
         run(

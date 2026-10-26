@@ -264,11 +264,11 @@ USB_PUBLIC_KEY ?= $(HOME)/.ssh/id_ed25519.pub
 USB_INSECURE_DEV_PASSWORD ?= 0
 USB_DEV_PASSWORD_ARGS = $(if $(filter 1,$(USB_INSECURE_DEV_PASSWORD)),--insecure-dev-password,)
 
-.PHONY: usb-dom0-console-image usb-dom0-console-write usb-dev-build-provision
+.PHONY: usb-dom0-console-image usb-dom0-console-write usb-dev-install
 
 # The Rust wrapper must run before prerequisites, including native tool compilation.
 ifeq ($(AIRLOCK_IMAGE_BUILD_LIMITED),1)
-usb-dev-build-provision: image-tools-build
+usb-dev-install: image-tools-build
 	@$(AIRLOCK_DEV) usb-build-provision --usb-bin "$(IMAGE_TOOLS_DIR)/airlock-usb" --serial "$(USB_SERIAL)" --public-key "$(USB_PUBLIC_KEY)" --result-link-dir "$(or $(AIRLOCK_RESULT_LINK_DIR),$(CURDIR)/.airlock)" $(if $(AIRLOCK_NIX_ROOT),--nix-root "$(AIRLOCK_NIX_ROOT)",) --resize-backup-dir "$(or $(AIRLOCK_LOG_DIR),/var/log/airlock)/usb-root-expansion" $(USB_DEV_PASSWORD_ARGS)
 
 usb-dom0-console-image: ensure-generated-dirs
@@ -319,7 +319,7 @@ usb-dev-image: image-tools-build usb-dev-prepare-inputs
 	  --temporary-root "$(or $(AIRLOCK_TMPDIR),$(TMPDIR),$(CURDIR)/.airlock)" \
 	  --image-command $(AIRLOCK_NIX) build --impure .#airlock-usb-dev-image --out-link "$(or $(AIRLOCK_RESULT_LINK_DIR),$(CURDIR)/.airlock)/usb-dev-image" --print-build-logs
 else
-usb-dom0-console-image usb-builder-offline-check usb-dev-image usb-dev-build-provision:
+usb-dom0-console-image usb-builder-offline-check usb-dev-image usb-dev-install:
 	@$(AIRLOCK_DEV) check-image-source
 	@$(AIRLOCK_DEV) build-budget -- $(MAKE) --no-print-directory AIRLOCK_IMAGE_BUILD_LIMITED=1 $@
 endif
