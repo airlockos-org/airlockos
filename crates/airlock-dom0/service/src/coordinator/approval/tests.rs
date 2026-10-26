@@ -1507,6 +1507,45 @@ fn configuration_requests() -> Result<()> {
         configure: vec!["usr-home".parse()?],
         ..Plan::default()
     };
+
+    // Exemptions bypass review, but still need the complete configuration namespace.
+    for administrative in [true, false] {
+        if !administrative {
+            fs::remove_file("/etc/airlock/review-required")?;
+        }
+        assert!(
+            fixture
+                .coordinator
+                .authorize(
+                    &fixture.release,
+                    &fixture.baseline,
+                    &Plan::default(),
+                    None,
+                    administrative,
+                )
+                .is_err_and(|error| error.to_string()
+                    == "device definitions differ from checked configuration scope")
+        );
+
+        let checked = fixture.coordinator.authorize(
+            &fixture.release,
+            &fixture.baseline,
+            &plan,
+            None,
+            administrative,
+        )?;
+        assert!(checked.approval.is_none());
+        assert_eq!(
+            checked.authority,
+            if administrative {
+                OperationAuthority::Administrative
+            } else {
+                OperationAuthority::ReviewNotRequired
+            }
+        );
+    }
+    fs::write("/etc/airlock/review-required", "")?;
+
     let (record, checked) = fixture.intent_plan(None, "310", plan)?;
     let mut durable = fixture.coordinator.publish_intent(&record, checked)?;
     assert!(durable.configuration_create(&record, 0, false).is_err());

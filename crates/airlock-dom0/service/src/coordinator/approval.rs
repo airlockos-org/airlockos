@@ -683,9 +683,10 @@ fn check_review(
 }
 
 impl Coordinator {
+    /// Check the applicable review policy, then capture every resource plan before publication.
     pub(super) fn authorize(
         &self,
-        r: &Release,
+        release: &Release,
         baseline: &Release,
         plan: &Plan,
         previous: Option<&Record>,
@@ -694,7 +695,7 @@ impl Coordinator {
         ensure!(
             plan.revision
                 .as_ref()
-                .is_none_or(|revision| revision == &r.manifest.revision),
+                .is_none_or(|revision| revision == &release.manifest.revision),
             "plan revision differs from deployment target"
         );
         let classified = review_plan(plan)?;
@@ -702,98 +703,127 @@ impl Coordinator {
             .map(|previous| -> Result<_> {
                 Ok(RecoveryAuthorization {
                     prior: super::recovery::journal(previous)?,
-                    release: super::recovery::release(r)?,
+                    release: super::recovery::release(release)?,
                     baseline: super::recovery::release(baseline)?,
                 })
             })
             .transpose()?;
         let plan_binding = plan_binding(
-            &r.path,
+            &release.path,
             &baseline.path,
-            r.fingerprint(),
+            release.fingerprint(),
             baseline.fingerprint(),
-            &r.manifest.revision,
+            &release.manifest.revision,
             plan,
         )?;
-        let host_definition = super::host::definition(r, previous.is_some())?;
+        let host_definition = super::host::definition(release, previous.is_some())?;
         let service = host_definition.service.clone();
-        if administrative || !Path::new("/etc/airlock/review-required").try_exists()? {
-            let gui = gui_plan(plan);
-            let checked_plan = AuthorizedPlan::policy_exempt(
-                &classified.effects(),
-                gui,
-                PlanBinding::new(plan_binding),
-            )
-            .context("unclassified effects or invalid shutdown preservation plan")?;
-            return Ok(CheckedAuthorization {
-                authority: if administrative {
+
+        let (checked_plan, authority, approval) =
+            if administrative || !Path::new("/etc/airlock/review-required").try_exists()? {
+                let checked_plan = AuthorizedPlan::policy_exempt(
+                    &classified.effects(),
+                    gui_plan(plan),
+                    PlanBinding::new(plan_binding),
+                )
+                .context("unclassified effects or invalid shutdown preservation plan")?;
+                let authority = if administrative {
                     OperationAuthority::Administrative
                 } else {
                     OperationAuthority::ReviewNotRequired
-                },
-                approval: None,
-                retirements: checked_plan
-                    .retirement(
-                        super::retirement::definitions(
-                            plan,
-                            r,
-                            baseline,
-                            airlock_deployment_core::retirement::Kind::Retire,
-                            &service,
-                        )?,
-                        airlock_deployment_core::retirement::Kind::Retire,
-                    )
-                    .context("retirement definitions differ from checked plan")?,
-                restorations: checked_plan
-                    .retirement(
-                        super::retirement::definitions(
-                            plan,
-                            r,
-                            baseline,
-                            airlock_deployment_core::retirement::Kind::Restore,
-                            &service,
-                        )?,
-                        airlock_deployment_core::retirement::Kind::Restore,
-                    )
-                    .context("restoration definitions differ from checked plan")?,
-                devices: checked_plan
-                    .devices(crate::setup_config::devices::definitions(&r.raw_topology)?)
-                    .context("device definitions differ from checked configuration scope")?,
-                storage: checked_plan
-                    .storage(crate::setup_config::backend::definitions(
-                        &r.raw_topology,
-                        &service,
-                        &r.manifest.staged_generations,
-                    )?)
-                    .context("storage definitions differ from checked configuration scope")?,
-                pci: checked_plan.pci_handoff(),
-                host: checked_plan.host(host_definition),
-                copies: checked_plan
-                    .copies(super::migration::copy_definitions(plan)?)
-                    .context("private copy definitions differ from checked plan")?,
-                configuration: checked_plan
-                    .configuration(
-                        crate::setup_config::reconcile::definitions(
-                            &r.raw_topology,
-                            r.manifest.setup.as_str(),
-                            &r.path.join("topology.json"),
-                        )?,
-                        airlock_deployment_core::configuration::Helper {
-                            program: r.manifest.setup.as_str().into(),
-                            topology: r
-                                .path
-                                .join("topology.json")
-                                .to_str()
-                                .context("invalid topology path")?
-                                .into(),
-                        },
-                    )
-                    .context("configuration definitions differ from checked plan")?,
-                plan: checked_plan,
-                recovery,
-            });
-        }
+                };
 
+                (checked_plan, authority, None)
+            } else {
+                let (checked_plan, authority, approval) = self.reviewed_authorization(
+                    release,
+                    baseline,
+                    plan,
+                    previous,
+                    PlanBinding::new(plan_binding),
+                )?;
+
+                (checked_plan, authority, Some(approval))
+            };
+
+        // Policy exemptions skip human review, never exact resource-plan validation.
+        Ok(CheckedAuthorization {
+            authority,
+            approval,
+            retirements: checked_plan
+                .retirement(
+                    super::retirement::definitions(
+                        plan,
+                        release,
+                        baseline,
+                        airlock_deployment_core::retirement::Kind::Retire,
+                        &service,
+                    )?,
+                    airlock_deployment_core::retirement::Kind::Retire,
+                )
+                .context("retirement definitions differ from checked plan")?,
+            restorations: checked_plan
+                .retirement(
+                    super::retirement::definitions(
+                        plan,
+                        release,
+                        baseline,
+                        airlock_deployment_core::retirement::Kind::Restore,
+                        &service,
+                    )?,
+                    airlock_deployment_core::retirement::Kind::Restore,
+                )
+                .context("restoration definitions differ from checked plan")?,
+            devices: checked_plan
+                .devices(crate::setup_config::devices::definitions(
+                    &release.raw_topology,
+                )?)
+                .context("device definitions differ from checked configuration scope")?,
+            storage: checked_plan
+                .storage(crate::setup_config::backend::definitions(
+                    &release.raw_topology,
+                    &service,
+                    &release.manifest.staged_generations,
+                )?)
+                .context("storage definitions differ from checked configuration scope")?,
+            pci: checked_plan.pci_handoff(),
+            host: checked_plan.host(host_definition),
+            copies: checked_plan
+                .copies(super::migration::copy_definitions(plan)?)
+                .context("private copy definitions differ from checked plan")?,
+            configuration: checked_plan
+                .configuration(
+                    crate::setup_config::reconcile::definitions(
+                        &release.raw_topology,
+                        release.manifest.setup.as_str(),
+                        &release.path.join("topology.json"),
+                    )?,
+                    airlock_deployment_core::configuration::Helper {
+                        program: release.manifest.setup.as_str().into(),
+                        topology: release
+                            .path
+                            .join("topology.json")
+                            .to_str()
+                            .context("invalid topology path")?
+                            .into(),
+                    },
+                )
+                .context("configuration definitions differ from checked plan")?,
+            plan: checked_plan,
+            recovery,
+        })
+    }
+
+    /// Load and validate the protected decision, returning its bound plan and audit authority.
+    /// Recovery uses the original reviewed release; fresh review also checks the live baseline.
+    fn reviewed_authorization(
+        &self,
+        release: &Release,
+        baseline: &Release,
+        plan: &Plan,
+        previous: Option<&Record>,
+        plan_binding: PlanBinding,
+    ) -> Result<(AuthorizedPlan, OperationAuthority, ApprovalRecord)> {
         let recovery_release = previous
             .map(|old| {
                 let path = match old
@@ -809,12 +839,11 @@ impl Coordinator {
                 Release::load(path.as_path())
             })
             .transpose()?;
-        let reviewed = recovery_release.as_ref().unwrap_or(r);
+        let reviewed = recovery_release.as_ref().unwrap_or(release);
         reviewed.trust()?;
-        let key = format!(
-            "{:x}",
-            Sha256::digest(reviewed.path.as_os_str().as_encoded_bytes())
-        );
+
+        let digest = Sha256::digest(reviewed.path.as_os_str().as_encoded_bytes());
+        let key = format!("{digest:x}");
         let bp = self
             .state
             .join("reviews/bindings")
@@ -824,8 +853,16 @@ impl Coordinator {
         let rp = self.review_path(&binding.request_id);
         state::trusted(&rp)?;
         let approval: ApprovalRecord = state::read(&rp)?;
+
         let fingerprint: Option<BaselineFingerprint> = if previous.is_none() {
-            Some(state::digest(&json!({"selection":self.selection()?,"boot_id":state::boot_id()?,"host":state::host()?,"revision":baseline.manifest.revision,"lock_hash":baseline.manifest.lock_hash}))?.parse()?)
+            let fingerprint = state::digest(&json!({
+                "selection": self.selection()?,
+                "boot_id": state::boot_id()?,
+                "host": state::host()?,
+                "revision": baseline.manifest.revision,
+                "lock_hash": baseline.manifest.lock_hash,
+            }))?;
+            Some(fingerprint.parse()?)
         } else {
             None
         };
@@ -836,77 +873,17 @@ impl Coordinator {
             plan,
             fingerprint.as_ref(),
             previous,
-            PlanBinding::new(plan_binding),
+            plan_binding,
         )?;
 
-        Ok(CheckedAuthorization {
-            authority: OperationAuthority::Reviewed {
-                request_id: approval.request_id.clone(),
-                decision: decision(&approval)?,
-                release: binding.release,
-                fingerprint: reviewed.fingerprint().clone(),
-            },
-            approval: Some(approval),
-            retirements: checked_plan
-                .retirement(
-                    super::retirement::definitions(
-                        plan,
-                        r,
-                        baseline,
-                        airlock_deployment_core::retirement::Kind::Retire,
-                        &service,
-                    )?,
-                    airlock_deployment_core::retirement::Kind::Retire,
-                )
-                .context("retirement definitions differ from checked plan")?,
-            restorations: checked_plan
-                .retirement(
-                    super::retirement::definitions(
-                        plan,
-                        r,
-                        baseline,
-                        airlock_deployment_core::retirement::Kind::Restore,
-                        &service,
-                    )?,
-                    airlock_deployment_core::retirement::Kind::Restore,
-                )
-                .context("restoration definitions differ from checked plan")?,
-            devices: checked_plan
-                .devices(crate::setup_config::devices::definitions(&r.raw_topology)?)
-                .context("device definitions differ from checked configuration scope")?,
-            storage: checked_plan
-                .storage(crate::setup_config::backend::definitions(
-                    &r.raw_topology,
-                    &service,
-                    &r.manifest.staged_generations,
-                )?)
-                .context("storage definitions differ from checked configuration scope")?,
-            pci: checked_plan.pci_handoff(),
-            host: checked_plan.host(host_definition),
-            copies: checked_plan
-                .copies(super::migration::copy_definitions(plan)?)
-                .context("private copy definitions differ from checked plan")?,
-            configuration: checked_plan
-                .configuration(
-                    crate::setup_config::reconcile::definitions(
-                        &r.raw_topology,
-                        r.manifest.setup.as_str(),
-                        &r.path.join("topology.json"),
-                    )?,
-                    airlock_deployment_core::configuration::Helper {
-                        program: r.manifest.setup.as_str().into(),
-                        topology: r
-                            .path
-                            .join("topology.json")
-                            .to_str()
-                            .context("invalid topology path")?
-                            .into(),
-                    },
-                )
-                .context("configuration definitions differ from checked plan")?,
-            plan: checked_plan,
-            recovery,
-        })
+        let authority = OperationAuthority::Reviewed {
+            request_id: approval.request_id.clone(),
+            decision: decision(&approval)?,
+            release: binding.release,
+            fingerprint: reviewed.fingerprint().clone(),
+        };
+
+        Ok((checked_plan, authority, approval))
     }
 
     /// Publish the authoritative intent and repairable projections before effects.
