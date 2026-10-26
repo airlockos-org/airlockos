@@ -137,6 +137,21 @@ pub(super) fn observe(py: Python<'_>) -> Result<Value> {
     app.call_method0("close")?;
 
     let app = open(py, store, true)?;
+    ensure!(
+        app.getattr("default_kernel")?
+            .extract::<String>()?
+            .is_empty(),
+        "empty default kernel did not survive XML reload"
+    );
+    app.call_method0("save")?;
+    app.call_method0("close")?;
+    let app = open(py, store, true)?;
+    ensure!(
+        app.getattr("default_kernel")?
+            .extract::<String>()?
+            .is_empty(),
+        "database save invented a default kernel"
+    );
     let vm = app.getattr("domains")?.get_item("usr-home")?;
     let empty_kernel =
         snapshot::read(&app, &vm).context("observe a newly created kernel-free VM")?;
@@ -158,7 +173,6 @@ pub(super) fn observe(py: Python<'_>) -> Result<Value> {
     private.setattr("vid", private_id)?;
     vm.setattr("events_enabled", false)?;
     vm.setattr("kernel", "test-kernel")?;
-    app.setattr("default_kernel", "")?;
     app.call_method0("save")?;
     let before = snapshot::read(&app, &vm).context("read initial upstream storage objects")?;
     app.call_method0("close")?;

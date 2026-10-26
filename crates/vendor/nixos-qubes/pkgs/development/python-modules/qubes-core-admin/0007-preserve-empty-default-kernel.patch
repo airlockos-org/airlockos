@@ -1,0 +1,13 @@
+diff --git a/qubes/app.py b/qubes/app.py
+--- a/qubes/app.py
++++ b/qubes/app.py
+@@ -884,6 +884,9 @@ class Qubes(qubes.PropertyHolder):
+     default_kernel = qubes.property(
+         "default_kernel",
+         load_stage=3,
++        # Empty XML text loads as None; keep the kernel-free selection empty
++        # instead of serializing a kernel literally named "None" on next save.
++        setter=lambda _self, _prop, value: "" if value is None else value,
+         doc="Which kernel to use when not overriden in VM",
+     )
+     default_dispvm = qubes.VMProperty(

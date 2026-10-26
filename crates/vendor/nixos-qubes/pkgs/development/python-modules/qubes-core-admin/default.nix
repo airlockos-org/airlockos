@@ -90,6 +90,7 @@ buildPythonPackage {
     (replaceVars ./0006-refactor-runuser-path.patch {
       runuser = "${util-linux}/bin/runuser";
     })
+    ./0007-preserve-empty-default-kernel.patch
   ];
 
   postPatch = ''

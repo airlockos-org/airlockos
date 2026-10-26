@@ -37,6 +37,9 @@ Current local changes:
 - `qubes-core-admin`: patch `runuser` invocations in VM daemon startup and dom0
   service dispatch to use the Nix store path from `util-linux`. `qubesd` starts
   with a narrow service `PATH`, so bare `runuser` fails at VM start time.
+- `qubes-core-admin`: preserve an empty default kernel across XML reload/save.
+  Empty XML text otherwise becomes Python `None`, then the literal kernel name
+  `"None"` when qubesd saves its database during shutdown.
 - `qubes-core-admin-client`: patch `qvm-run --pass-io` to use Python's `fork`
   multiprocessing context explicitly. Python 3.14 defaults away from `fork`, and
   the upstream stdin-copy process passes an unpickleable buffered pipe object.
