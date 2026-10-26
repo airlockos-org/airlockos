@@ -20,6 +20,7 @@ export default class StartupProgressExtension extends Extension {
         this._started = GLib.get_monotonic_time();
         this._snapshot = null;
         this._observedWorking = false;
+        this._lastError = null;
         this._button = new PanelMenu.Button(0.0, 'Airlock startup');
         const box = new St.BoxLayout({style_class: 'airlock-startup-panel'});
         this._spinner = new Animation.Spinner(16, {hideOnStop: true});
@@ -66,29 +67,42 @@ export default class StartupProgressExtension extends Extension {
                 Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE);
             process.communicate_utf8_async(null, cancellable, (source, result) => {
                 try {
-                    const [, stdout] = source.communicate_utf8_finish(result);
+                    const [, stdout, stderr] = source.communicate_utf8_finish(result);
                     if (!this._active || generation !== this._generation)
                         return;
-                    if (!source.get_successful() || stdout.length > 128 * 1024)
-                        throw new Error('Startup observer unavailable');
+                    if (!source.get_successful()) {
+                        const status = source.get_if_exited()
+                            ? `exit ${source.get_exit_status()}`
+                            : `signal ${source.get_term_sig()}`;
+                        throw new Error(`Startup reader ${status}: ${stderr.slice(0, 1024)}`);
+                    }
+                    if (stdout.length > 128 * 1024)
+                        throw new Error('Startup reader response exceeds 128 KiB');
                     const snapshot = parseSnapshot(JSON.parse(stdout));
                     if (this._snapshot && this._snapshot.bootId !== snapshot.bootId)
                         this._started = GLib.get_monotonic_time();
                     this._snapshot = snapshot;
+                    this._lastError = null;
                     this._render(snapshot);
                     if (!snapshot.complete)
                         this._schedule();
-                } catch (_error) {
+                } catch (error) {
                     if (this._active && generation === this._generation)
-                        this._unavailable();
+                        this._unavailable(error);
                 }
             });
-        } catch (_error) {
-            this._unavailable();
+        } catch (error) {
+            this._unavailable(error);
         }
     }
 
-    _unavailable() {
+    _unavailable(error) {
+        // Keep journal evidence without flooding it on every identical five-second retry.
+        const detail = String(error).replace(/[\u0000-\u001f\u007f-\u009f]/gu, ' ').slice(0, 1024);
+        if (detail !== this._lastError) {
+            console.warn(`Airlock startup observer: ${detail}`);
+            this._lastError = detail;
+        }
         // Keep the last per-VM observations visible; lost transport cannot mean completion.
         this._button.show();
         this._label.text = 'Startup status unavailable';

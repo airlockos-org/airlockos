@@ -4,6 +4,8 @@ let nextTimer = 0;
 const timers = new Map();
 const reads = [];
 const indicators = [];
+const warnings = [];
+console.warn = message => warnings.push(message);
 
 class Actor {
     constructor(properties = {}) {
@@ -67,18 +69,21 @@ globalThis.shellMocks = {
                 communicate_utf8_finish(result) {
                     if (result.error)
                         throw new Error('Status transport failed');
-                    return [true, JSON.stringify(result.snapshot), ''];
+                    return [true, JSON.stringify(result.snapshot), result.stderr ?? ''];
                 },
                 get_successful() { return this.successful; },
+                get_if_exited() { return true; },
+                get_exit_status() { return 1; },
             };
             return process;
         }},
     },
 };
 
-function reply(index, snapshot, error = false) {
+function reply(index, snapshot, error = false, stderr = '') {
     const {process, callback} = reads[index];
-    callback(process, {snapshot, error});
+    process.successful = !stderr;
+    callback(process, {snapshot, error, stderr});
 }
 
 function tick() {

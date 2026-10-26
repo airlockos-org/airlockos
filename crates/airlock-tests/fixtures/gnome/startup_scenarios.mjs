@@ -44,7 +44,11 @@ if (scenario === 'snapshot_validation') {
         reply(0, snapshot());
         const rows = extension._rows.items;
         tick();
-        reply(1, null, true);
+        const stderr = 'qrexec deadline exceeded\n' + 'x'.repeat(2048);
+        reply(1, null, false, stderr);
+        assert.match(warnings[0], /exit 1: qrexec deadline exceeded/u);
+        assert.ok(warnings[0].length < 1100, 'journal errors are bounded');
+        assert.ok(!warnings[0].includes('\n'), 'reader output stays on one journal line');
         assert.equal(extension._rows.items, rows);
         assert.equal(extension._button.visible, true);
         assert.equal(extension._spinner.playing, true);
@@ -52,8 +56,17 @@ if (scenario === 'snapshot_validation') {
         assert.equal(extension._warning.visible, true);
         assert.match(extension._summary.label.text, /unavailable.*retrying/u);
         tick();
-        reply(2, {...snapshot(), complete: true});
+        reply(2, null, false, stderr);
+        assert.equal(warnings.length, 1, 'identical retries do not flood the journal');
+        tick();
+        reply(3, {...snapshot(), complete: true});
         assert.equal(extension._button.visible, true, 'malformed completion cannot hide startup');
+        assert.equal(warnings.length, 2, 'a different failure is logged');
+        tick();
+        reply(4, snapshot());
+        tick();
+        reply(5, null, false, stderr);
+        assert.equal(warnings.length, 3, 'a failure after recovery is logged again');
     } else if (scenario === 'failures_remain_visible') {
         reply(0, snapshot('failed', true));
         assert.equal(extension._button.visible, true);
@@ -69,7 +82,8 @@ if (scenario === 'snapshot_validation') {
         assert.equal(reads[0].cancellable.cancelled, true);
         assert.equal(timers.size, 0);
         extension.enable();
-        reply(0, snapshot('ready'));
+        reply(0, null, true);
+        assert.equal(warnings.length, 0, 'cancelled callbacks from an old generation stay quiet');
         assert.equal(extension._button.visible, true);
         assert.equal(timers.size, 0);
         reply(1, snapshot());
