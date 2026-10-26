@@ -82,6 +82,13 @@ fn volume(
                 let value = keyword(py, kwargs, key, default)?;
                 object.setattr(if key == "size" { "_size" } else { key }, value)?;
             }
+            if let Some(marker) = kwargs
+                .map(|kwargs| kwargs.get_item("upstream_marker"))
+                .transpose()?
+                .flatten()
+            {
+                object.setattr("upstream_marker", marker)?;
+            }
             if !object.getattr("vid")?.is_truthy()? {
                 object.setattr("vid", object.getattr("name")?)?;
             }

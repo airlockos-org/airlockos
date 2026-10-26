@@ -20,9 +20,9 @@ pub(crate) use response::{
 
 mod domain;
 
-mod qubes_inspect;
+pub(crate) mod qubes_inspect;
 
-mod qubes_volume;
+pub(crate) mod qubes_volume;
 
 mod domain_cli;
 

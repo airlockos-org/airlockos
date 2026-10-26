@@ -14,7 +14,7 @@ Existing transport, persistence, diagnostic and upstream formats stay in place.
    [installation checks](../crates/airlock-dom0/service/src/store/domain/attachment.rs),
    [guard dispatch](../crates/airlock-dom0/service/src/store/qubes_inspect.rs).
 
-2. [ ] **Remove JSON requests between the native Qubes plugin and Rust engine.**
+2. [x] **Remove JSON requests between the native Qubes plugin and Rust engine.**
    Replace the plugin's in-process JSON operation objects with typed engine calls
    or request/result enums. Keep conversion of upstream Python objects at the
    adapter edge and retain the existing serialized CLI interface.

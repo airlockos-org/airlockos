@@ -3,8 +3,14 @@
 
 use super::{
     fs::{PoolLock, component, ensure_pool},
-    qubes_inspect::{Definition, ViewKind, absolute, verify},
+    qubes_inspect::{Definition, absolute, verify},
     records, views,
+};
+use crate::storage_plugin::{
+    GenerationIdentity, LifecycleRequest, Metadata, NormalizationInput, Normalized,
+};
+use airlock_deployment_core::volume_lifecycle::{
+    Action, Effect, ImmutableOptions, LifecyclePlan, admission_lock,
 };
 use airlock_nix_core::identity::GuestName;
 use anyhow::{Context, Result, bail, ensure};
@@ -25,125 +31,47 @@ pub(super) fn normalize(
         .as_object()
         .context("invalid Qubes volume configuration")?
         .clone();
-    ensure!(
-        config.get("rw").is_none_or(|value| value == false),
-        "airlock-closure volumes are read-only"
-    );
-    ensure!(
-        config
-            .get("snap_on_start")
-            .is_none_or(|value| value == false),
-        "airlock-closure volumes do not use Qubes snapshots"
-    );
-    ensure!(
-        !has_source,
-        "airlock-closure volumes do not use source volumes"
-    );
-
-    if let Some(value) = config
-        .get_mut("generation")
-        .filter(|value| !value.is_null())
-    {
-        let generation = if let Some(text) = value.as_str() {
-            text.parse::<u64>()?
-        } else {
-            value.as_u64().context("invalid storage generation")?
-        };
-        ensure!(generation > 0, "generation must be positive");
-        *value = json!(generation.to_string());
+    let flag = |key: &str| -> Result<bool> {
+        match config.get(key) {
+            None => Ok(false),
+            Some(Value::Bool(value)) => Ok(*value),
+            _ => bail!("immutable volume flag must be boolean: {key}"),
+        }
+    };
+    let writable = flag("rw")?;
+    let snapshot = flag("snap_on_start")?;
+    config.entry("view_kind").or_insert(json!("metadata-image"));
+    if let Some(Value::String(size)) = config.get("blob_logical_size") {
+        let size: std::num::NonZeroU64 = size.parse()?;
+        config.insert("blob_logical_size".into(), json!(size.get()));
     }
-    if let Some(value) = config.get("domain_name").filter(|value| !value.is_null()) {
-        component(value.as_str().context("invalid storage domain")?)?;
-    }
-
-    if !config.contains_key("vid") {
-        let domain = domain.context("volume identifier requires its Qubes VM")?;
-        let generation = config
-            .get("generation")
-            .and_then(Value::as_str)
-            .context("airlock-closure volume requires generation")?;
-        let name = config
+    let metadata: Metadata = serde_json::from_value(Value::Object(config.clone()))?;
+    let result = normalize_typed(NormalizationInput {
+        domain: domain.cloned(),
+        name: config
             .get("name")
             .and_then(Value::as_str)
-            .unwrap_or("store");
-        component(name)?;
-        let fallback = if matches!(name, "builder-store" | "builder-data") {
-            format!("{domain}-build-store")
-        } else {
-            super::runtime_namespace(domain.as_str())
-        };
-        let namespace = config
-            .get("domain_name")
-            .and_then(Value::as_str)
-            .unwrap_or(&fallback);
-        let vid = format!("domains/{namespace}/generations/{generation}/{name}");
-        let namespace = namespace.to_owned();
+            .unwrap_or("store")
+            .into(),
+        vid_supplied: config.contains_key("vid"),
+        writable,
+        snapshot,
+        has_source,
+        metadata,
+    })?;
+    config.insert("rw".into(), json!(result.options.writable()));
+    config.insert("snap_on_start".into(), json!(result.options.snapshot()));
+    config.insert("save_on_stop".into(), json!(result.options.persistent()));
+    if let Some(vid) = result.generated_vid {
         config.insert("vid".into(), json!(vid));
-        config.insert("domain_name".into(), json!(namespace));
     }
-
-    let kind = config
-        .entry("view_kind")
-        .or_insert(json!("metadata-image"))
-        .clone();
-    let _: ViewKind = serde_json::from_value(kind.clone())?;
-    for key in ["view_path", "blob_map_path", "manifest_path"] {
-        let value = config.entry(key).or_insert(Value::Null);
-        if let Some(path) = value.as_str().filter(|path| !path.is_empty()) {
-            let path = std::path::absolute(path)?;
-            absolute(&path)?;
-            *value = json!(path);
-        } else {
-            ensure!(value.is_null() || value == "", "invalid storage path");
-            *value = Value::Null;
-        }
-    }
-
-    // Mapper paths exist only while attached and must never be persisted in qubes.xml.
-    if kind == "erofs-blob-map" {
-        config.insert("view_path".into(), Value::Null);
-    }
-    if let Some(value) = config
-        .get_mut("blob_logical_size")
-        .filter(|value| !value.is_null())
-    {
-        let size = if let Some(text) = value.as_str() {
-            text.parse::<u64>()?
-        } else {
-            value.as_u64().context("invalid blob logical size")?
-        };
-        ensure!(size > 0, "blob logical size must be positive");
-        *value = json!(size);
-    }
-    for key in [
-        "domain_name",
-        "generation",
-        "closure_hash",
-        "blob_logical_size",
-    ] {
-        config.entry(key).or_insert(Value::Null);
-    }
-    config.insert("rw".into(), json!(false));
-    config.insert("snap_on_start".into(), json!(false));
-    config.insert("save_on_stop".into(), json!(true));
-
-    let mut fields = serde_json::Map::new();
-    for key in [
-        "domain_name",
-        "generation",
-        "closure_hash",
-        "view_kind",
-        "view_path",
-        "blob_map_path",
-        "blob_logical_size",
-        "manifest_path",
-    ] {
-        fields.insert(
-            key.into(),
-            config.remove(key).expect("normalized metadata field"),
-        );
+    let fields = serde_json::to_value(result.metadata)?;
+    for key in fields.as_object().expect("metadata fields").keys() {
+        config.remove(key);
     }
     let persisted = fields
+        .as_object()
+        .expect("metadata fields")
         .iter()
         .filter(|(_, value)| !value.is_null())
         .map(|(key, value)| (key.clone(), value.clone()))
@@ -151,31 +79,87 @@ pub(super) fn normalize(
     Ok(json!({"config":config,"fields":fields,"persisted":persisted}))
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "kebab-case")]
-enum Action {
-    Create,
-    Verify,
-    Start,
-    Stop,
-    BlockDevice,
-    Immutable,
+/// Normalize only Airlock-owned fields; upstream kwargs never enter this typed engine interface.
+pub(crate) fn normalize_typed(mut input: NormalizationInput) -> Result<Normalized> {
+    let options = ImmutableOptions::check(
+        input.metadata.definition.view_kind,
+        input.writable,
+        input.snapshot,
+        input.has_source,
+    )
+    .context("airlock-closure volumes are read-only, without snapshots or source volumes")?;
+    if let Some(domain) = &input.metadata.domain_name {
+        component(domain)?;
+    }
+    let generated_vid = if !input.vid_supplied {
+        let domain = input
+            .domain
+            .context("volume identifier requires its Qubes VM")?;
+        let generation = input
+            .metadata
+            .generation
+            .context("airlock-closure volume requires generation")?;
+        component(&input.name)?;
+        let fallback = if matches!(input.name.as_str(), "builder-store" | "builder-data") {
+            format!("{domain}-build-store")
+        } else {
+            super::runtime_namespace(domain.as_str())
+        };
+        let namespace = input.metadata.domain_name.get_or_insert(fallback);
+        Some(format!(
+            "domains/{namespace}/generations/{generation}/{name}",
+            name = input.name
+        ))
+    } else {
+        None
+    };
+    for path in [
+        &mut input.metadata.definition.view_path,
+        &mut input.metadata.definition.blob_map_path,
+        &mut input.metadata.definition.manifest_path,
+    ] {
+        *path = match path.as_ref().filter(|path| !path.as_os_str().is_empty()) {
+            Some(value) => {
+                let value = std::path::absolute(value)?;
+                absolute(&value)?;
+                Some(value)
+            }
+            None => None,
+        };
+    }
+    let path = input
+        .metadata
+        .definition
+        .view_path
+        .take()
+        .map(|path| {
+            path.into_os_string()
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("non-UTF-8 volume path"))
+        })
+        .transpose()?;
+    input.metadata.definition.view_path = options.persisted_path(path).map(PathBuf::from);
+    Ok(Normalized {
+        generated_vid,
+        metadata: input.metadata,
+        options,
+    })
 }
 
-/// One Qubes callback with its current primitive configuration and attached path.
+/// Serialized compatibility lifecycle input; decoded once before invoking the typed engine.
 #[derive(Deserialize)]
 pub(super) struct Request {
-    // Observable lifecycle operation selected by Qubes, never a shell command.
-    action: Action,
-    // Pool whose admission lock protects mapper and running-reference changes.
+    // Closed action spelling parsed by verified Rust below.
+    action: String,
+    // Existing pool admission-lock namespace.
     root: PathBuf,
-    // Store namespace; ordinary metadata volumes may have no retained generation.
+    // Namespace and generation are used together; incomplete legacy metadata has no retained identity.
     domain: Option<String>,
-    // Persisted decimal generation identifier shared with upstream Qubes.
+    // Decimal wire generation, converted to a positive numeric identity.
     generation: Option<String>,
-    // Independent running-reference key, such as store or store-data.
+    // Independent running-reference key.
     name: String,
-    // Immutable view plus its transient mapper path, if already attached.
+    // Existing serialized immutable-view metadata.
     #[serde(flatten)]
     definition: Definition,
 }
@@ -214,73 +198,114 @@ fn filtered_device(
     Ok(device)
 }
 
-/// Execute a complete callback so Python never coordinates device and pin changes.
-pub(super) fn execute(mut request: Request) -> Result<Value> {
+/// Preserve the serialized CLI while native callbacks use the typed entry point directly.
+pub(super) fn execute(request: Request) -> Result<Value> {
+    let action = Action::parse(&request.action).context("unsupported volume lifecycle action")?;
+    if matches!(action, Action::Immutable) {
+        bail!("airlock-closure volumes are immutable");
+    }
+    let identity = request
+        .domain
+        .zip(request.generation)
+        .map(|(domain, generation)| -> Result<_> {
+            Ok(GenerationIdentity {
+                domain,
+                generation: generation.parse()?,
+            })
+        })
+        .transpose()?;
+    Ok(json!({"path":execute_typed(LifecycleRequest {
+        action, root: request.root, identity, name: request.name, definition: request.definition,
+    })?, "valid":true}))
+}
+
+/// Execute only the verified callback effects while holding their required admission lock.
+pub(crate) fn execute_typed(mut request: LifecycleRequest) -> Result<Option<PathBuf>> {
     if matches!(request.action, Action::Immutable) {
         bail!("airlock-closure volumes are immutable");
     }
     absolute(&request.root)?;
     component(&request.name)?;
-    let identity = request
-        .domain
-        .as_deref()
-        .zip(request.generation.as_deref())
-        .map(|(domain, generation)| -> Result<_> {
-            component(domain)?;
-            let generation = generation.parse::<u64>()?;
-            ensure!(generation > 0, "generation must be positive");
-            Ok((domain, generation))
-        })
-        .transpose()?;
-    let blob = matches!(request.definition.view_kind, ViewKind::ErofsBlobMap);
-    let runtime = matches!(
+    if let Some(identity) = &request.identity {
+        component(&identity.domain)?;
+    }
+    let guard = if admission_lock(
         request.action,
-        Action::Start | Action::Stop | Action::Verify | Action::BlockDevice
-    );
-    let pins = identity.is_some() && matches!(request.action, Action::Start | Action::Stop);
-    let _guard = if (blob && runtime) || pins {
+        request.definition.view_kind,
+        request.identity.is_some(),
+    ) {
         ensure_pool(&request.root)?;
         Some(PoolLock::acquire(&request.root.join("admission.lock"))?)
     } else {
         None
     };
+    // Mapper availability can change while waiting for admission. Observe it only
+    // after acquiring the lock, and only for callbacks that reuse existing devices.
+    let path_exists = matches!(
+        request.definition.view_kind,
+        crate::storage_plugin::ViewKind::ErofsBlobMap
+    ) && matches!(request.action, Action::Verify | Action::BlockDevice)
+        && request
+            .definition
+            .view_path
+            .as_ref()
+            .is_some_and(|path| path.exists());
+    let plan = LifecyclePlan::select(
+        request.action,
+        request.definition.view_kind,
+        request.identity.is_some(),
+        path_exists,
+    )
+    .context("missing domain/generation for blob-map view")?;
+    ensure!(
+        !plan.requires_lock() || guard.is_some(),
+        "lifecycle admission lock is missing"
+    );
 
-    if matches!(request.action, Action::Stop) {
-        if let Some((domain, generation)) = identity {
-            if blob {
-                views::attach(&request.root, domain, generation, false)?;
+    for effect in plan.effects() {
+        match effect {
+            Effect::Verify => verify(&request.definition)?,
+            Effect::Attach => {
+                let identity = request
+                    .identity
+                    .as_ref()
+                    .context("missing retained mapper identity")?;
+                request.definition.view_path = Some(attached_device(views::attach(
+                    &request.root,
+                    &identity.domain,
+                    identity.generation.get(),
+                    true,
+                )?)?);
+            }
+            Effect::Detach => {
+                let identity = request
+                    .identity
+                    .as_ref()
+                    .context("missing retained mapper identity")?;
+                views::attach(
+                    &request.root,
+                    &identity.domain,
+                    identity.generation.get(),
+                    false,
+                )?;
                 request.definition.view_path = None;
             }
-            records::running(&request.root, domain, generation, &request.name, false)?;
-        }
-    } else {
-        verify(&request.definition)?;
-        if blob
-            && !matches!(request.action, Action::Create)
-            && (matches!(request.action, Action::Start)
-                || !request
-                    .definition
-                    .view_path
+            Effect::Pin | Effect::Unpin => {
+                let identity = request
+                    .identity
                     .as_ref()
-                    .is_some_and(|path| path.exists()))
-        {
-            let (domain, generation) =
-                identity.context("missing domain/generation for blob-map view")?;
-            request.definition.view_path = Some(attached_device(views::attach(
-                &request.root,
-                domain,
-                generation,
-                true,
-            )?)?);
-        }
-        if matches!(request.action, Action::Start)
-            && let Some((domain, generation)) = identity
-        {
-            records::running(&request.root, domain, generation, &request.name, true)?;
+                    .context("missing retained running identity")?;
+                records::running(
+                    &request.root,
+                    &identity.domain,
+                    identity.generation.get(),
+                    &request.name,
+                    matches!(effect, Effect::Pin),
+                )?;
+            }
         }
     }
-
-    Ok(json!({"path":request.definition.view_path,"valid":true}))
+    Ok(request.definition.view_path)
 }
 
 #[cfg(test)]

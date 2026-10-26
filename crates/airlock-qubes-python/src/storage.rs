@@ -1,49 +1,176 @@
-//! Implement Qubes pool and volume callbacks with the native immutable-storage engine.
+//! Implement Qubes callbacks with typed in-process engine calls.
+//! Upstream kwargs remain Python objects; only Airlock metadata crosses into native policy.
 
 use crate::{argument, keyword, native};
-use airlock_qubes::{descriptor, values};
+use airlock_dom0_service::storage_plugin::{
+    self as engine, Action, Definition, GenerationIdentity, LifecycleRequest, Metadata,
+    NormalizationInput, ViewKind,
+};
+use airlock_qubes::descriptor;
 use pyo3::{
     prelude::*,
-    types::{PyDict, PyTuple},
+    types::{PyBool, PyDict, PyInt, PyTuple},
 };
-use serde_json::{Value, json};
+use std::{
+    num::NonZeroU64,
+    path::{Path, PathBuf},
+};
 
-/// Read one object's primitive field without letting Python objects cross the engine boundary.
-fn field(object: &Bound<'_, PyAny>, name: &str) -> PyResult<Value> {
-    values::plain(&object.getattr(name)?)
-        .map_err(|error| crate::exception(object.py(), "StoragePoolException", error))
+/// Report malformed adapter inputs through upstream's storage exception family.
+fn invalid(py: Python<'_>, message: impl std::fmt::Display) -> PyErr {
+    crate::exception(py, "StoragePoolException", message)
 }
 
-/// Collect persisted view identity plus its current transient device path.
-fn definition(object: &Bound<'_, PyAny>) -> PyResult<Value> {
-    Ok(json!({
-        "view_kind": field(object, "view_kind")?,
-        "view_path": field(object, "path")?,
-        "blob_map_path": field(object, "blob_map_path")?,
-        "blob_logical_size": field(object, "blob_logical_size")?,
-        "manifest_path": field(object, "manifest_path")?,
-    }))
+/// Extract an optional string while preserving Python None.
+fn text(value: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
+    if value.is_none() {
+        Ok(None)
+    } else {
+        value
+            .extract()
+            .map(Some)
+            .map_err(|error| invalid(value.py(), error))
+    }
 }
 
-/// Run one complete native lifecycle operation and retain its returned device path.
-fn lifecycle(object: &Bound<'_, PyAny>, action: &str) -> PyResult<()> {
-    let mut request = definition(object)?;
-    let pool = object.getattr("pool")?;
-    let fields = json!({
-        "operation": "volume-lifecycle", "action": action,
-        "root": field(&pool, "root_dir")?, "domain": field(object, "domain_name")?,
-        "generation": field(object, "generation")?, "name": field(object, "name")?,
-    });
-    request
-        .as_object_mut()
-        .unwrap()
-        .extend(fields.as_object().unwrap().clone());
-    let result = native(object.py(), request)?;
-    object.setattr("path", values::python(object.py(), &result["path"])?)?;
-    Ok(())
+/// Accept the existing persisted decimal spelling or a positive Python integer.
+fn number(value: &Bound<'_, PyAny>) -> PyResult<Option<NonZeroU64>> {
+    if value.is_none() {
+        return Ok(None);
+    }
+    if value.is_instance_of::<PyBool>() {
+        return Err(invalid(
+            value.py(),
+            "storage size/generation must not be boolean",
+        ));
+    }
+    let number = if let Ok(text) = value.extract::<String>() {
+        text.parse::<u64>()
+            .map_err(|error| invalid(value.py(), error))?
+    } else {
+        if !value.is_instance_of::<PyInt>() {
+            return Err(invalid(
+                value.py(),
+                "storage size/generation must be an integer or decimal string",
+            ));
+        }
+        value
+            .extract::<u64>()
+            .map_err(|error| invalid(value.py(), error))?
+    };
+    NonZeroU64::new(number)
+        .map(Some)
+        .ok_or_else(|| invalid(value.py(), "storage size/generation must be positive"))
 }
 
-/// Forward pool callbacks while keeping Qubes' base class responsible for its own fields.
+/// Extract a path without transporting it through JSON.
+fn path(value: &Bound<'_, PyAny>) -> PyResult<Option<PathBuf>> {
+    Ok(text(value)?.map(PathBuf::from))
+}
+
+/// Preserve upstream string path fields; this interface accepts UTF-8 configuration paths.
+fn path_text(value: &Path) -> PyResult<&str> {
+    value
+        .to_str()
+        .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("non-UTF-8 storage path"))
+}
+
+/// Remove one Airlock-owned constructor field, preserving absence as Python None.
+fn take<'py>(config: &Bound<'py, PyDict>, name: &str) -> PyResult<Bound<'py, PyAny>> {
+    let value = config
+        .get_item(name)?
+        .unwrap_or(config.py().None().into_bound(config.py()));
+    if config.contains(name)? {
+        config.del_item(name)?;
+    }
+    Ok(value)
+}
+
+/// Reject unknown view implementations using the production verified parser.
+fn kind(value: &Bound<'_, PyAny>) -> PyResult<ViewKind> {
+    let name: String = value
+        .extract()
+        .map_err(|error| invalid(value.py(), error))?;
+    ViewKind::parse(&name).ok_or_else(|| invalid(value.py(), "unsupported storage view kind"))
+}
+
+/// Preserve strict boolean constructor semantics rather than accepting truthy Python objects.
+fn flag(config: &Bound<'_, PyDict>, name: &str) -> PyResult<bool> {
+    match config.get_item(name)? {
+        None => Ok(false),
+        Some(value) if value.is_instance_of::<PyBool>() => value.extract(),
+        Some(_) => Err(invalid(
+            config.py(),
+            "immutable volume flag must be boolean",
+        )),
+    }
+}
+
+/// Collect observed view metadata directly into the shared Rust definition.
+fn definition(object: &Bound<'_, PyAny>) -> PyResult<Definition> {
+    Ok(Definition {
+        view_kind: kind(&object.getattr("view_kind")?)?,
+        view_path: path(&object.getattr("path")?)?,
+        blob_map_path: path(&object.getattr("blob_map_path")?)?,
+        blob_logical_size: number(&object.getattr("blob_logical_size")?)?,
+        manifest_path: path(&object.getattr("manifest_path")?)?,
+    })
+}
+
+/// Build upstream metadata fields at the Python edge, without an intermediate JSON record.
+fn metadata_fields<'py>(py: Python<'py>, metadata: &Metadata) -> PyResult<Bound<'py, PyDict>> {
+    let fields = PyDict::new(py);
+    fields.set_item("domain_name", &metadata.domain_name)?;
+    fields.set_item(
+        "generation",
+        metadata.generation.map(|value| value.to_string()),
+    )?;
+    fields.set_item("closure_hash", &metadata.closure_hash)?;
+    let view = &metadata.definition;
+    fields.set_item("view_kind", view.view_kind.name())?;
+    fields.set_item(
+        "view_path",
+        view.view_path.as_deref().map(path_text).transpose()?,
+    )?;
+    fields.set_item(
+        "blob_map_path",
+        view.blob_map_path.as_deref().map(path_text).transpose()?,
+    )?;
+    fields.set_item(
+        "blob_logical_size",
+        view.blob_logical_size.map(NonZeroU64::get),
+    )?;
+    fields.set_item(
+        "manifest_path",
+        view.manifest_path.as_deref().map(path_text).transpose()?,
+    )?;
+    Ok(fields)
+}
+
+/// Execute one typed lifecycle request, keeping mapper and running-reference ordering in Rust.
+fn lifecycle(object: &Bound<'_, PyAny>, action: Action) -> PyResult<()> {
+    let domain = text(&object.getattr("domain_name")?)?;
+    let generation = number(&object.getattr("generation")?)?;
+    let identity = domain
+        .zip(generation)
+        .map(|(domain, generation)| GenerationIdentity { domain, generation });
+    let request = LifecycleRequest {
+        action,
+        root: PathBuf::from(
+            object
+                .getattr("pool")?
+                .getattr("root_dir")?
+                .extract::<String>()?,
+        ),
+        identity,
+        name: object.getattr("name")?.extract()?,
+        definition: definition(object)?,
+    };
+    let result = native(object.py(), || engine::lifecycle(request))?;
+    object.setattr("path", result.as_deref().map(path_text).transpose()?)
+}
+
+/// Forward pool callbacks while keeping upstream's own fields and object construction intact.
 fn pool(
     name: &str,
     args: &Bound<'_, PyTuple>,
@@ -51,7 +178,7 @@ fn pool(
 ) -> PyResult<Py<PyAny>> {
     let py = args.py();
     let object = argument(args, 0)?;
-    let result = match name {
+    match name {
         "__init__" => {
             let options = PyDict::new(py);
             options.set_item("name", keyword(kwargs, "name")?)?;
@@ -80,28 +207,31 @@ fn pool(
                 .map(|value| value.extract::<String>())
                 .transpose()?
                 .unwrap_or_else(|| "/var/lib/airlock/closure-store".into());
-            let normalized = native(
-                py,
-                json!({"operation":"pool-root", "root":root, "create":false}),
-            )?;
-            object.setattr("root_dir", values::python(py, &normalized["root"])?)?;
+            let root = PathBuf::from(root);
+            let normalized = native(py, || engine::pool_root(&root, false))?;
+            object.setattr("root_dir", path_text(&normalized)?)?;
             object.setattr("_volumes", PyDict::new(py))?;
-            return Ok(py.None());
+            Ok(py.None())
         }
-        "config" => json!({
-            "name": field(&object, "name")?, "driver":"airlock-closure",
-            "root_dir": field(&object, "root_dir")?,
-            "revisions_to_keep": field(&object, "revisions_to_keep")?,
-            "ephemeral_volatile": field(&object, "ephemeral_volatile")?,
-        }),
+        "config" => {
+            let fields = PyDict::new(py);
+            for key in [
+                "name",
+                "root_dir",
+                "revisions_to_keep",
+                "ephemeral_volatile",
+            ] {
+                fields.set_item(key, object.getattr(key)?)?;
+            }
+            fields.set_item("driver", "airlock-closure")?;
+            Ok(fields.into_any().unbind())
+        }
         "setup" => {
-            native(
-                py,
-                json!({"operation":"pool-root", "root":field(&object,"root_dir")?, "create":true}),
-            )?;
-            return Ok(object.unbind());
+            let root = PathBuf::from(object.getattr("root_dir")?.extract::<String>()?);
+            native(py, || engine::pool_root(&root, true))?;
+            Ok(object.unbind())
         }
-        "destroy" => return Ok(object.unbind()),
+        "destroy" => Ok(object.unbind()),
         "init_volume" => {
             let vm = argument(args, 1)?;
             let config = argument(args, 2)?.cast_into::<PyDict>()?.copy()?;
@@ -117,37 +247,115 @@ fn pool(
             object
                 .getattr("_volumes")?
                 .set_item(volume.getattr("vid")?, &volume)?;
-            return Ok(volume.unbind());
+            Ok(volume.unbind())
         }
-        "list_volumes" => {
-            return Ok(py
-                .import("builtins")?
-                .getattr("list")?
-                .call1((object.getattr("_volumes")?.call_method0("values")?,))?
-                .unbind());
-        }
-        "get_volume" => {
-            return Ok(object
-                .getattr("_volumes")?
-                .get_item(argument(args, 1)?)?
-                .unbind());
-        }
+        "list_volumes" => Ok(py
+            .import("builtins")?
+            .getattr("list")?
+            .call1((object.getattr("_volumes")?.call_method0("values")?,))?
+            .unbind()),
+        "get_volume" => Ok(object
+            .getattr("_volumes")?
+            .get_item(argument(args, 1)?)?
+            .unbind()),
         "size" | "usage" => {
-            let result = native(
-                py,
-                json!({
-                    "operation":"pool-stats", "root":field(&object,"root_dir")?,
-                    "include_usage":name=="usage",
-                }),
-            )?;
-            result[name].clone()
+            let root = PathBuf::from(object.getattr("root_dir")?.extract::<String>()?);
+            let result = native(py, || engine::pool_stats(&root, name == "usage"))?;
+            let value = if name == "size" {
+                result.size
+            } else {
+                result
+                    .usage
+                    .ok_or_else(|| invalid(py, "pool usage was not collected"))?
+            };
+            Ok(value.into_pyobject(py)?.into_any().unbind())
         }
-        _ => return Err(pyo3::exceptions::PyAttributeError::new_err(name.to_owned())),
-    };
-    Ok(values::python(py, &result)?.unbind())
+        _ => Err(pyo3::exceptions::PyAttributeError::new_err(name.to_owned())),
+    }
 }
 
-/// Forward immutable-volume callbacks without duplicating engine policy or mapper operations.
+/// Normalize constructor metadata while retaining unrelated upstream kwargs as Python objects.
+fn initialize(object: &Bound<'_, PyAny>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
+    let py = object.py();
+    let pool = keyword(kwargs, "pool")?;
+    let config = kwargs
+        .ok_or_else(|| pyo3::exceptions::PyTypeError::new_err("missing volume configuration"))?
+        .copy()?;
+    config.del_item("pool")?;
+    let domain = take(&config, "_domain")?;
+    let domain = if domain.is_none() {
+        None
+    } else {
+        Some(
+            domain
+                .extract::<String>()?
+                .parse()
+                .map_err(|error| invalid(py, error))?,
+        )
+    };
+    let source = take(&config, "source")?;
+    let name = config
+        .get_item("name")?
+        .map(|value| value.extract::<String>())
+        .transpose()?
+        .unwrap_or_else(|| "store".into());
+    let writable = flag(&config, "rw")?;
+    let snapshot = flag(&config, "snap_on_start")?;
+    let view_kind = match config.get_item("view_kind")? {
+        Some(value) => kind(&value)?,
+        None => ViewKind::MetadataImage,
+    };
+    if config.contains("view_kind")? {
+        config.del_item("view_kind")?;
+    }
+    let metadata = Metadata {
+        domain_name: text(&take(&config, "domain_name")?)?,
+        generation: number(&take(&config, "generation")?)?,
+        closure_hash: text(&take(&config, "closure_hash")?)?,
+        definition: Definition {
+            view_kind,
+            view_path: path(&take(&config, "view_path")?)?,
+            blob_map_path: path(&take(&config, "blob_map_path")?)?,
+            blob_logical_size: number(&take(&config, "blob_logical_size")?)?,
+            manifest_path: path(&take(&config, "manifest_path")?)?,
+        },
+    };
+    let input = NormalizationInput {
+        domain,
+        name,
+        vid_supplied: config.contains("vid")?,
+        writable,
+        snapshot,
+        has_source: !source.is_none(),
+        metadata,
+    };
+    let result = native(py, || engine::normalize(input))?;
+    config.set_item("rw", result.options().writable())?;
+    config.set_item("snap_on_start", result.options().snapshot())?;
+    config.set_item("save_on_stop", result.options().persistent())?;
+    if let Some(vid) = result.generated_vid() {
+        config.set_item("vid", vid)?;
+    }
+    config.set_item("pool", pool)?;
+    py.import("qubes.storage")?.getattr("Volume")?.call_method(
+        "__init__",
+        (object,),
+        Some(&config),
+    )?;
+
+    let fields = metadata_fields(py, result.metadata())?;
+    let persisted = PyDict::new(py);
+    for (key, value) in fields.iter() {
+        let key: String = key.extract()?;
+        object.setattr(if key == "view_path" { "path" } else { &key }, &value)?;
+        if !value.is_none() {
+            persisted.set_item(key, value)?;
+        }
+    }
+    object.setattr("_persisted", persisted)
+}
+
+/// Dispatch upstream volume methods into typed normalization, lifecycle and accounting operations.
 fn volume(
     name: &str,
     args: &Bound<'_, PyTuple>,
@@ -157,51 +365,7 @@ fn volume(
     let object = argument(args, 0)?;
     match name {
         "__init__" => {
-            let pool = keyword(kwargs, "pool")?;
-            let config = kwargs
-                .ok_or_else(|| {
-                    pyo3::exceptions::PyTypeError::new_err("missing volume configuration")
-                })?
-                .copy()?;
-            config.del_item("pool")?;
-            let domain = config
-                .get_item("_domain")?
-                .unwrap_or(py.None().into_bound(py));
-            if config.contains("_domain")? {
-                config.del_item("_domain")?;
-            }
-            let source = config
-                .get_item("source")?
-                .unwrap_or(py.None().into_bound(py));
-            if config.contains("source")? {
-                config.del_item("source")?;
-            }
-            let domain = values::plain(&domain)
-                .map_err(|error| crate::exception(py, "StoragePoolException", error))?;
-            let config = values::plain(config.as_any())
-                .map_err(|error| crate::exception(py, "StoragePoolException", error))?;
-            let normalized = native(
-                py,
-                json!({
-                    "operation":"volume-config", "domain":domain,
-                    "config":config,
-                    "has_source":!source.is_none(),
-                }),
-            )?;
-            let options = values::python(py, &normalized["config"])?.cast_into::<PyDict>()?;
-            options.set_item("pool", pool)?;
-            py.import("qubes.storage")?.getattr("Volume")?.call_method(
-                "__init__",
-                (&object,),
-                Some(&options),
-            )?;
-            for (key, value) in normalized["fields"].as_object().unwrap() {
-                object.setattr(
-                    if key == "view_path" { "path" } else { key },
-                    values::python(py, value)?,
-                )?;
-            }
-            object.setattr("_persisted", values::python(py, &normalized["persisted"])?)?;
+            initialize(&object, kwargs)?;
             Ok(py.None())
         }
         "config" => {
@@ -219,13 +383,34 @@ fn volume(
             )?;
             Ok(base.into_any().unbind())
         }
-        "definition" => Ok(values::python(py, &definition(&object)?)?.unbind()),
+        "definition" => {
+            let fields = metadata_fields(
+                py,
+                &Metadata {
+                    domain_name: None,
+                    generation: None,
+                    closure_hash: None,
+                    definition: definition(&object)?,
+                },
+            )?;
+            for key in ["domain_name", "generation", "closure_hash"] {
+                fields.del_item(key)?;
+            }
+            Ok(fields.into_any().unbind())
+        }
         "lifecycle" => {
-            lifecycle(&object, &argument(args, 1)?.extract::<String>()?)?;
+            let action: String = argument(args, 1)?.extract()?;
+            lifecycle(
+                &object,
+                Action::parse(&action)
+                    .ok_or_else(|| invalid(py, "unsupported volume lifecycle action"))?,
+            )?;
             Ok(object.unbind())
         }
         "create" | "start" | "stop" => {
-            lifecycle(&object, name)?;
+            let action = Action::parse(name)
+                .ok_or_else(|| invalid(py, "unsupported volume lifecycle action"))?;
+            lifecycle(&object, action)?;
             Ok(object.unbind())
         }
         "remove" => {
@@ -237,7 +422,7 @@ fn volume(
             Ok(object.unbind())
         }
         "verify" | "export" => {
-            lifecycle(&object, "verify")?;
+            lifecycle(&object, Action::Verify)?;
             if name == "export" {
                 Ok(object.getattr("path")?.unbind())
             } else {
@@ -245,18 +430,17 @@ fn volume(
             }
         }
         "import_data" | "import_volume" | "resize" => {
-            lifecycle(&object, "immutable")?;
+            lifecycle(&object, Action::Immutable)?;
             Ok(py.None())
         }
         "verify_definition" => {
-            let mut request = definition(&object)?;
-            request["operation"] = json!("verify-volume");
-            native(py, request)?;
+            let view = definition(&object)?;
+            native(py, || engine::verify(&view))?;
             Ok(true.into_pyobject(py)?.to_owned().into_any().unbind())
         }
         "is_dirty" | "is_outdated" => Ok(false.into_pyobject(py)?.to_owned().into_any().unbind()),
         "block_device" => {
-            lifecycle(&object, "block-device")?;
+            lifecycle(&object, Action::BlockDevice)?;
             Ok(py
                 .import("qubes.storage")?
                 .getattr("Volume")?
@@ -265,14 +449,20 @@ fn volume(
         }
         "revisions" => Ok(PyDict::new(py).into_any().unbind()),
         "size" | "usage" => {
-            let mut request = definition(&object)?;
-            request["operation"] = json!("volume-stats");
-            request["fallback_size"] = field(&object, "_size")?;
-            let result = native(py, request)?;
+            let view = definition(&object)?;
+            let fallback = object.getattr("_size")?.extract::<u64>()?;
+            let result = native(py, || engine::volume_stats(&view, fallback))?;
             if name == "size" {
-                object.setattr("_size", values::python(py, &result["size"])?)?;
+                object.setattr("_size", result.size)?;
             }
-            Ok(values::python(py, &result[name])?.unbind())
+            let value = if name == "size" {
+                result.size
+            } else {
+                result
+                    .usage
+                    .ok_or_else(|| invalid(py, "volume usage was not collected"))?
+            };
+            Ok(value.into_pyobject(py)?.into_any().unbind())
         }
         _ => Err(pyo3::exceptions::PyAttributeError::new_err(name.to_owned())),
     }

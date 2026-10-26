@@ -118,6 +118,42 @@ fn qubes_properties_use_native_storage_checks() -> Result<()> {
     let reply = adapter(directory, "pool-accounting", json!({"pool":pool}))?;
     assert!(reply["ok"]["size"].as_u64().unwrap() > 0);
     assert_eq!(reply["ok"]["usage"], expected);
+    let constructed = adapter(directory, "constructor", json!({}))?;
+    assert_eq!(
+        constructed["ok"]["vid"],
+        "domains/usr-home-runtime-store/generations/3/store-data"
+    );
+    assert_eq!(constructed["ok"]["rw"], false);
+    assert_eq!(constructed["ok"]["snap_on_start"], false);
+    assert_eq!(constructed["ok"]["save_on_stop"], true);
+    assert_eq!(constructed["ok"]["upstream_identity_preserved"], true);
+    assert_eq!(constructed["ok"]["saved_transient_path"], false);
+    assert!(constructed["ok"]["persisted"].get("view_path").is_none());
+    assert_eq!(constructed["ok"]["persisted"]["generation"], "3");
+    assert_eq!(constructed["ok"]["persisted"]["blob_logical_size"], 4096);
+    for overrides in [
+        json!({"rw":true}),
+        json!({"snap_on_start":true}),
+        json!({"source":"parent"}),
+        json!({"generation":true}),
+        json!({"blob_logical_size":0}),
+        json!({"view_kind":"unknown"}),
+    ] {
+        let refused = adapter(directory, "constructor", json!({"constructor":overrides}))?;
+        assert_eq!(refused["exception"], "StoragePoolException", "{overrides}");
+    }
+    let explicit_null = adapter(
+        directory,
+        "constructor",
+        json!({"constructor":{"vid":null}}),
+    )?;
+    assert_eq!(explicit_null["ok"]["vid"], "store-data");
+    assert!(
+        explicit_null["ok"]["persisted"]
+            .get("domain_name")
+            .is_none()
+    );
+
     Ok(())
 }
 

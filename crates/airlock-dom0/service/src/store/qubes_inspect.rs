@@ -12,26 +12,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[derive(Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub(super) enum ViewKind {
-    MetadataImage,
-    ErofsBlobMap,
-}
-
-#[derive(Deserialize)]
-pub(super) struct Definition {
-    /// Metadata images and filtered external-data views have different startup rules.
-    pub(super) view_kind: ViewKind,
-    /// Read-only image path for metadata; runtime mapper path for external data.
-    pub(super) view_path: Option<PathBuf>,
-    // Immutable extent map used to build a filtered external-data device.
-    blob_map_path: Option<PathBuf>,
-    // External-data address space; zero-sized devices are never valid.
-    blob_logical_size: Option<NonZeroU64>,
-    // Optional generation manifest retained with this immutable software view.
-    manifest_path: Option<PathBuf>,
-}
+use crate::storage_plugin::Stats;
+pub(super) use crate::storage_plugin::{Definition, ViewKind};
 
 #[derive(Deserialize)]
 #[serde(tag = "operation", rename_all = "kebab-case")]
@@ -118,7 +100,7 @@ pub(super) fn absolute(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn verify(definition: &Definition) -> Result<()> {
+pub(crate) fn verify(definition: &Definition) -> Result<()> {
     match definition.view_kind {
         ViewKind::MetadataImage => {
             let path = definition
@@ -159,10 +141,13 @@ pub(super) fn verify(definition: &Definition) -> Result<()> {
     Ok(())
 }
 
-fn pool_stats(root: &Path, include_usage: bool) -> Result<Value> {
+pub(crate) fn pool_stats(root: &Path, include_usage: bool) -> Result<Stats> {
     absolute(root)?;
     if !root.try_exists()? {
-        return Ok(json!({"size":0,"usage":0}));
+        return Ok(Stats {
+            size: 0,
+            usage: Some(0),
+        });
     }
     ensure!(
         fs::symlink_metadata(root)?.is_dir(),
@@ -174,7 +159,10 @@ fn pool_stats(root: &Path, include_usage: bool) -> Result<Value> {
         .checked_mul(stat.f_frsize)
         .context("pool capacity overflow")?;
     if !include_usage {
-        return Ok(json!({"size":capacity}));
+        return Ok(Stats {
+            size: capacity,
+            usage: None,
+        });
     }
 
     let mut usage = 0u64;
@@ -217,7 +205,10 @@ fn pool_stats(root: &Path, include_usage: bool) -> Result<Value> {
         }
     }
 
-    Ok(json!({"size":capacity,"usage":usage}))
+    Ok(Stats {
+        size: capacity,
+        usage: Some(usage),
+    })
 }
 
 pub(super) fn run() -> Result<Value> {
@@ -238,18 +229,7 @@ pub(super) fn run() -> Result<Value> {
 pub(super) fn execute(request: Value) -> Result<Value> {
     let request: Request = serde_json::from_value(request)?;
     match request {
-        Request::PoolRoot { root, create } => {
-            let root = std::path::absolute(root)?;
-            absolute(&root)?;
-            if create {
-                fs::create_dir_all(&root)?;
-                ensure!(
-                    fs::symlink_metadata(&root)?.is_dir(),
-                    "storage pool root is not a real directory"
-                );
-            }
-            Ok(json!({"root":root}))
-        }
+        Request::PoolRoot { root, create } => Ok(json!({"root": pool_root(&root, create)?})),
         Request::VolumeConfig {
             domain,
             config,
@@ -284,7 +264,7 @@ pub(super) fn execute(request: Value) -> Result<Value> {
         Request::PoolStats {
             root,
             include_usage,
-        } => pool_stats(&root, include_usage),
+        } => Ok(serde_json::to_value(pool_stats(&root, include_usage)?)?),
         Request::VerifyVolume { definition } => {
             verify(&definition)?;
             Ok(json!({"valid":true}))
@@ -292,41 +272,64 @@ pub(super) fn execute(request: Value) -> Result<Value> {
         Request::VolumeStats {
             definition,
             fallback_size,
-        } => {
-            let (size, usage) = match definition.view_kind {
-                ViewKind::ErofsBlobMap => (
-                    definition
-                        .blob_logical_size
-                        .map(NonZeroU64::get)
-                        .unwrap_or(fallback_size),
-                    0,
-                ),
-                ViewKind::MetadataImage => match definition.view_path.as_deref() {
-                    Some(path) => {
-                        absolute(path)?;
-                        match fs::metadata(path) {
-                            Ok(metadata) => {
-                                ensure!(metadata.is_file(), "volume image is not a regular file");
-                                (
-                                    metadata.len(),
-                                    metadata
-                                        .blocks()
-                                        .checked_mul(512)
-                                        .context("volume usage overflow")?,
-                                )
-                            }
-                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                                (fallback_size, 0)
-                            }
-                            Err(error) => return Err(error.into()),
-                        }
-                    }
-                    None => (fallback_size, 0),
-                },
-            };
-            Ok(json!({"size":size,"usage":usage}))
-        }
+        } => Ok(serde_json::to_value(volume_stats(
+            &definition,
+            fallback_size,
+        )?)?),
     }
+}
+
+/// Normalize a root using the same checks for typed callbacks and serialized CLI requests.
+pub(crate) fn pool_root(root: &Path, create: bool) -> Result<PathBuf> {
+    let root = std::path::absolute(root)?;
+    absolute(&root)?;
+    if create {
+        fs::create_dir_all(&root)?;
+        ensure!(
+            fs::symlink_metadata(&root)?.is_dir(),
+            "storage pool root is not a real directory"
+        );
+    }
+    Ok(root)
+}
+
+/// Observe one view's accounting without changing its attachment.
+pub(crate) fn volume_stats(definition: &Definition, fallback_size: u64) -> Result<Stats> {
+    let (size, usage) = match definition.view_kind {
+        ViewKind::ErofsBlobMap => (
+            definition
+                .blob_logical_size
+                .map(NonZeroU64::get)
+                .unwrap_or(fallback_size),
+            0,
+        ),
+        ViewKind::MetadataImage => match definition.view_path.as_deref() {
+            Some(path) => {
+                absolute(path)?;
+                match fs::metadata(path) {
+                    Ok(metadata) => {
+                        ensure!(metadata.is_file(), "volume image is not a regular file");
+                        (
+                            metadata.len(),
+                            metadata
+                                .blocks()
+                                .checked_mul(512)
+                                .context("volume usage overflow")?,
+                        )
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        (fallback_size, 0)
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            None => (fallback_size, 0),
+        },
+    };
+    Ok(Stats {
+        size,
+        usage: Some(usage),
+    })
 }
 
 /// Reject storage mutation unless Qubes reports an independent, stopped VM.

@@ -457,3 +457,6 @@ pub mod boot;
 
 /// Setup report aggregation and bound completion decisions.
 pub mod setup;
+
+/// Immutable-volume callback decisions shared with the installed Qubes plugin.
+pub mod volume_lifecycle;

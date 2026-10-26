@@ -59,6 +59,41 @@ fn properties(py: Python<'_>, request: &Value) -> Result<Value> {
             .as_str()
             .context("storage probe operation")?
         {
+            "constructor" => {
+                let options = PyDict::new(py);
+                options.set_item("name", "typed-pool")?;
+                options.set_item("root_dir", request["pool"].as_str().context("pool path")?)?;
+                let pool = module.getattr("ClosurePool")?.call((), Some(&options))?;
+                let mut config = json!({"name":"store-data", "_domain":"usr-home", "generation":"3",
+                    "view_kind":"erofs-blob-map", "view_path":"/dev/mapper/stale",
+                    "blob_map_path":request["map"], "blob_logical_size":"4096"});
+                if let Some(overrides) = request["constructor"].as_object() {
+                    config.as_object_mut().unwrap().extend(overrides.clone());
+                }
+                let kwargs = values::python(py, &config)?
+                    .cast_into::<PyDict>()
+                    .map_err(PyErr::from)?;
+                kwargs.set_item("pool", pool)?;
+                let marker = py.import("builtins")?.getattr("object")?.call0()?;
+                kwargs.set_item("upstream_marker", &marker)?;
+                let volume = module.getattr("ClosureVolume")?.call((), Some(&kwargs))?;
+                let persisted = values::plain(&volume.getattr("_persisted")?)?;
+                ensure!(
+                    volume.getattr("upstream_marker")?.is(&marker),
+                    "upstream kwargs lost Python object identity"
+                );
+                volume.setattr("path", "/dev/mapper/runtime")?;
+                let saved = volume
+                    .getattr("config")?
+                    .cast_into::<PyDict>()
+                    .map_err(PyErr::from)?;
+                Ok(json!({"vid":volume.getattr("vid")?.extract::<String>()?,
+                    "rw":volume.getattr("rw")?.extract::<bool>()?,
+                    "snap_on_start":volume.getattr("snap_on_start")?.extract::<bool>()?,
+                    "save_on_stop":volume.getattr("save_on_stop")?.extract::<bool>()?,
+                    "persisted":persisted,"saved_transient_path":saved.contains("view_path")?,
+                    "upstream_identity_preserved":true}))
+            }
             "definition" => {
                 let valid = object.call_method0("verify_definition")?;
                 let valid = runner.call_method1("run", (valid,))?.extract::<bool>()?;

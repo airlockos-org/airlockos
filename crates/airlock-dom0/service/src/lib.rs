@@ -543,3 +543,6 @@ pub fn storage_objects_request(request: Value) -> Result<airlock_qubes::storage:
 pub fn storage_objects_policy() -> impl airlock_qubes::storage::Policy {
     store::ObjectsPolicy
 }
+
+/// Typed in-process interface used by Qubes storage callbacks.
+pub mod storage_plugin;

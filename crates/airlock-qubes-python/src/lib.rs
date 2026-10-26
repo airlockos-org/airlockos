@@ -12,7 +12,6 @@ use pyo3::{
     prelude::*,
     types::{PyDict, PyTuple},
 };
-use serde_json::Value;
 
 /// Translate an engine rejection into Qubes' own exception family.
 fn exception(py: Python<'_>, class: &str, error: impl std::fmt::Display) -> PyErr {
@@ -27,8 +26,11 @@ fn exception(py: Python<'_>, class: &str, error: impl std::fmt::Display) -> PyEr
 }
 
 /// Call the storage engine in-process, preserving upstream exception types.
-fn native(py: Python<'_>, request: Value) -> PyResult<Value> {
-    py.detach(|| airlock_dom0_service::storage_request(request))
+fn native<T: Send>(
+    py: Python<'_>,
+    operation: impl FnOnce() -> anyhow::Result<T> + Send,
+) -> PyResult<T> {
+    py.detach(operation)
         .map_err(|error| exception(py, "StoragePoolException", format!("{error:#}")))
 }
 

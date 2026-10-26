@@ -41,6 +41,16 @@ construction, upstream execution and observation completeness remain trusted;
 the installed policy and its filesystem checks are ordinary Rust. JSON remains
 at the worker transport and observation boundaries, not the checked dispatch.
 
+The native Qubes storage plugin also calls a typed in-process interface. Immutable
+constructor options and persisted-path selection execute verified Rust. The same
+verified lifecycle selector supplies ordered verification, mapper and generation
+reference effects to the production engine, together with its admission-lock
+requirement. Mapper availability is observed after acquiring that lock.
+Filesystem observations, lock acquisition, device filtering, record
+publication and faithful upstream Python execution remain adapter obligations.
+CLI JSON remains a separate decoder/encoder for this engine; Python kwargs are
+not routed through that decoder.
+
 Cargo tests exercise the erased executable code; compile-fail doctests enforce
 identity distinctions, evidence-versus-authority separation and request lifetimes.
 The dom0 `durable_handoff` namespace scenario also exercises the real persistence
