@@ -1,6 +1,8 @@
 [workspace]
 exclude = ["vendor/rusix", "airlock-store-packer"]
 members = [
+    "airlock-clipboard-core",
+    "airlock-sys-clipboard",
     "airlock-config",
     "airlock-tests",
     "airlock-common/nix",

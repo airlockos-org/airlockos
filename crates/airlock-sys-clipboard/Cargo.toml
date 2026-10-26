@@ -1,0 +1,32 @@
+[package]
+name = "airlock-sys-clipboard"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+publish = false
+license = "MIT"
+description = "Hermit clipboard transport adapter and controlled Xen laboratory peer"
+
+[features]
+default = []
+lab-authority = []
+linux-peer = ["lab-authority", "xen-transport/linux"]
+
+[dependencies]
+airlock-clipboard-core = { path = "../airlock-clipboard-core" }
+# Development link selected explicitly by clipboard-lab; never fetched from GitHub.
+xen-transport = { path = "../../.hermit-xen/crates/xen-transport" }
+
+[target.'cfg(target_os = "hermit")'.dependencies]
+hermit = { git = "https://github.com/hermit-os/hermit-rs", rev = "e9dc6784ad1a2dc6d18c6819ee51198cab9fb78a", default-features = false, features = ["pvh", "fsgsbase", "kernel-stack"] }
+xen-transport = { path = "../../.hermit-xen/crates/xen-transport", features = ["hermit"] }
+
+[[bin]]
+name = "sys-clipboard"
+path = "src/bin/hermit.rs"
+required-features = ["lab-authority"]
+
+[[bin]]
+name = "clipboard-peer"
+path = "src/bin/peer.rs"
+required-features = ["linux-peer"]

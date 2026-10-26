@@ -80,6 +80,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "airlock-clipboard-core"
+version = "0.1.0"
+
+[[package]]
 name = "airlock-config"
 version = "0.1.0"
 dependencies = [
@@ -265,6 +269,15 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "airlock-sys-clipboard"
+version = "0.1.0"
+dependencies = [
+ "airlock-clipboard-core",
+ "hermit",
+ "xen-transport",
 ]
 
 [[package]]
@@ -1831,6 +1844,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "hermit"
+version = "0.13.2"
+source = "git+https://github.com/hermit-os/hermit-rs?rev=e9dc6784ad1a2dc6d18c6819ee51198cab9fb78a#e9dc6784ad1a2dc6d18c6819ee51198cab9fb78a"
+dependencies = [
+ "cc",
+ "home",
+]
+
+[[package]]
 name = "hermit-abi"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1847,6 +1869,15 @@ name = "hexf-parse"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dfa686283ad6dd069f105e5ab091b04c62850d3e4cf5d67debad1933f55023df"
+
+[[package]]
+name = "home"
+version = "0.5.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc627f471c528ff0c4a49e1d5e60450c8f6461dd6d10ba9dcd3a61d3dff7728d"
+dependencies = [
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "icu_collections"
@@ -4617,6 +4648,13 @@ name = "xdg"
 version = "2.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "213b7324336b53d2414b2db8537e56544d981803139155afa84f76eeebb7a546"
+
+[[package]]
+name = "xen-transport"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "xkbcommon-dl"

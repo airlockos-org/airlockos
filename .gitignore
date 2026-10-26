@@ -22,6 +22,7 @@
 
 # Rust compilation artifacts stay in ignored build directories.
 /target/
+/.hermit-xen
 /flake.nix
 /crates/flake.nix
 /crates/airlock-config/generated/
