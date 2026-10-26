@@ -149,6 +149,14 @@ impl PolicyLock {
     }
 }
 
+impl Drop for PolicyLock {
+    fn drop(&mut self) {
+        // Close-on-exec does not close a descriptor during the fork-to-exec window.
+        // Release this completed lease explicitly even if another process inherited it.
+        let _ = self.file.unlock();
+    }
+}
+
 /// Read one bounded, independently owned policy without following links or blocking on special files.
 fn current(target: &Path) -> Result<Option<String>> {
     let file = match OpenOptions::new()
@@ -437,6 +445,21 @@ mod tests {
     }
 
     /// Every invalid declared row prevents filesystem and service effects, including unknown wire fields.
+    /// A descriptor inherited during process creation must not prolong a completed writer lease.
+    #[test]
+    fn writer_lock_releases_even_with_an_inherited_descriptor() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let path = temporary.path().join(".90-airlock.policy.lock");
+        let lock = PolicyLock::acquire(path.clone())?;
+        let inherited = lock.file.try_clone()?;
+        drop(lock);
+
+        let retry = PolicyLock::acquire(path)?;
+        drop(inherited);
+        drop(retry);
+        Ok(())
+    }
+
     #[test]
     fn invalid_or_unknown_rules_never_publish() -> Result<()> {
         let temporary = tempfile::tempdir()?;
