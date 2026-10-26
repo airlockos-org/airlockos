@@ -15,6 +15,7 @@ fn checked() -> airlock_deployment_core::plan::AuthorizedPlan {
 /// Immutable backend parameters captured from the original candidate.
 fn definition() -> Definition {
     Definition {
+        executable: None,
         name: "vm".into(),
         service: "/native/service".into(),
         native: Some(Native {

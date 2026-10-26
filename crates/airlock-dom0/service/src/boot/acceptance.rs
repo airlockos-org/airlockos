@@ -185,11 +185,16 @@ pub(crate) fn observe(
     for name in &names {
         let wanted = requirement(topology, policy, name)?;
         let before = instance(&runner, boot, name.as_str())?;
-        let actual = probe(
-            &runner,
-            "qrexec-client",
-            &["-d", name.as_str(), "user:readlink -f /run/current-system"],
-        )?;
+        let actual = if let Some(artifact) = topology.domains[name].backend.hermit() {
+            crate::hermit::ready(name.as_str(), artifact, before.xid)?;
+            topology.domains[name].backend.system.source.to_string()
+        } else {
+            probe(
+                &runner,
+                "qrexec-client",
+                &["-d", name.as_str(), "user:readlink -f /run/current-system"],
+            )?
+        };
         let mut checked_services = Vec::new();
         for (required, kind) in [
             (wanted.desktop, Service::Desktop),

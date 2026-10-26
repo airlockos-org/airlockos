@@ -203,6 +203,16 @@ impl Coordinator {
     }
 
     fn ensure_available(&self, release: &Release) -> Result<()> {
+        for domain in release.topology.domains.values() {
+            if let Some(artifact) = domain.backend.hermit() {
+                let memory = domain
+                    .prefs
+                    .get("memory")
+                    .and_then(Value::as_u64)
+                    .context("missing Hermit memory")?;
+                crate::hermit::verify(artifact, memory)?;
+            }
+        }
         let key = format!(
             "{:x}",
             Sha256::digest(release.path.as_os_str().as_encoded_bytes())

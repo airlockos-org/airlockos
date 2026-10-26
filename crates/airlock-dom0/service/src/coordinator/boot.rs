@@ -300,9 +300,10 @@ impl Coordinator {
                         topology
                             .domains
                             .iter()
+                            .filter(|(_, domain)| domain.backend.hermit().is_none())
                             .map(|(name, domain)| {
                                 let descriptor: Value = state::read(
-                                    &Path::new(domain.backend.store.source.as_str())
+                                    &Path::new(domain.backend.nixos()?.store.source.as_str())
                                         .join("prepared.json"),
                                 )?;
                                 ensure!(
@@ -469,7 +470,9 @@ impl Coordinator {
         let mut templates = BTreeSet::new();
         for name in names {
             let d = &selection.inputs.topology().domains[name];
-            kernels.insert(d.backend.kernel.name.clone());
+            if let Ok(linux) = d.backend.nixos() {
+                kernels.insert(linux.kernel.name.clone());
+            }
             if let Some(k) = d.prefs.get("kernel").and_then(Value::as_str) {
                 kernels.insert(k.into());
             }

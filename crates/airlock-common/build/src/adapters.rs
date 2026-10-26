@@ -38,6 +38,8 @@ pub fn qubes(pkgs: &NixValue, workspace: &Workspace) -> Package {
             cat > "$site/airlock_qubes-0.1.0.dist-info/entry_points.txt" <<'ENTRY_POINTS'
             [qubes.storage]
             airlock-closure = airlock_qubes:ClosurePool
+            [qubes.vm]
+            HermitVM = airlock_qubes:HermitVM
             ENTRY_POINTS
             runHook postInstall
         "#, site_packages = pkgs.clone().select("python3.sitePackages"),

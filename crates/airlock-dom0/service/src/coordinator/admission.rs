@@ -61,7 +61,13 @@ impl Coordinator {
         let roots: BTreeMap<GuestName, RootDescriptor> =
             state::read(&r.path.join("root-artifacts.json"))?;
         ensure!(
-            roots.keys().collect::<BTreeSet<_>>() == r.topology.domains.keys().collect(),
+            roots.keys().collect::<BTreeSet<_>>()
+                == r.topology
+                    .domains
+                    .iter()
+                    .filter(|(_, d)| d.backend.hermit().is_none())
+                    .map(|(name, _)| name)
+                    .collect(),
             "candidate root inventory differs from domains"
         );
         for (name, refs) in planning::dependencies(&r.topology, false)? {
@@ -73,9 +79,17 @@ impl Coordinator {
         let plan = self.plan(&r)?;
         let mut guests = BTreeMap::new();
         for (name, d) in &r.topology.domains {
+            if d.backend.hermit().is_some() {
+                continue;
+            }
             roots[name].validate()?;
             ensure!(
-                d.backend.root.source.as_str().ends_with("/root.img"),
+                d.backend
+                    .nixos()?
+                    .root
+                    .source
+                    .as_str()
+                    .ends_with("/root.img"),
                 "invalid candidate root source"
             );
             guests.insert(
@@ -83,9 +97,9 @@ impl Coordinator {
                 ExpectedAdmission {
                     domain: name.clone(),
                     system: d.backend.system.source.clone(),
-                    closure_source: d.backend.store.source.clone(),
-                    root_source: d.backend.root.source.clone(),
-                    kernel_name: d.backend.kernel.name.clone(),
+                    closure_source: d.backend.nixos()?.store.source.clone(),
+                    root_source: d.backend.nixos()?.root.source.clone(),
+                    kernel_name: d.backend.nixos()?.kernel.name.clone(),
                     source_revision: r.manifest.revision.clone(),
                     lock_hash: r.manifest.lock_hash.clone(),
                     root_artifact: roots[name].clone(),

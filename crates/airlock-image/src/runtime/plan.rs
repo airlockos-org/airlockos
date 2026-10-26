@@ -19,6 +19,8 @@ use std::{
 
 #[derive(Serialize)]
 pub(super) struct VmPlan {
+    // Backend-specific Qubes class sharing the same identity and lifecycle graph.
+    pub(super) class: String,
     // Validated Qubes VM name, used for paths and cross-VM references.
     pub(super) name: String,
     // Deterministic namespace UUID so identical images preserve VM identity.
@@ -36,7 +38,7 @@ pub(super) struct VmPlan {
     // Fully constructed feature map passed directly to upstream Qubes.
     pub(super) features: BTreeMap<String, String>,
     // Physical seed used only by the build's sparse root copy.
-    pub(super) root_image: PathBuf,
+    pub(super) root_image: Option<PathBuf>,
     // Sparse private-volume capacity; None delegates the default to Qubes.
     pub(super) private_size: Option<u64>,
     // Native storage configurations registered through the upstream driver.
@@ -80,15 +82,54 @@ pub(super) fn storage(arguments: &[&str], request: &Value) -> Result<Value> {
 }
 
 pub(super) fn plan(name: &str, domain: &Domain, pool: &Path) -> Result<VmPlan> {
-    let backend = &domain.backend;
+    let system = &domain.backend.system.source;
+    if let Some(artifact) = domain.backend.hermit() {
+        artifact.validate(false)?;
+        let mut features: BTreeMap<_, _> = domain
+            .features
+            .iter()
+            .map(|(key, value)| Ok((key.clone(), feature(value)?)))
+            .collect::<Result<_>>()?;
+        features.insert(
+            "airlock-hermit-artifact".into(),
+            serde_json::to_string(artifact)?,
+        );
+        features.insert("airlock-system-source".into(), system.to_string());
+        features.insert("airlock-hermit-generation".into(), "image-boot".into());
+        return Ok(VmPlan {
+            class: domain.class.clone(),
+            name: name.into(),
+            uuid: vm_uuid(name),
+            label: domain.label.clone(),
+            color: custom_color(domain)?,
+            prefs: domain
+                .prefs
+                .iter()
+                .filter(|(key, _)| {
+                    !matches!(key.as_str(), "netvm" | "guivm" | "kernelopts" | "kernel")
+                })
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+            kernel: String::new(),
+            kernelopts: String::new(),
+            features,
+            root_image: None,
+            private_size: None,
+            volumes: Vec::new(),
+            netvm: domain.netvm.clone(),
+            guivm: domain.prefs.get("guivm").cloned(),
+            source: system.to_string(),
+        });
+    }
+    let backend = domain.backend.nixos()?;
     let mut admission = storage(
         &["image", "inspect-prepared", "--request", "-"],
         &json!({
-            "descriptor": Path::new(&backend.store.source).join("prepared.json"),
+            "descriptor": Path::new(backend.store.source.as_str()).join("prepared.json"),
             "physical_pool": pool,
             "pool_root": POOL,
             "domain": name,
-            "system": backend.system.source,
+            "system": system,
             "root_source": backend.root.source,
             "kernel_name": backend.kernel.name,
         }),
@@ -151,7 +192,7 @@ pub(super) fn plan(name: &str, domain: &Domain, pool: &Path) -> Result<VmPlan> {
     for (key, value) in [
         ("airlock-backend", "nix-closure"),
         ("airlock-root-source", backend.root.source.as_str()),
-        ("airlock-system-source", backend.system.source.as_str()),
+        ("airlock-system-source", system.as_str()),
         ("airlock-store-source", backend.store.source.as_str()),
         ("airlock-store-mode", "shared-closure"),
         ("airlock-store-view-backend", "erofs-objectmap"),
@@ -199,6 +240,7 @@ pub(super) fn plan(name: &str, domain: &Domain, pool: &Path) -> Result<VmPlan> {
         .collect();
 
     Ok(VmPlan {
+        class: domain.class.clone(),
         name: name.into(),
         uuid: vm_uuid(name),
         label: domain.label.clone(),
@@ -207,11 +249,15 @@ pub(super) fn plan(name: &str, domain: &Domain, pool: &Path) -> Result<VmPlan> {
         kernel: backend.kernel.name.clone(),
         kernelopts: kernelopts(domain)?,
         features,
-        root_image,
-        private_size: backend.state.persistent_size.filter(|v| *v > 0),
+        root_image: Some(root_image),
+        private_size: backend
+            .state
+            .get("persistent_size")
+            .and_then(Value::as_u64)
+            .filter(|v| *v > 0),
         volumes,
         netvm: domain.netvm.clone(),
         guivm: domain.prefs.get("guivm").cloned(),
-        source: backend.store.source.clone(),
+        source: backend.store.source.to_string(),
     })
 }

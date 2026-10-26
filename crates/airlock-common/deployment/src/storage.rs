@@ -90,12 +90,22 @@ pub struct Native {
     pub generation: Option<u64>,
 }
 
+/// Immutable executable identity for a diskless Hermit guest.
+pub struct Executable {
+    /// System store object containing the executable.
+    pub system: String,
+    /// Canonical full artifact descriptor, including digest and source revisions.
+    pub descriptor: String,
+}
+
 /// One checked configuration coordinate, including VMs without native storage.
 pub struct Definition {
     /// Same name and index as the complete checked configure field.
     pub name: String,
     /// Native storage authority exists only for a declared native backend.
     pub native: Option<Native>,
+    /// Diskless executable, mutually exclusive with native Linux storage.
+    pub executable: Option<Executable>,
     /// Native storage executable selected before intent publication.
     pub service: String,
 }

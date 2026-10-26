@@ -269,8 +269,8 @@ fn usb_result_discovery_stays_within_its_store_output() -> Result<()> {
 fn domain_label(label: Value, color: Value) -> Result<Value> {
     let domain: runtime::model::Domain = serde_json::from_value(json!({
         "class": "StandaloneVM", "label": label, "features": {"airlock-label-color": color},
-        "backend": {"type": "nix-closure", "system": {"source": "/system"}, "root": {"source": "/root"},
-            "store": {"source": "/store"}, "kernel": {"name": "kernel"}, "state": {"persistent_size": null}}
+        "backend": {"type": "nix-closure", "system": {"source": "/nix/store/00000000000000000000000000000000-system"}, "root": {"source": "/nix/store/00000000000000000000000000000000-root/root.img"},
+            "store": {"source": "/nix/store/00000000000000000000000000000000-prepared", "mode": "shared-closure", "device": "/dev/xvde", "blobDevice": "/dev/xvdf", "mountpoint": "/nix/store", "viewBackend": "erofs-objectmap"}, "kernel": {"name": "kernel"}, "state": {"persistent_size": null}}
     }))?;
     Ok(json!({"label": label, "color": runtime::model::custom_color(&domain)?}))
 }

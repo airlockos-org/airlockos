@@ -17,6 +17,17 @@ pub(crate) fn prepared(
     offline: NixValue,
 ) -> NixValue {
     let lib = pkgs.clone().select("lib");
+    let entries = lib
+        .clone()
+        .select("filterAttrs")
+        .call(NixValue::function(|_| {
+            NixValue::function(|entry| {
+                entry
+                    .attr_or("backendType", "nix-closure")
+                    .equals("nix-closure")
+            })
+        }))
+        .call(entries);
     let native = Application::Dom0.build(pkgs, workspace).as_expression();
     let specs = lib
         .clone()

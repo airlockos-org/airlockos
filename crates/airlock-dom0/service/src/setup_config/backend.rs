@@ -290,7 +290,19 @@ pub(crate) fn definitions(
             } else {
                 None
             };
+            let executable = if d["backend"]["type"] == "hermit" {
+                let backend: crate::model::Backend = serde_json::from_value(d["backend"].clone())?;
+                Some(verified::Executable {
+                    system: backend.system.source.to_string(),
+                    descriptor: serde_json::to_string(
+                        backend.hermit().context("missing Hermit descriptor")?,
+                    )?,
+                })
+            } else {
+                None
+            };
             Ok(verified::Definition {
+                executable,
                 name: name.clone(),
                 native,
                 service: service.into(),

@@ -6,6 +6,8 @@
 
 mod gpu;
 
+mod hermit;
+
 mod storage;
 
 use pyo3::{
@@ -60,6 +62,11 @@ fn airlock_qubes(module: &Bound<'_, PyModule>) -> PyResult<()> {
 /// Load GPU event registration only when Qubes requests that extension entry point.
 #[pyfunction]
 fn __getattr__(py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
+    if name == "HermitVM" {
+        let module = py.import("airlock_qubes")?;
+        hermit::register(&module)?;
+        return Ok(module.getattr(name)?.unbind());
+    }
     if name != "AMDVBIOS" {
         return Err(pyo3::exceptions::PyAttributeError::new_err(name.to_owned()));
     }

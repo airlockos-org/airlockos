@@ -59,6 +59,17 @@ pub struct NativeObservation {
 
 /// Every topology coordinate must supply its own observation or explicit nonnative classification.
 pub enum Observation {
+    /// Hermit identity and application execution observed for the selected boot.
+    Hermit {
+        /// Original VM whose console and domain identity were observed.
+        name: String,
+        /// Selected immutable system object.
+        system: String,
+        /// Full selected artifact descriptor, not just a caller-reported hash.
+        descriptor: String,
+        /// Executing application identity after current-boot readiness evidence.
+        running_system: Option<String>,
+    },
     /// The named topology entry has no native storage; it supplies no readiness evidence.
     NonNative(
         /// Original VM identity, never an unnamed omission.
@@ -135,7 +146,12 @@ fn record_matches(d: &Definition, stage: &[String], saved: &RecordedResolution) 
 /// A concrete observed generation matches its original journal number and every boot field.
 pub open spec fn observed(d: Definition, saved: RecordedResolution, running: Seq<String>, o: Observation) -> bool {
     match o {
-        Observation::NonNative(name) => d.native.is_none() && name@ == d.name@ && !owned_member(running, d.name@),
+        Observation::Hermit { name, system, descriptor, running_system } => d.native.is_none() && d.executable.is_some()
+            && name@ == d.name@ && system@ == d.executable.unwrap().system@
+            && descriptor@ == d.executable.unwrap().descriptor@
+            && (running_system.is_some() ==> running_system.unwrap()@ == system@)
+            && (owned_member(running, d.name@) ==> running_system.is_some()),
+        Observation::NonNative(name) => d.native.is_none() && d.executable.is_none() && name@ == d.name@ && !owned_member(running, d.name@),
         Observation::Native(n) => staging::agrees(d, n.selection)
             && n.feature_system@ == n.selection.system@ && n.feature_generation == n.selection.generation
             && n.pool_selected
@@ -150,7 +166,14 @@ fn observation_matches(d: &Definition, saved: &RecordedResolution, running: &[St
     ensures yes == observed(*d, *saved, running@, *o),
 {
     match o {
-        Observation::NonNative(name) => d.native.is_none() && name.as_str() == d.name.as_str() && !owned_contains(running, d.name.as_str()),
+        Observation::Hermit { name, system, descriptor, running_system } => {
+            if d.native.is_some() || d.executable.is_none() { return false; }
+            let expected = d.executable.as_ref().unwrap();
+            name.as_str() == d.name.as_str() && system.as_str() == expected.system.as_str() && descriptor.as_str() == expected.descriptor.as_str()
+                && (running_system.is_none() || running_system.as_ref().unwrap().as_str() == system.as_str())
+                && (!owned_contains(running, d.name.as_str()) || running_system.is_some())
+        },
+        Observation::NonNative(name) => d.native.is_none() && d.executable.is_none() && name.as_str() == d.name.as_str() && !owned_contains(running, d.name.as_str()),
         Observation::Native(n) => {
             if !staging::selection_matches(d, &n.selection) || n.feature_system != n.selection.system
                 || n.feature_generation != n.selection.generation || !n.pool_selected { return false; }

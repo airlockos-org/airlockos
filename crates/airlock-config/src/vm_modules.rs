@@ -54,7 +54,10 @@ pub(crate) fn inline(inputs: &Inputs, vm: &VmSnapshot) -> PackageFunction {
                         .call(debug),
                 )
             }
-            Role::Isolated { .. } | Role::Firewall { .. } | Role::Command { .. } => hostname,
+            Role::Service
+            | Role::Isolated { .. }
+            | Role::Firewall { .. }
+            | Role::Command { .. } => hostname,
             Role::Gui {
                 default_application,
                 ..

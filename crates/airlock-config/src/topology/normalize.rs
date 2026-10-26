@@ -175,7 +175,7 @@ fn domain(name: NixValue, value: NixValue) -> NixValue {
                     "backend": NixValue::if_else(
                         backend_kind.clone().equals("nix-closure"),
                         closure,
-                        ordinary,
+                        NixValue::if_else(backend_kind.clone().equals("hermit"), backend.clone(), ordinary),
                     ),
                 };
                 let valid = NixValue::if_else(
@@ -205,11 +205,13 @@ fn domain(name: NixValue, value: NixValue) -> NixValue {
                             backend_kind
                                 .clone()
                                 .equals("nix-closure")
-                                .or(backend_kind.equals("qubes-standalone")),
-                            class
+                                .or(backend_kind.clone().equals("qubes-standalone")),
+                            class.clone()
                                 .equals("StandaloneVM")
+                                .and(template.clone().equals(NixValue::null())),
+                            backend_kind.equals("hermit")
+                                .and(class.equals("HermitVM"))
                                 .and(template.equals(NixValue::null())),
-                            false,
                         ),
                     ),
                 );

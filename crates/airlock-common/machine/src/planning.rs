@@ -134,8 +134,8 @@ pub fn plan(
                 d.class_name == before.class_name
                     && d.template == before.template
                     && d.devices == before.devices
-                    && d.backend.kind == before.backend.kind
-                    && d.backend.state == before.backend.state,
+                    && d.backend.kind() == before.backend.kind()
+                    && d.backend.state() == before.backend.state(),
                 "{name}: domain class, devices or state changes require migration"
             );
             for (a, b) in [

@@ -81,6 +81,38 @@ pub(crate) fn definitions(topology: &Value, program: &str, path: &Path) -> Resul
                 !native || class == "StandaloneVM",
                 "nix-closure requires StandaloneVM"
             );
+            let mut features = settings(domain, "features")?;
+            if domain["backend"]["type"] == "hermit" {
+                let backend: crate::model::Backend =
+                    serde_json::from_value(domain["backend"].clone())?;
+                let artifact = backend.hermit().context("missing Hermit image")?;
+                artifact.validate(false)?;
+                ensure!(
+                    class == "HermitVM",
+                    "Hermit backend requires HermitVM class"
+                );
+                ensure!(
+                    !features.iter().any(|setting| matches!(
+                        setting.name.as_str(),
+                        "airlock-hermit-artifact"
+                            | "airlock-hermit-generation"
+                            | "airlock-system-source"
+                    )),
+                    "Hermit artifact feature is derived from the admitted backend"
+                );
+                features.push(Setting {
+                    name: "airlock-hermit-generation".into(),
+                    value: path.to_str().context("invalid generation path")?.into(),
+                });
+                features.push(Setting {
+                    name: "airlock-system-source".into(),
+                    value: backend.system.source.to_string(),
+                });
+                features.push(Setting {
+                    name: "airlock-hermit-artifact".into(),
+                    value: serde_json::to_string(artifact)?,
+                });
+            }
             let mut properties = vec![Setting {
                 name: "label".into(),
                 value: label.into(),
@@ -129,7 +161,7 @@ pub(crate) fn definitions(topology: &Value, program: &str, path: &Path) -> Resul
                 label: label.into(),
                 template,
                 properties,
-                features: settings(domain, "features")?,
+                features,
                 services: settings(domain, "services")?,
                 helper: Some(Helper {
                     program: program.into(),

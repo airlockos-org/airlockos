@@ -65,22 +65,22 @@ impl Coordinator {
             "{name}: generation system differs"
         );
         ensure!(
-            info.root_source == b.root.source,
+            info.root_source == b.nixos()?.root.source,
             "{name}: generation root differs"
         );
         ensure!(
-            info.kernel_name == b.kernel.name,
+            info.kernel_name == b.nixos()?.kernel.name,
             "{name}: generation kernel differs"
         );
         ensure!(
-            info.closure_source == b.store.source,
+            info.closure_source == b.nixos()?.store.source,
             "{name}: generation closure differs"
         );
         ensure!(
-            info.store.mountpoint == b.store.mountpoint
-                && info.store.device == b.store.device
-                && info.store.blob_device == b.store.blob_device
-                && info.store.view_backend == b.store.view_backend,
+            info.store.mountpoint == b.nixos()?.store.mountpoint
+                && info.store.device == b.nixos()?.store.device
+                && info.store.blob_device == b.nixos()?.store.blob_device
+                && info.store.view_backend == b.nixos()?.store.view_backend,
             "{name}: storage configuration differs"
         );
         ensure!(
@@ -116,7 +116,7 @@ impl Coordinator {
             let approval: GenerationApproval = serde_json::from_value(info.approval.clone())
                 .context("invalid generation approval")?;
             ensure!(
-                approval.source == b.store.source,
+                approval.source == b.nixos()?.store.source,
                 "{name}: generation approval differs"
             );
 
@@ -164,6 +164,21 @@ impl Coordinator {
             );
             match probe {
                 Ok(row) if row == format!("{name}|Running") => {
+                    if let Some(artifact) = domain.backend.hermit() {
+                        let readiness = (|| -> Result<()> {
+                            let xid: u32 = self
+                                .runner
+                                .text("qvm-prefs", &[name.as_str(), "xid"])?
+                                .parse()?;
+                            crate::hermit::ready(name.as_str(), artifact, xid)
+                        })();
+                        match readiness {
+                            Ok(()) => return Ok(expected.clone()),
+                            Err(failure) => error = failure.to_string(),
+                        }
+                        thread::sleep(Duration::from_millis(100));
+                        continue;
+                    }
                     let args = [
                         "-d".into(),
                         name.as_str().into(),
@@ -249,6 +264,35 @@ impl Coordinator {
                 "{name}: selected system differs from release"
             );
 
+            if let Some(artifact) = d.backend.hermit() {
+                let descriptor = serde_json::to_string(artifact)?;
+                let configured = self
+                    .runner
+                    .text("qvm-features", &[name.as_str(), "airlock-hermit-artifact"])?;
+                ensure!(
+                    configured == descriptor,
+                    "{name}: selected Hermit artifact differs from release"
+                );
+                let actual = if required.contains(name) {
+                    Some(self.wait_guest(name, d)?)
+                } else {
+                    None
+                };
+                facts.push(GuestObservation::Hermit {
+                    name: name.to_string(),
+                    system: selected.to_string(),
+                    descriptor,
+                    running_system: actual.as_ref().map(ToString::to_string),
+                });
+                observed.insert(
+                    name.clone(),
+                    Observation {
+                        selected,
+                        running: actual,
+                    },
+                );
+                continue;
+            }
             let text = self
                 .runner
                 .text("qvm-features", &[name.as_str(), "airlock-store-generation"])?;

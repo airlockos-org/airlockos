@@ -181,6 +181,8 @@ pub(crate) fn constructors() -> PackageFunction {
             "airlockSupport",
             "airlockAppsSource",
             "system",
+            "hermitXen",
+            "applicationRevision",
         ],
         |arguments| {
             let sources = Sources::from_arguments(&arguments);
@@ -244,11 +246,20 @@ pub(crate) fn constructors() -> PackageFunction {
                             },
                         ),
                         "mkNixNativeDomain": domain_constructor(&sources, &pkgs),
+                        "mkHermitDomain": crate::hermit_build::constructor(&pkgs, &sources.apps,
+                            arguments.clone().select("hermitXen"), arguments.clone().select("applicationRevision")),
                     }
                 })
             });
 
-            (vec![("system", "x86_64-linux".into())], result)
+            (
+                vec![
+                    ("system", "x86_64-linux".into()),
+                    ("hermitXen", NixValue::null()),
+                    ("applicationRevision", NixValue::null()),
+                ],
+                result,
+            )
         },
     )
 }

@@ -13,7 +13,7 @@ use rusix::{
 
 /// Bind sources once and defer every target-system build to Nix evaluation.
 pub(super) fn configuration(candidate: &Candidate, sources: &Sources) -> NixValue {
-    NixValue::function_attrs(["self", "nixpkgs"], |inputs| {
+    NixValue::function_attrs(["self", "nixpkgs", "hermit-xen"], |inputs| {
         let source = NixPath::from_source_text(sources.machine.clone());
         let workspace = Workspace::new(NixPath::from_source_text(sources.applications.clone()));
         let kernel_name = crate::vm_build::KERNEL_NAME;
@@ -32,6 +32,10 @@ pub(super) fn configuration(candidate: &Candidate, sources: &Sources) -> NixValu
                     "system": system,
                     "airlockSupport": source.clone(),
                     "airlockAppsSource": workspace.root(),
+                    "hermitXen": inputs.clone().select("hermit-xen"),
+                    "applicationRevision": NixValue::builtin("replaceStrings").call(NixValue::list(["\n".into()])).call(NixValue::list(["".into()])).call(
+                        NixValue::builtin("readFile").call(source.join_relative("application-revision").unwrap())
+                    ),
                     "nixpkgsLibvirt105Source": sources.libvirt.clone(),
                     "nixosQubesSource": sources.qubes.clone(),
                 })
@@ -68,19 +72,32 @@ pub(super) fn configuration(candidate: &Candidate, sources: &Sources) -> NixValu
                     .select("mkTopology")
                     .call(config.clone());
                 let system = system_plan(candidate, &lib);
-                let configurations = NixValue::record(candidate.machine.vms().map(|vm| {
-                    (
-                        format!("airlock-domain-{name}", name = vm.name),
-                        entries
-                            .clone()
-                            .select(vm.name.as_str())
-                            .select("configuration"),
-                    )
-                }));
+                let configurations = NixValue::record(
+                    candidate
+                        .machine
+                        .vms()
+                        .filter(|vm| matches!(vm.backend, crate::model::GuestBackend::Nixos))
+                        .map(|vm| {
+                            (
+                                format!("airlock-domain-{name}", name = vm.name),
+                                entries
+                                    .clone()
+                                    .select(vm.name.as_str())
+                                    .select("configuration"),
+                            )
+                        }),
+                );
 
                 let mut packages = Vec::new();
                 for vm in candidate.machine.vms() {
                     let entry = entries.clone().select(vm.name.as_str());
+                    if matches!(vm.backend, crate::model::GuestBackend::Hermit { .. }) {
+                        packages.push((
+                            format!("airlock-domain-{name}-hermit", name = vm.name),
+                            entry.select("executable"),
+                        ));
+                        continue;
+                    }
                     for (suffix, attribute) in [
                         ("root-image", "rootImage"),
                         ("store-closure", "storeArtifact"),

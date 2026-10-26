@@ -52,6 +52,8 @@ mod vm_modules;
 
 mod vm_build;
 
+mod hermit_build;
+
 mod vm;
 
 use rusix::{IntoConfig, interop::PackageFunction};

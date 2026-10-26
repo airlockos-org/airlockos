@@ -144,6 +144,10 @@ pub(crate) fn configure(
     // Validate declarations even when diagnostic access has not been enabled.
     let mut endpoints = Vec::new();
     for vm in vms.iter_mut() {
+        // Hermit has no qrexec endpoint; its retained console is observed through dom0.
+        if matches!(vm.backend, crate::model::GuestBackend::Hermit { .. }) {
+            continue;
+        }
         let mut inventory = sources();
         inventory.extend(vm.diagnostic_sources.clone());
         let mut config = contract(vm.name.as_str(), observer.unwrap_or("disabled"), inventory)?;

@@ -1,7 +1,9 @@
-//! Author the six VMs selected by the physical USB lab machine.
+//! Author the VMs selected by the physical USB lab machine.
 //! Network, storage and resources follow the machine's Nix definition.
 
-use crate::model::{AuthoringError, GiB, HostPlatform, Machine, MachineSnapshot, Vm};
+use crate::model::{
+    AuthoringError, GiB, HermitApplication, HostPlatform, Machine, MachineSnapshot, MiB, Vm,
+};
 
 /// Captures the USB lab VM definitions and their shared host relationships.
 /// The optional firewall contribution is an inspection scenario for dependency planning;
@@ -29,6 +31,11 @@ pub fn machine(firewall_diagnostics: bool) -> Result<MachineSnapshot, AuthoringE
 
     let assistant = Vm::assistant("usr-assistant", &firewall, GiB(16))?;
     machine.add(&assistant)?;
+
+    // No peer grants or real clipboard traffic until GUI authorization is integrated.
+    let clipboard = Vm::hermit("sys-clipboard", MiB(32), HermitApplication::Clipboard)?;
+    clipboard.set_autostart(true);
+    machine.add(&clipboard)?;
 
     machine.set_host(&gui, &firewall, &controller);
     crate::components::diagnostics::enable(&mut machine, &assistant);

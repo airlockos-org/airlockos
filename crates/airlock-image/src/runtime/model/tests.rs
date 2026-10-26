@@ -12,8 +12,8 @@ fn topology() -> Value {
             "class": "StandaloneVM", "label": "green", "netvm": null,
             "prefs": {"guivm": null, "virt_mode": "hvm", "autostart": false},
             "features": {"qrexec": true}, "services": {"example": false},
-            "backend": {"type": "nix-closure", "system": {"source": "/system"},
-                "root": {"source": "/root.img"}, "store": {"source": "/prepared"},
+            "backend": {"type": "nix-closure", "system": {"source": "/nix/store/00000000000000000000000000000000-system"},
+                "root": {"source": "/nix/store/00000000000000000000000000000000-root/root.img"}, "store": {"source": "/nix/store/00000000000000000000000000000000-prepared", "mode": "shared-closure", "device": "/dev/xvde", "blobDevice": "/dev/xvdf", "mountpoint": "/nix/store", "viewBackend": "erofs-objectmap"},
                 "kernel": {"name": "test-kernel"}, "state": {"persistent_size": 33554432}}
         }}
     })
@@ -109,7 +109,7 @@ fn kernel_options_preserve_user_intent_and_reject_conflicts() {
             .count(),
         1
     );
-    assert!(words.contains(&"airlock.system=/system"));
+    assert!(words.contains(&"airlock.system=/nix/store/00000000000000000000000000000000-system"));
     assert!(words.contains(&"airlock.storedev=/dev/xvde"));
 
     for invalid in [

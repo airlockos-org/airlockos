@@ -13,6 +13,7 @@ use support::*;
 /// One original native VM, optionally pinned by the admitted release.
 fn definition(name: &str, generation: Option<u64>) -> Definition {
     Definition {
+        executable: None,
         name: name.into(),
         service: "/native/service".into(),
         native: Some(Native {
@@ -66,6 +67,7 @@ fn complete_staging_distinguishes_required_existing_and_nonnative_work() {
             definition("dependency", None),
             definition("unchanged", None),
             Definition {
+                executable: None,
                 name: "external".into(),
                 native: None,
                 service: "/native/service".into(),

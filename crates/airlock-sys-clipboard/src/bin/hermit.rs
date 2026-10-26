@@ -8,7 +8,16 @@ use hermit as _;
 /// Parking uses Hermit's scheduler; no polling loop or dom0 runtime broker is needed.
 #[cfg(all(target_os = "hermit", not(feature = "lab-authority")))]
 fn main() {
-    println!("AIRLOCK_CLIPBOARD_EXECUTING authority=disconnected readiness=isolated");
+    let nonce = std::env::args()
+        .find_map(|argument| argument.strip_prefix("airlock.boot=").map(str::to_owned))
+        .filter(|value| {
+            value.len() == 36
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
+        })
+        .expect("deployment must provide a boot challenge");
+    println!("AIRLOCK_CLIPBOARD_EXECUTING authority=disconnected readiness=isolated boot={nonce}");
     loop {
         std::thread::park();
     }

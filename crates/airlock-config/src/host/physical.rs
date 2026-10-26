@@ -267,7 +267,7 @@ fn normal(
         Role::NetworkDriver { .. } => 3,
         Role::Firewall { .. } => 4,
         Role::Personal { .. } => 5,
-        Role::Command { .. } | Role::Isolated { .. } => 6,
+        Role::Command { .. } | Role::Service | Role::Isolated { .. } => 6,
     });
     let route = format!(
         "{assistant} provides Tailnet development access through {firewall}",

@@ -423,8 +423,18 @@ fn send_release(
             && admission.release == transport
             && !admission.activated
             && admission.domains.iter().cloned().collect::<BTreeSet<_>>()
-                == topology.domains.keys().cloned().collect()
-            && admission.domains.len() == topology.domains.len(),
+                == topology
+                    .domains
+                    .iter()
+                    .filter(|(_, d)| d.backend.kind == "nix-closure")
+                    .map(|(name, _)| name.clone())
+                    .collect()
+            && admission.domains.len()
+                == topology
+                    .domains
+                    .values()
+                    .filter(|d| d.backend.kind == "nix-closure")
+                    .count(),
         "invalid candidate admission authorization",
     )?;
     records::save(store, &name(grant, "admission-prepare"), &authorization)?;

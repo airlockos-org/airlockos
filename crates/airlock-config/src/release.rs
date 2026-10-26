@@ -68,10 +68,16 @@ fn is_closure(domain: &NixValue) -> NixValue {
 fn matching_entry(build: &Build, domain: &NixValue) -> NixValue {
     let matches = NixValue::builtin("filter")
         .call(NixValue::function(|entry| {
-            entry
-                .select("configuration.config.system.build.toplevel")
-                .to_text()
-                .equals(domain.clone().select("backend.system.source"))
+            NixValue::if_else(
+                entry
+                    .clone()
+                    .attr_or("backendType", "nix-closure")
+                    .equals("hermit"),
+                NixValue::null(),
+                entry.select("configuration.config.system.build.toplevel"),
+            )
+            .to_text()
+            .equals(domain.clone().select("backend.system.source"))
         }))
         .call(NixValue::builtin("attrValues").call(build.entries.clone()));
 
@@ -166,6 +172,31 @@ fn artifacts(context: &ModuleContext, build: &Build, topology: NixValue) -> NixV
         .into(),
     );
 
+    let hermit_links = context
+        .lib
+        .clone()
+        .select("mapAttrsToList")
+        .call(NixValue::function(|name| {
+            NixValue::function(|domain| {
+                NixValue::if_else(
+                    domain.clone().select("backend.type").equals("hermit"),
+                    nix_text!(
+                        "ln -s {image} \"$out/hermit/\"{name}",
+                        image = domain.select("backend.system.source"),
+                        name = context.lib.clone().select("escapeShellArg").call(name)
+                    ),
+                    "",
+                )
+            })
+        }))
+        .call(topology.clone().select("domains"));
+    let hermit_links = context
+        .lib
+        .clone()
+        .select("concatStringsSep")
+        .call("\n")
+        .call(hermit_links);
+
     manifest(context, build).bind(|manifest| {
         let release_manifest = json("airlock-machine-release.json", manifest.clone());
         let transport_manifest = json(
@@ -205,12 +236,14 @@ fn artifacts(context: &ModuleContext, build: &Build, topology: NixValue) -> NixV
                     },
                     nix_text!(
                         r#"
-            mkdir -p "$out"
+            mkdir -p "$out/hermit"
+            {hermit_links}
             cp {manifest} "$out/release.json"
             cp {topology} "$out/topology.json"
             cp {roots} "$out/root-artifacts.json"
             ln -s {transport} "$out/transport"
         "#,
+                        hermit_links = hermit_links.clone(),
                         manifest = release_manifest,
                         topology = topology,
                         roots = root_artifacts.clone(),
@@ -226,11 +259,13 @@ fn artifacts(context: &ModuleContext, build: &Build, topology: NixValue) -> NixV
                     nix_record! {},
                     nix_text!(
                         r#"
-            mkdir -p "$out"
+            mkdir -p "$out/hermit"
+            {hermit_links}
             cp {manifest} "$out/release.json"
             cp {topology} "$out/topology.json"
             cp {roots} "$out/root-artifacts.json"
         "#,
+                        hermit_links = hermit_links.clone(),
                         manifest = transport_manifest,
                         topology = detached.clone(),
                         roots = root_artifacts,

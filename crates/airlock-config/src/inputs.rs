@@ -41,5 +41,7 @@ pub(crate) mod args {
     struct Builders {
         /// Native VM closure/image constructor exported through Rusix.
         mk_nix_native_domain: NixCallable<NixAttrs>,
+        /// Native Hermit PVH executable constructor.
+        mk_hermit_domain: NixCallable<NixAttrs>,
     }
 }

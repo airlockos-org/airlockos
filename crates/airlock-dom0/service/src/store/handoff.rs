@@ -24,17 +24,17 @@ pub(crate) fn expected(
         domain: name.to_string(),
         generation: generation.to_string().parse()?,
         system: backend.system.source.to_string(),
-        root: backend.root.source.to_string(),
-        source: backend.store.source.to_string(),
-        kernel: backend.kernel.name.clone(),
-        mode: serde_json::to_value(backend.store.mode)?
+        root: backend.nixos()?.root.source.to_string(),
+        source: backend.nixos()?.store.source.to_string(),
+        kernel: backend.nixos()?.kernel.name.clone(),
+        mode: serde_json::to_value(backend.nixos()?.store.mode)?
             .as_str()
             .context("invalid store mode")?
             .into(),
-        device: backend.store.device.clone(),
-        blob_device: backend.store.blob_device.clone(),
-        mountpoint: backend.store.mountpoint.clone(),
-        backend: backend.store.view_backend.clone(),
+        device: backend.nixos()?.store.device.clone(),
+        blob_device: backend.nixos()?.store.blob_device.clone(),
+        mountpoint: backend.nixos()?.store.mountpoint.clone(),
+        backend: backend.nixos()?.store.view_backend.clone(),
     })
 }
 
@@ -136,8 +136,19 @@ pub(super) fn image(topology: Value, physical: &Path, logical: &Path) -> Result<
     let mut mapping = BTreeMap::new();
     for (name, domain) in &inputs.topology().domains {
         let backend = &domain.backend;
+        if let Some(artifact) = backend.hermit() {
+            crate::hermit::verify(
+                artifact,
+                domain
+                    .prefs
+                    .get("memory")
+                    .and_then(Value::as_u64)
+                    .context("missing Hermit memory")?,
+            )?;
+            continue;
+        }
         let descriptor: Value =
-            read(&Path::new(backend.store.source.as_str()).join("prepared.json"))
+            read(&Path::new(backend.nixos()?.store.source.as_str()).join("prepared.json"))
                 .with_context(|| format!("read prepared descriptor for {name}"))?;
         ensure!(
             descriptor["schema"] == "airlock.closure-store.prepared.v1"
@@ -177,7 +188,7 @@ pub(super) fn image(topology: Value, physical: &Path, logical: &Path) -> Result<
         let kernel = inputs
             .topology()
             .kernels
-            .get(&backend.kernel.name)
+            .get(&backend.nixos()?.kernel.name)
             .with_context(|| format!("missing boot kernel definition: {name}"))?;
         let kernel = Path::new(
             kernel["source"]

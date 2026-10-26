@@ -31,8 +31,9 @@ Hermit executable grants its endpoint specifically to dom0. That peer may instal
 decisions and impersonate caller identities for tests; no requesting VM may ever
 be attached to this endpoint. The console offer and numeric caller IDs are not
 credentials. The laboratory does not implement production authentication or
-policy provisioning. The executable requires this explicit feature so its lab
-trust model cannot silently become a default deployment.
+policy provisioning. The normal executable starts disconnected and parks without issuing peer grants.
+The machine artifact validator rejects laboratory images; enabling this feature
+does not authorize their admission to a deployed machine.
 
 The existing [Qubes GUI policy](../airlock-config/src/host/dom0/gui.policy) remains
 unchanged: sys-gui initiates ClipboardCopy/ClipboardPaste and requests
@@ -100,30 +101,41 @@ that same revision in a Git flake input with `submodules=1` and update the lab
 projection/vendor lock together. Until publication, a clean remote build cannot
 fetch this local-only commit; use the local workflow above.
 
-## Subsequent deployment milestone
+## Machine deployment boundary
 
-1. Extend the Rust VM authoring model and compiled machine schema with a Hermit
-   image kind and constrained resources (initially one vCPU and a fixed memory
-   allocation). Preserve Qubes VM identity, qubesd lifecycle, libvirt/Xen PVH
-   management, policy and runtime `qubes.xml`; do not invent a parallel VM manager.
-2. Admit the ELF plus its transport/kernel/toolchain pins, source digest and ABI
-   metadata as an immutable machine-generation artifact. Validate PVH notes,
-   supported architecture and resource constraints before approval. Extend the
-   existing build-plan and image paths instead of treating an ELF as a NixOS root
-   volume. No production `Vm::hermit` constructor is added in this milestone.
-3. Add the trusted GUI-policy bridge and provisioning path: bind source and
-   destination identities to capabilities, authorize grants/event ports, separate
-   authority from untrusted requests, and revoke on VM lifecycle changes. Validate
-   genuine GUI denial/approval through upstream Qubes tests before connecting it.
-4. Include the service and bridge in source review, `machine-plan`/`machine-apply`,
-   admission, generation verification and rollback. Activation must stop the old
-   guest, erase clipboard state, revoke grants and start a fresh epoch; rollback
-   must also start empty, never replay clipboard contents or authority. Verify
-   the whole running generation and preserve existing GUI behavior until that
-   milestone is approved and tested.
+`Vm::hermit` selects an independent guest backend with fixed memory, one vCPU,
+no disks, network, GUI agent or qrexec. The production build constructor uses the
+external pinned Hermit builder, emits a bounded ELF descriptor with its SHA-256,
+application and integration revisions, and dependency-lock digest. Local Nix
+input overrides must select the same Git commit; a dirty path override is not a
+replacement for a reviewed revision. Published use requires making the pinned
+commits available upstream, without changing the local dependency contract.
 
-The core's lifecycle invariants sit beside its state fields to support future
-Verus work. Native tests check ownership, exact expiry, high-water marks and
-physical retained-buffer cleanup; the Xen peer validates actual multi-frame data
-and failure paths. This work establishes the service pattern, not production
-image admission or Qubes security equivalence.
+The machine release retains the executable in its Nix closure. Existing source
+approval, plan fingerprints and execution journals govern its configuration and
+start/stop effects. A diskless `HermitVM` subclass reuses upstream Qubes/libvirt
+lifecycle management. Admission and pre-start checks authenticate the complete
+file, bounded static x86_64 PVH layout, and memory requirements. The subclass
+checks the resulting domain XML before libvirt receives it.
+
+An active Xen domain is only process state. Airlock captures a fresh boot
+challenge and console boundary before starting the executable, then requires its
+current-boot response. This reports **isolated execution**, not clipboard traffic
+readiness. The protected observation associates the VM, generation, executable,
+host boot and Xen domain ID; stop and failed-start events invalidate it. The
+existing Qubes shutdown timeout may kill a guest that does not acknowledge Xen
+shutdown. Updates and rollback always start fresh volatile state.
+
+The deployment completion specification requires the exact executable descriptor
+and application execution identity. ELF parsing, Nix provenance, protected-file
+checks, Qubes/libvirt execution and console observation remain trusted adapters,
+not Verus proofs. The clipboard core's lifecycle invariants are documented beside
+its state fields for future verification.
+
+Connecting real clipboard traffic requires a separate trusted GUI-policy bridge.
+It must bind authenticated source and destination identities, content generation,
+expiry and connection epoch to the existing GUI policy result, provision grants
+and event channels directly between authorized endpoints, and revoke them on
+lifecycle changes. Dom0 must not become a runtime broker. Validate GUI denial and
+approval with upstream Qubes tests before switching traffic; deployment of the
+isolated executable leaves the existing Qubes clipboard workflow intact.

@@ -13,6 +13,7 @@ path = "src/lib.rs"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+airlock-nix-core = { path = "../airlock-common/nix" }
 airlock-dom0-service = { path = "../airlock-dom0/service", default-features = false }
 airlock-qubes = { path = "../airlock-common/qubes" }
 anyhow = "1.0"

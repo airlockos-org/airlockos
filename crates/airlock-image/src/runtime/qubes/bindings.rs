@@ -187,7 +187,7 @@ impl<'py> Session<'py> {
         )?;
         let vm = self
             .app()?
-            .call_method("add_new_vm", ("StandaloneVM",), Some(&options))?;
+            .call_method("add_new_vm", (&plan.class,), Some(&options))?;
         vm.setattr("events_enabled", false)?;
         properties(&vm, &BTreeMap::from([("netvm".into(), Value::Null)]))?;
 

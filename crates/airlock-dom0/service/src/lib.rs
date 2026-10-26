@@ -3,6 +3,9 @@
 
 #![warn(missing_docs)]
 #![forbid(unsafe_code)]
+/// Immutable Hermit executable validation at privileged boundaries.
+pub mod hermit;
+
 mod boot;
 
 mod admission_adapter;

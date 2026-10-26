@@ -20,7 +20,7 @@ fn configuration(domain: &Domain, kind: verified::Kind) -> Result<String> {
     state::digest(&match kind {
         verified::Kind::Retire => serde_json::to_value(domain)?,
         verified::Kind::Restore => {
-            json!({"class":domain.class_name,"template":domain.template,"private":domain.backend.state})
+            json!({"class":domain.class_name,"template":domain.template,"private":domain.backend.state()})
         }
     })
 }
@@ -238,7 +238,7 @@ impl Coordinator {
             retention_days,
             storage: TrashStorage {
                 disposition: "registered-stopped".into(),
-                private: domain.backend.state["persistent"].clone(),
+                private: domain.backend.state()["persistent"].clone(),
                 pool_manifest: info
                     .manifest
                     .to_str()
@@ -321,7 +321,7 @@ impl Coordinator {
             record.status != TrashStatus::Purging
                 && record.domain_config.class_name == domain.class_name
                 && record.domain_config.template == domain.template
-                && record.domain_config.backend.state == domain.backend.state
+                && record.domain_config.backend.state() == domain.backend.state()
                 && record.uuid == self.vm_uuid(&record.domain)?,
             "restore changes VM or private storage identity, or purge is in progress"
         );

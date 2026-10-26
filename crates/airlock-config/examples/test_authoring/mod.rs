@@ -12,6 +12,8 @@ mod host;
 
 mod machine;
 
+mod hermit;
+
 mod equivalence;
 
 mod prepared_store;
@@ -64,6 +66,7 @@ pub(super) fn fixture(
 ) -> Result<NixValue, String> {
     {
         let argument_1 = match name {
+            "hermit/build" => hermit::build(settings)?,
             "model/export" => authoring_boundary::export(settings)?,
             "candidate/evaluate" => candidate_value(inputs),
             "gui/render-command" => authoring_boundary::commands(settings)?,

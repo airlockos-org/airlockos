@@ -128,6 +128,15 @@ pub(crate) fn main() -> Result<()> {
                 vm.name
             );
         }
+        if vm.class == "HermitVM" {
+            ensure!(
+                observed["snapshot"]["volumes"]
+                    .as_object()
+                    .is_some_and(|volumes| volumes.is_empty()),
+                "Hermit acquired Linux storage"
+            );
+            continue;
+        }
         ensure!(
             observed["root_source"] == vm.features["airlock-root-source"],
             "root identity did not survive reload: {}",

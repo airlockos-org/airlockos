@@ -132,9 +132,16 @@ impl Coordinator {
         );
         let roots: BTreeMap<GuestName, RootDescriptor> =
             state::read(&r.path.join("root-artifacts.json"))?;
+        let linux: BTreeSet<_> = r
+            .topology
+            .domains
+            .iter()
+            .filter(|(_, d)| d.backend.hermit().is_none())
+            .map(|(name, _)| name)
+            .collect();
         ensure!(
-            receipts.keys().eq(r.topology.domains.keys())
-                && roots.keys().collect::<BTreeSet<_>>() == r.topology.domains.keys().collect(),
+            receipts.keys().collect::<BTreeSet<_>>() == linux
+                && roots.keys().collect::<BTreeSet<_>>() == linux,
             "admission receipts or root catalog differ from guests"
         );
         let mut manifest: Value = state::read(&r.path.join("release.json"))?;
@@ -145,22 +152,23 @@ impl Coordinator {
             .topology
             .domains
             .iter()
+            .filter(|(_, d)| d.backend.hermit().is_none())
             .map(|(name, d)| {
-                (
+                Ok((
                     name.clone(),
                     ExpectedAdmission {
                         domain: name.clone(),
                         system: d.backend.system.source.clone(),
-                        closure_source: d.backend.store.source.clone(),
-                        root_source: d.backend.root.source.clone(),
-                        kernel_name: d.backend.kernel.name.clone(),
+                        closure_source: d.backend.nixos()?.store.source.clone(),
+                        root_source: d.backend.nixos()?.root.source.clone(),
+                        kernel_name: d.backend.nixos()?.kernel.name.clone(),
                         source_revision: r.manifest.revision.clone(),
                         lock_hash: r.manifest.lock_hash.clone(),
                         root_artifact: roots[name].clone(),
                     },
-                )
+                ))
             })
-            .collect();
+            .collect::<Result<_>>()?;
         let expected = requirements
             .values()
             .map(|e| e.evidence(r.fingerprint().as_str()))
@@ -243,7 +251,7 @@ impl Coordinator {
             .context("receipt target is not declared")?;
         ensure!(
             before.backend.system.source != info.system
-                || before.backend.root.source != info.root_source,
+                || before.backend.nixos()?.root.source != info.root_source,
             "admitted guest system is already selected"
         );
         let mut topology = baseline.raw_topology.clone();

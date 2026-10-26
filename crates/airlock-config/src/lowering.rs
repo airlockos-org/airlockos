@@ -97,11 +97,19 @@ pub(crate) fn builders(machine: &MachineSnapshot) -> PackageFunction {
                 inputs
                     .mk_airlock_qube_builders()
                     .call(system)
-                    .bind(|builders| {
-                        builders
+                    .bind(|builders| match vm.backend {
+                        crate::model::GuestBackend::Nixos => builders
                             .mk_nix_native_domain()
                             .try_call(domain(&inputs, vm))
-                            .expect("statically structured domain arguments")
+                            .expect("statically structured domain arguments"),
+                        crate::model::GuestBackend::Hermit { .. } => {
+                            builders.mk_hermit_domain().call(nix_record! {
+                                "name": vm.name.as_str(),
+                                "memory": i64::from(vm.settings.memory.bounds().0.0),
+                                "vcpus": i64::from(vm.settings.vcpus),
+                                "autostart": vm.settings.autostart.unwrap_or(false),
+                            })
+                        }
                     })
             });
 
@@ -131,7 +139,7 @@ pub(crate) fn domain(inputs: &Inputs, vm: &VmSnapshot) -> DomainArguments {
     let mut services = BTreeMap::from([("network-manager", false)]);
 
     let (vm_role, autostart, virtualization) = match role {
-        Role::Isolated { .. } => ("base", false.into(), Virtualization::Pvh),
+        Role::Service | Role::Isolated { .. } => ("base", false.into(), Virtualization::Pvh),
         Role::NetworkDriver { .. } => {
             features.insert("airlock-boot-foreground", "1");
             features.insert("airlock-auto-network-pci", "1");

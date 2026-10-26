@@ -197,6 +197,7 @@ fn wait(
     domain: &str,
     expected: &str,
     health: Option<&str>,
+    artifact: Option<&airlock_nix_core::hermit_artifact::Descriptor>,
     start: Duration,
     ready: Duration,
 ) -> Result<()> {
@@ -231,6 +232,49 @@ fn wait(
             &["--raw-data", "--fields", "NAME,STATE,XID", domain],
             Duration::from_secs(15),
         )?;
+        if let Some(artifact) = artifact {
+            let observation = (|| -> Result<()> {
+                let output = capture(
+                    log,
+                    "AIRLOCK_QVM_LS",
+                    "qvm-ls",
+                    &["--raw-data", "--fields", "XID", domain],
+                    Duration::from_secs(10),
+                )?;
+                ensure!(
+                    !output.limited && output.status.success(),
+                    "Hermit Xen identity unavailable"
+                );
+                let xid: u32 = std::str::from_utf8(&output.stdout)?.trim().parse()?;
+                crate::hermit::ready(domain, artifact, xid)?;
+                let after = capture(
+                    log,
+                    "AIRLOCK_QVM_LS",
+                    "qvm-ls",
+                    &["--raw-data", "--fields", "XID", domain],
+                    Duration::from_secs(10),
+                )?;
+                ensure!(
+                    !after.limited && after.status.success() && output.stdout == after.stdout,
+                    "Hermit restarted during readiness"
+                );
+                Ok(())
+            })();
+            match observation {
+                Ok(()) => {
+                    return supervise(
+                        GuestState::Ready,
+                        &domain.parse()?,
+                        &format!("{domain} executes {expected}; clipboard IPC isolated"),
+                    );
+                }
+                Err(error) => writeln!(log, "Hermit execution pending: {error}")?,
+            }
+            thread::sleep(
+                Duration::from_millis(250).min(deadline.saturating_duration_since(Instant::now())),
+            );
+            continue;
+        }
         let output = capture(
             log,
             "AIRLOCK_QREXEC_CLIENT",
@@ -281,7 +325,7 @@ fn wait(
         );
     }
     bail!(
-        "{domain} did not become qrexec-ready with required guest services within {seconds}s",
+        "{domain} did not report its expected application readiness within {seconds}s",
         seconds = ready.as_secs()
     )
 }
@@ -299,6 +343,15 @@ pub(crate) fn start(request: Ready) -> Result<()> {
     let definition = raw["domains"]
         .get(domain)
         .context("VM is not declared by topology")?;
+    let hermit = if definition["backend"]["type"] == "hermit" {
+        let inputs = airlock_machine_core::boot::BootInputs::new(raw.clone())?;
+        inputs.topology().domains[&request.domain]
+            .backend
+            .hermit()
+            .cloned()
+    } else {
+        None
+    };
     let expected = definition["backend"]["system"]["source"]
         .as_str()
         .filter(|source| !source.is_empty())
@@ -332,7 +385,15 @@ pub(crate) fn start(request: Ready) -> Result<()> {
             log,
             "domain={domain} expected={expected} start_timeout={start:?} ready_timeout={ready:?}"
         )?;
-        wait(&mut log, domain, expected, health.as_deref(), start, ready)
+        wait(
+            &mut log,
+            domain,
+            expected,
+            health.as_deref(),
+            hermit.as_ref(),
+            start,
+            ready,
+        )
     })();
     if let Err(error) = &result {
         writeln!(log, "{error:#}")?;

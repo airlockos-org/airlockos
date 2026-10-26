@@ -127,7 +127,7 @@ pub(crate) fn materialize(entry: NixValue, store_sources: &NixValue, name: &str)
 
         let preferences = domain.clone().select("prefs");
 
-        domain.merge_attrs(nix_record! {
+        let linux = domain.clone().merge_attrs(nix_record! {
             "prefs": preferences.merge_attrs(nix_record! {
                 "kernelopts": entry.clone().select("kernelopts"),
             }),
@@ -139,7 +139,7 @@ pub(crate) fn materialize(entry: NixValue, store_sources: &NixValue, name: &str)
                         .to_text(),
                     "sourceRef": NixValue::null(),
                 }),
-                "root": backend.select("root").merge_attrs(nix_record! {
+                "root": backend.clone().select("root").merge_attrs(nix_record! {
                     "source": nix_text!(
                         "{image}/root.img",
                         image = entry.clone().select("rootImage"),
@@ -151,7 +151,8 @@ pub(crate) fn materialize(entry: NixValue, store_sources: &NixValue, name: &str)
                     "sourceRef": NixValue::null(),
                 }),
             }),
-        })
+        });
+        NixValue::if_else(backend.select("type").equals("hermit"), domain, linux)
     })
 }
 

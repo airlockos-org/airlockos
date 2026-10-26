@@ -45,6 +45,7 @@ fn inputs() -> Inputs {
         boot: "host-boot".into(),
         host: "/host".into(),
         definitions: vec![Definition {
+            executable: None,
             name: "vm".into(),
             service: "/service".into(),
             native: Some(Native {
@@ -239,4 +240,55 @@ fn explicit_compatibility_classifications_do_not_invent_pins_or_readiness() {
     i.stage.clear();
     i.snapshot.entries[0] = RecordedResolution::NonNative("vm".into());
     assert!(VerifiedGuests::check(i, &[Observation::NonNative("vm".into())]).is_none());
+}
+
+/// Hermit readiness binds the complete approved executable and cannot be replaced by domain liveness.
+#[test]
+fn hermit_completion_requires_exact_image_and_application_execution() {
+    use airlock_deployment_core::storage::Executable;
+
+    let hermit_inputs = || {
+        let mut input = inputs();
+        input.definitions[0].native = None;
+        input.definitions[0].executable = Some(Executable {
+            system: "/hermit".into(),
+            descriptor: "digest+source+lock".into(),
+        });
+        input.snapshot.entries[0] = RecordedResolution::NonNative("vm".into());
+        input
+    };
+    let observation = |descriptor: &str, running_system: Option<&str>| Observation::Hermit {
+        name: "vm".into(),
+        system: "/hermit".into(),
+        descriptor: descriptor.into(),
+        running_system: running_system.map(str::to_owned),
+    };
+    assert!(
+        VerifiedGuests::check(
+            hermit_inputs(),
+            &[observation("digest+source+lock", Some("/hermit"))]
+        )
+        .is_some()
+    );
+    assert!(
+        VerifiedGuests::check(
+            hermit_inputs(),
+            &[observation("other-image", Some("/hermit"))]
+        )
+        .is_none()
+    );
+    assert!(
+        VerifiedGuests::check(
+            hermit_inputs(),
+            &[observation("digest+source+lock", Some("/old-hermit"))]
+        )
+        .is_none()
+    );
+    assert!(
+        VerifiedGuests::check(hermit_inputs(), &[observation("digest+source+lock", None)])
+            .is_none()
+    );
+    assert!(
+        VerifiedGuests::check(hermit_inputs(), &[Observation::NonNative("vm".into())]).is_none()
+    );
 }

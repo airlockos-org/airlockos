@@ -56,19 +56,19 @@ fn prepared_descriptor_children_decode_across_runtime_records() {
         let info: GenerationInfo = serde_json::from_value(json!({
             "schema":"airlock.closure-store.generation-info.v1", "status":"passed",
             "domain":"sys-gui-runtime-store", "generation":1, "selected":false, "manifest":"/pool/manifest.json", "system":backend.system.source,
-            "root_source":backend.root.source, "kernel_name":backend.kernel.name,
+            "root_source":backend.nixos().unwrap().root.source, "kernel_name":backend.nixos().unwrap().kernel.name,
             "closure_source":source, "store":{
-                "mode":"shared-closure", "closure_hash":"fixture", "mountpoint":backend.store.mountpoint,
-                "device":backend.store.device, "blob_device":backend.store.blob_device,
-                "view_backend":backend.store.view_backend,
+                "mode":"shared-closure", "closure_hash":"fixture", "mountpoint":backend.nixos().unwrap().store.mountpoint,
+                "device":backend.nixos().unwrap().store.device, "blob_device":backend.nixos().unwrap().store.blob_device,
+                "view_backend":backend.nixos().unwrap().store.view_backend,
             },
             "verification":{"status":"passed"},
             "approval":{"transport":"qrexec", "approved_by":"usr-assistant", "source":source},
         }))
         .unwrap();
         let approval: GenerationApproval = serde_json::from_value(info.approval).unwrap();
-        assert_eq!(info.closure_source, backend.store.source);
-        assert_eq!(approval.source, backend.store.source);
+        assert_eq!(info.closure_source, backend.nixos().unwrap().store.source);
+        assert_eq!(approval.source, backend.nixos().unwrap().store.source);
 
         // Whole system identities still cannot name a child within a store object.
         raw["domains"]["sys-gui"]["backend"]["system"]["source"] = json!(format!("{root}/system"));

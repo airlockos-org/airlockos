@@ -255,6 +255,7 @@ name = "airlock-qubes-python"
 version = "0.1.0"
 dependencies = [
  "airlock-dom0-service",
+ "airlock-nix-core",
  "airlock-qubes",
  "anyhow",
  "pyo3",

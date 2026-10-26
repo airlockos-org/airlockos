@@ -23,6 +23,7 @@ use rusix::{
 /// Keep input declarations static so Nix can resolve and lock them before evaluating outputs.
 pub(super) fn inputs(revision: &str) -> NixValue {
     nix_record! {
+        "hermit-xen": crate::hermit_build::input(),
         "airlock-apps": nix_record! {
             "flake": false,
             "type": "git",
@@ -286,6 +287,8 @@ pub(super) fn outputs() -> NixValue {
                             "airlockSupport": source.clone(),
                             "airlockAppsSource": workspace.root(),
                             "nixosQubesSource": inputs.clone().select("nixos-qubes").to_text(),
+                            "hermitXen": inputs.clone().select("hermit-xen"),
+                            "applicationRevision": inputs.clone().select("airlock-apps.rev"),
                         })
                 });
                 builders.bind(|builders| {

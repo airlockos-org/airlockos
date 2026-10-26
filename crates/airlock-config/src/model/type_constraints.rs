@@ -131,3 +131,19 @@
 //! use airlock_config::components::screen_capture;
 //! screen_capture::connect(&gui, &controller);
 //! ```
+
+//! Hermit handles cannot request a Linux root filesystem.
+//!
+//! ```compile_fail,E0599
+//! use airlock_config::model::{Vm, MiB, HermitApplication};
+//! let vm = Vm::hermit("sys-clipboard", MiB(32), HermitApplication::Clipboard).unwrap();
+//! vm.set_root_image(MiB(512));
+//! ```
+
+//! Hermit handles cannot acquire NixOS modules.
+//!
+//! ```compile_fail,E0599
+//! use airlock_config::model::{Vm, MiB, HermitApplication};
+//! let vm = Vm::hermit("sys-clipboard", MiB(32), HermitApplication::Clipboard).unwrap();
+//! vm.add_module(rusix::nixos::NixosModule::empty());
+//! ```

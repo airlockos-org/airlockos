@@ -103,26 +103,85 @@ pub struct Store {
     pub extra: BTreeMap<String, Value>,
 }
 
-/// Built guest system, root image, kernel and shared-store configuration.
+/// Immutable guest system with a backend-specific boot contract.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Backend {
-    /// Supported backend protocol, checked before using its artifacts.
-    #[serde(rename = "type")]
-    pub kind: BackendKind,
-    /// System closure supplying the guest configuration.
+    /// Immutable system object, common to generation identity and source retention.
     pub system: Source<StorePath>,
+    /// Guest ABI; Hermit cannot deserialize Linux boot or storage fields.
+    #[serde(flatten)]
+    pub guest: GuestBackend,
+}
+
+/// Closed guest boot contracts, independent of the VM's role.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum GuestBackend {
+    /// Existing NixOS shared-closure boot implementation.
+    #[serde(rename = "nix-closure")]
+    Nixos(NixosBackend),
+    /// Native Hermit executable with no Linux storage layout.
+    #[serde(rename = "hermit")]
+    Hermit(HermitBackend),
+}
+
+/// Hermit-specific boot metadata authenticated before selecting an executable.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HermitBackend {
+    /// Exact executable, build provenance and compiled authority mode.
+    pub artifact: airlock_nix_core::hermit_artifact::Descriptor,
+}
+
+/// Existing Linux root, kernel and shared-store implementation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NixosBackend {
     /// Root filesystem image from which the guest starts.
     pub root: Source<StoreFile>,
     /// Kernel configuration paired with the guest root.
     pub kernel: Kernel,
     /// Shared Nix closure and its guest-facing storage settings.
     pub store: Store,
-    /// Backend-specific persistent-state configuration compared during planning.
+    /// Persistent state compared during migration planning.
     #[serde(default)]
     pub state: Value,
-    /// Additional protocol metadata retained without treating it as authority.
+    /// Extension metadata preserved for existing Linux topology comparisons.
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+
+impl Backend {
+    /// Return the backend protocol without inspecting the VM's name or role.
+    pub fn kind(&self) -> BackendKind {
+        match self.guest {
+            GuestBackend::Nixos(_) => BackendKind::NixClosure,
+            GuestBackend::Hermit(_) => BackendKind::Hermit,
+        }
+    }
+
+    /// Borrow Linux boot settings or reject an accidental Linux-only operation.
+    pub fn nixos(&self) -> Result<&NixosBackend> {
+        match &self.guest {
+            GuestBackend::Nixos(backend) => Ok(backend),
+            GuestBackend::Hermit(_) => bail!("Hermit does not support Linux guest storage"),
+        }
+    }
+
+    /// Borrow the executable descriptor when this guest uses Hermit.
+    pub fn hermit(&self) -> Option<&airlock_nix_core::hermit_artifact::Descriptor> {
+        match &self.guest {
+            GuestBackend::Hermit(backend) => Some(&backend.artifact),
+            GuestBackend::Nixos(_) => None,
+        }
+    }
+
+    /// Describe persistent state; Hermit services have none.
+    pub fn state(&self) -> &Value {
+        match &self.guest {
+            GuestBackend::Nixos(backend) => &backend.state,
+            GuestBackend::Hermit(_) => &Value::Null,
+        }
+    }
 }
 
 /// Missing settings inherit existing/default configuration; explicit null resets
@@ -244,16 +303,57 @@ impl Topology {
         ensure!(self.domains.len() <= 4096, "topology has too many domains");
 
         for (name, d) in &self.domains {
-            ensure!(
-                !d.backend.kernel.name.is_empty()
-                    && d.backend.kernel.name.len() <= 128
-                    && d.backend
-                        .kernel
-                        .name
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b"._+-".contains(&b)),
-                "{name}: invalid kernel name"
-            );
+            if let Some(artifact) = d.backend.hermit() {
+                artifact.validate(false)?;
+                ensure!(
+                    artifact.executable.as_str()
+                        == format!("{system}/kernel.elf", system = d.backend.system.source),
+                    "{name}: executable is outside its system object"
+                );
+                ensure!(
+                    d.class_name == "HermitVM"
+                        && d.template == VmReference::Disabled
+                        && d.netvm == VmReference::Disabled,
+                    "{name}: Hermit requires an isolated, template-free domain"
+                );
+                ensure!(
+                    d.prefs.get("virt_mode") == Some(&Value::from("pvh"))
+                        && d.prefs.get("kernel") == Some(&Value::from(""))
+                        && d.prefs.get("vcpus") == Some(&Value::from(1))
+                        && d.prefs.get("guivm") == Some(&Value::Null)
+                        && d.prefs.get("audiovm") == Some(&Value::Null),
+                    "{name}: incompatible Hermit properties"
+                );
+                let memory = d.prefs.get("memory").and_then(Value::as_u64).unwrap_or(0);
+                ensure!(
+                    (16..=256).contains(&memory)
+                        && d.prefs.get("maxmem").and_then(Value::as_u64) == Some(memory),
+                    "{name}: invalid Hermit memory"
+                );
+                ensure!(
+                    d.features.get("qrexec") == Some(&Value::from(""))
+                        && d.features.get("gui") == Some(&Value::from(""))
+                        && d.services.is_empty(),
+                    "{name}: Hermit has no Linux guest services"
+                );
+                ensure!(
+                    d.devices.is_null()
+                        || d.devices.as_object().is_some_and(|devices| devices
+                            .values()
+                            .all(|value| value.as_array().is_some_and(Vec::is_empty))),
+                    "{name}: Hermit has no device assignments"
+                );
+            } else {
+                let kernel = &d.backend.nixos()?.kernel.name;
+                ensure!(
+                    !kernel.is_empty()
+                        && kernel.len() <= 128
+                        && kernel
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"._+-".contains(&b)),
+                    "{name}: invalid kernel name"
+                );
+            }
         }
         Ok(())
     }

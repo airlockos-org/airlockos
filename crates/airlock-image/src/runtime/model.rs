@@ -48,40 +48,7 @@ pub(crate) struct Domain {
     pub(super) backend: Backend,
 }
 
-#[derive(Deserialize)]
-pub(super) struct Backend {
-    // Only the existing immutable closure backend is supported.
-    #[serde(rename = "type")]
-    pub(super) kind: String,
-    // NixOS system whose init path is passed to the VM kernel.
-    pub(super) system: Source,
-    // Mutable root seed copied before first boot.
-    pub(super) root: Source,
-    // Prepared admission descriptor for this VM's software view.
-    pub(super) store: Source,
-    // Upstream Qubes kernel bundle selected by name.
-    pub(super) kernel: KernelName,
-    // Optional initial private-disk capacity; upstream owns its default.
-    pub(super) state: State,
-}
-
-#[derive(Deserialize)]
-pub(super) struct Source {
-    // Path inside the image's pinned Nix inputs or prepared pool.
-    pub(super) source: String,
-}
-
-#[derive(Deserialize)]
-pub(super) struct KernelName {
-    // Single safe path component under vm-kernels.
-    pub(super) name: String,
-}
-
-#[derive(Deserialize)]
-pub(super) struct State {
-    // Requested private-volume bytes; absent or zero uses the upstream default.
-    pub(super) persistent_size: Option<u64>,
-}
+use airlock_machine_core::model::Backend;
 
 fn green() -> String {
     "green".into()
@@ -137,7 +104,7 @@ pub(crate) fn kernelopts(domain: &Domain) -> Result<String> {
 
     for (key, value) in [
         ("init", "/sbin/init"),
-        ("airlock.system", &domain.backend.system.source),
+        ("airlock.system", domain.backend.system.source.as_str()),
         ("airlock.storedev", "/dev/xvde"),
         ("airlock.storefmt", "erofs"),
         ("airlock.storeblobdev", "/dev/xvdf"),
@@ -193,8 +160,20 @@ pub(crate) fn validate(topology: &Topology) -> Result<()> {
                 "VM preference may not override managed identity or storage: {key}"
             );
         }
+        if let Some(artifact) = domain.backend.hermit() {
+            artifact.validate(false)?;
+            ensure!(
+                domain.class == "HermitVM",
+                "Hermit backend requires HermitVM"
+            );
+            ensure!(
+                domain.netvm == VmReference::Disabled,
+                "Hermit has no network provider"
+            );
+            continue;
+        }
         ensure!(
-            domain.class == "StandaloneVM" && domain.backend.kind == "nix-closure",
+            domain.class == "StandaloneVM" && domain.backend.hermit().is_none(),
             "unsupported prepared domain: {name}"
         );
 
@@ -204,9 +183,11 @@ pub(crate) fn validate(topology: &Topology) -> Result<()> {
         }
 
         kernelopts(domain)?;
-        safe_component(&domain.backend.kernel.name)?;
+        safe_component(&domain.backend.nixos()?.kernel.name)?;
         ensure!(
-            topology.kernels.contains_key(&domain.backend.kernel.name),
+            topology
+                .kernels
+                .contains_key(&domain.backend.nixos()?.kernel.name),
             "missing kernel bundle for {name}"
         );
 

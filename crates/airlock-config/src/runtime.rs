@@ -229,6 +229,7 @@ impl Candidate {
             .set_dynamic(
                 "inputs",
                 nix_record! {
+                    "hermit-xen": crate::hermit_build::input(),
                     "nixpkgs": nix_record! {
                         "url": format!("path:{path}", path = sources.nixpkgs),
                     },

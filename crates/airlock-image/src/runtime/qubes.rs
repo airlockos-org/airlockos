@@ -159,7 +159,10 @@ fn assemble_objects(
         session.vm_properties(&vm.name, &values)?;
         session.features(vm)?;
 
-        let source = crate::support::regular(&vm.root_image)?;
+        let Some(root_image) = &vm.root_image else {
+            continue;
+        };
+        let source = crate::support::regular(root_image)?;
         let sizes = [
             ("root", source.metadata()?.len()),
             ("private", vm.private_size.unwrap_or(defaults.private_size)),
@@ -184,7 +187,7 @@ fn assemble_objects(
             if name == "root" {
                 run(Command::new("cp")
                     .args(["--sparse=always", "--reflink=auto", "--"])
-                    .arg(&vm.root_image)
+                    .arg(root_image)
                     .arg(&path))?;
             } else {
                 run(Command::new("mkfs.ext4").args(["-q", "-F"]).arg(&path))?;

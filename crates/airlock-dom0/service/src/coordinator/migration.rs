@@ -119,7 +119,7 @@ impl Coordinator {
                     domain.class_name == "StandaloneVM"
                         && domain
                             .backend
-                            .state
+                            .state()
                             .get("persistent")
                             .is_some_and(|v| !v.is_null() && v != &json!(false)),
                     "{name}: unsupported private copy backend"

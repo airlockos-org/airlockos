@@ -23,6 +23,9 @@ pub enum BackendKind {
     #[serde(rename = "nix-closure")]
     /// Boot an immutable NixOS closure with Airlock storage artifacts.
     NixClosure,
+    /// Boot an immutable native Hermit PVH executable.
+    #[serde(rename = "hermit")]
+    Hermit,
 }
 
 /// Sharing protocol used to expose an immutable Nix closure to a guest.

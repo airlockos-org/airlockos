@@ -49,37 +49,18 @@ impl GiB {
 /// Clones share module, resource and display edits. Identity, role, network and
 /// launch-target connections stay fixed.
 #[derive(Clone)]
-pub struct VmHandle<R> {
+pub struct VmHandle<R, B = Nixos> {
     /// Shared declaration whose membership is established by `Machine::add`.
     reference: VmReference,
     /// Retains the constructor's role so Rust can check connection compatibility.
-    role: PhantomData<fn() -> R>,
+    role: PhantomData<fn() -> (R, B)>,
 }
 
-impl<R> VmHandle<R> {
+impl<R, B> VmHandle<R, B> {
     /// Borrows the validated external identity for service records and diagnostics.
     /// Identity is immutable; machine membership still uses the declaration itself.
     pub fn name(&self) -> &VmName {
         &self.reference.definition.name
-    }
-
-    /// Appends a NixOS contribution in authoring order, without changing VM membership.
-    /// All handle clones and the registered machine observe the added module.
-    pub fn add_module(&self, module: impl Into<VmModule>) {
-        self.reference
-            .definition
-            .modules
-            .borrow_mut()
-            .push(module.into());
-    }
-
-    /// Register a component-owned evidence source; finalization checks duplicate and unsafe declarations.
-    pub fn add_diagnostic_source(&self, source: airlock_diagnostics::Source) {
-        self.reference
-            .definition
-            .diagnostic_sources
-            .borrow_mut()
-            .push(source);
     }
 
     /// Advertise an additional Qubes feature without replacing role or relationship invariants.
@@ -120,13 +101,6 @@ impl<R> VmHandle<R> {
         self.reference.definition.settings.set(settings);
     }
 
-    /// Set the capacity of the small VM boot filesystem; finalization rejects zero capacity.
-    pub fn set_root_image(&self, size: MiB) {
-        let mut settings = self.reference.definition.settings.get();
-        settings.root_image = size;
-        self.reference.definition.settings.set(settings);
-    }
-
     /// Override the role's boot-start preference without changing its dependency relationships.
     pub fn set_autostart(&self, enabled: bool) {
         let mut settings = self.reference.definition.settings.get();
@@ -140,6 +114,65 @@ impl<R> VmHandle<R> {
         settings.vcpus = count;
         self.reference.definition.settings.set(settings);
     }
+}
+
+impl<R> VmHandle<R, Nixos> {
+    /// Register a component-owned evidence source; finalization checks duplicate and unsafe declarations.
+    pub fn add_diagnostic_source(&self, source: airlock_diagnostics::Source) {
+        self.reference
+            .definition
+            .diagnostic_sources
+            .borrow_mut()
+            .push(source);
+    }
+
+    /// Appends a NixOS contribution in authoring order, without changing VM membership.
+    /// All handle clones and the registered machine observe the added module.
+    pub fn add_module(&self, module: impl Into<VmModule>) {
+        self.reference
+            .definition
+            .modules
+            .borrow_mut()
+            .push(module.into());
+    }
+
+    /// Set the capacity of the small VM boot filesystem; finalization rejects zero capacity.
+    pub fn set_root_image(&self, size: MiB) {
+        let mut settings = self.reference.definition.settings.get();
+        settings.root_image = size;
+        self.reference.definition.settings.set(settings);
+    }
+}
+
+/// NixOS backend marker; only these handles accept Linux modules and root images.
+#[derive(Clone)]
+pub struct Nixos;
+
+/// Hermit backend marker; these handles cannot acquire NixOS or qrexec services.
+#[derive(Clone)]
+pub struct Hermit;
+
+/// A stateless system service, independent of its guest operating system.
+#[derive(Clone)]
+pub struct Service;
+
+/// Guest implementation captured independently of identity and role.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GuestBackend {
+    /// Existing NixOS system and shared immutable store.
+    Nixos,
+    /// Native Hermit PVH application, without Linux guest storage.
+    Hermit {
+        /// Application source selection interpreted by the Hermit builder.
+        application: HermitApplication,
+    },
+}
+
+/// Reviewed Hermit application selection; arbitrary build features cannot grant authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HermitApplication {
+    /// Clipboard implementation with all peer grants and authorization disabled.
+    Clipboard,
 }
 
 /// A NixOS contribution that keeps desktop capabilities and diagnostic sources beside configuration.
@@ -227,6 +260,7 @@ impl VmReference {
 
         VmSnapshot {
             name: self.definition.name.clone(),
+            backend: self.definition.backend.clone(),
             role: self
                 .definition
                 .role
@@ -248,6 +282,8 @@ impl VmReference {
 
 /// Shared authoring state with fixed network edges and editable display assignments.
 struct VmDefinition {
+    /// Backend fixed at declaration; handle clones cannot change guest ABI.
+    backend: GuestBackend,
     /// Validated external identity, fixed when the VM is declared.
     name: VmName,
     /// Role and references to earlier declarations; edges cannot be replaced.
@@ -374,6 +410,8 @@ pub enum GuiDisplay {
 /// Each role carries the settings it needs, rather than independent optional fields.
 #[derive(Clone)]
 pub enum Role<R> {
+    /// A stateless service with no implicit network, GUI, or writable storage.
+    Service,
     /// Runs a minimal application system without network or display access by default.
     Isolated {
         /// Persistent user state, separate from the immutable system closure.
@@ -430,6 +468,7 @@ impl<R> Role<R> {
     /// Replaces declaration references with resolved values when freezing configuration.
     fn map_references<T>(&self, map: impl Fn(&R) -> T) -> Role<T> {
         match self {
+            Self::Service => Role::Service,
             Self::Isolated { private_volume } => Role::Isolated {
                 private_volume: *private_volume,
             },
@@ -481,7 +520,10 @@ impl<R> Role<R> {
     /// The PCI-owning driver and the isolated GUI have no upstream VM.
     pub fn uplink(&self) -> Option<&R> {
         match self {
-            Self::Isolated { .. } | Self::NetworkDriver { .. } | Self::Gui { .. } => None,
+            Self::Service
+            | Self::Isolated { .. }
+            | Self::NetworkDriver { .. }
+            | Self::Gui { .. } => None,
             Self::Firewall { uplink }
             | Self::Personal { uplink, .. }
             | Self::Controller { uplink, .. }
@@ -500,7 +542,7 @@ impl<R> Role<R> {
             | Self::Controller { private_volume, .. }
             | Self::Assistant { private_volume, .. }
             | Self::Command { private_volume, .. } => Some(*private_volume),
-            Self::Firewall { .. } | Self::Gui { .. } => None,
+            Self::Service | Self::Firewall { .. } | Self::Gui { .. } => None,
         }
     }
 }
@@ -563,6 +605,8 @@ impl Memory {
 /// Editing this value cannot mutate a declaration or its registered machine.
 #[derive(Clone)]
 pub struct VmSnapshot {
+    /// Operating system and executable selection, independent of the service role.
+    pub backend: GuestBackend,
     /// Validated Airlock identity, shared with the runtime's existing name type.
     pub name: VmName,
     /// Independent Rust-authored NixOS contributions composed for this VM.
@@ -615,6 +659,39 @@ impl VmSettings {
 pub struct Vm;
 
 impl Vm {
+    /// Declare a stateless NixOS service using the existing Linux guest machinery.
+    pub fn nixos(name: &str, memory: MiB) -> Result<VmHandle<Service>, AuthoringError> {
+        Self::declare(
+            name,
+            Role::Service,
+            VmSettings {
+                memory: Memory::Fixed(memory),
+                vcpus: 1,
+                ..VmSettings::application()
+            },
+        )
+    }
+
+    /// Declare an isolated Hermit service with fixed memory and one virtual CPU.
+    /// The application selection cannot enable the laboratory's dom0 authority.
+    pub fn hermit(
+        name: &str,
+        memory: MiB,
+        application: HermitApplication,
+    ) -> Result<VmHandle<Service, Hermit>, AuthoringError> {
+        let mut vm = Self::nixos(name, memory)?;
+        let definition =
+            Rc::get_mut(&mut vm.reference.definition).expect("new declaration has no clones");
+        definition.backend = GuestBackend::Hermit { application };
+        let mut settings = definition.settings.get();
+        settings.root_image = MiB(0);
+        definition.settings.set(settings);
+        Ok(VmHandle {
+            reference: vm.reference,
+            role: PhantomData,
+        })
+    }
+
     /// Creates shared configuration without claiming membership in any machine.
     /// Only role constructors call this helper; they must pair `R` with the matching
     /// `Role` variant. Resource bounds are checked after configuration by the machine.
@@ -632,6 +709,7 @@ impl Vm {
 
         let definition = Rc::new(VmDefinition {
             name,
+            backend: GuestBackend::Nixos,
             role,
             owner: OnceCell::new(),
             settings: Cell::new(settings),
@@ -898,7 +976,7 @@ impl MachineSnapshot {
     }
 
     /// Check that a handle belongs to this snapshot, including snapshots made before later registrations.
-    pub(crate) fn contains<R>(&self, handle: &VmHandle<R>) -> bool {
+    pub(crate) fn contains<R, B>(&self, handle: &VmHandle<R, B>) -> bool {
         handle
             .reference
             .definition
@@ -997,7 +1075,7 @@ impl Machine {
     /// Failure preserves existing membership and permits retry after adding a dependency.
     /// Display assignments are checked later by `finish`, because they can point back
     /// to the GUI that launches an application.
-    pub fn add<R>(&mut self, vm: &VmHandle<R>) -> Result<(), AuthoringError> {
+    pub fn add<R, B>(&mut self, vm: &VmHandle<R, B>) -> Result<(), AuthoringError> {
         let definition = &vm.reference.definition;
         if let Some(owner) = definition.owner.get() {
             return Err(if Rc::ptr_eq(owner, &self.owner) {
@@ -1103,7 +1181,7 @@ impl Machine {
             if initial.0 == 0
                 || initial.0 > maximum.0
                 || settings.vcpus == 0
-                || settings.root_image.0 == 0
+                || (matches!(definition.backend, GuestBackend::Nixos) && settings.root_image.0 == 0)
                 || definition
                     .role
                     .private_volume()
@@ -1112,6 +1190,22 @@ impl Machine {
                 return Err(AuthoringError::InvalidResources {
                     vm: vm.name().to_owned(),
                     reason: "resources must be positive and initial memory must not exceed maximum",
+                });
+            }
+
+            if matches!(definition.backend, GuestBackend::Hermit { .. })
+                && (initial.0 != maximum.0
+                    || !(16..=256).contains(&initial.0)
+                    || settings.vcpus != 1
+                    || settings.root_image.0 != 0
+                    || !definition.modules.borrow().is_empty()
+                    || !definition.features.borrow().is_empty()
+                    || !matches!(definition.role, Role::Service)
+                    || definition.gui.borrow().is_some())
+            {
+                return Err(AuthoringError::InvalidResources {
+                    vm: vm.name().to_owned(),
+                    reason: "Hermit requires one CPU, fixed 16–256 MiB memory, and no Linux, GUI or storage configuration",
                 });
             }
 
@@ -1236,9 +1330,10 @@ impl Machine {
             Role::Gui { .. } => Ok(ReferenceSetting::Named(
                 "dom0".parse().expect("fixed host identity"),
             )),
-            Role::Isolated { .. } | Role::NetworkDriver { .. } | Role::Firewall { .. } => {
-                Ok(ReferenceSetting::Disabled)
-            }
+            Role::Service
+            | Role::Isolated { .. }
+            | Role::NetworkDriver { .. }
+            | Role::Firewall { .. } => Ok(ReferenceSetting::Disabled),
             role => {
                 let host = host.ok_or_else(|| AuthoringError::MissingHostReference {
                     vm: vm.name().to_owned(),

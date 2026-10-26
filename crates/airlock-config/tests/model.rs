@@ -816,3 +816,47 @@ fn preparation_separates_source_and_rejects_changed_artifacts() {
 
     assert!(airlock_config::preparation::prepare(source, &source.join("cache"), emit).is_err());
 }
+
+#[test]
+fn backends_share_roles_and_freeze_independent_snapshots() {
+    use model::{GuestBackend, HermitApplication, Role};
+
+    let linux = Vm::nixos("service-linux", MiB(256)).unwrap();
+    let hermit = Vm::hermit("sys-clipboard", MiB(32), HermitApplication::Clipboard).unwrap();
+    let mut machine = Machine::default();
+    machine.add(&linux).unwrap();
+    machine.add(&hermit).unwrap();
+    let snapshot = machine.finish().unwrap();
+    assert!(snapshot.vms().all(|vm| matches!(vm.role, Role::Service)));
+    let frozen = snapshot
+        .vms()
+        .find(|vm| vm.name.as_str() == "sys-clipboard")
+        .unwrap();
+    assert!(matches!(frozen.backend, GuestBackend::Hermit { .. }));
+    assert!(frozen.modules.is_empty());
+    assert_eq!(frozen.settings.root_image.0, 0);
+    assert_eq!(frozen.guivm, ReferenceSetting::Disabled);
+    hermit.set_memory(Memory::Fixed(MiB(64)));
+    assert_eq!(frozen.settings.memory.bounds().0.0, 32);
+    assert!(machine.finish().is_ok());
+}
+
+#[test]
+fn hermit_rejects_linux_capabilities_and_unsupported_resources() {
+    use model::HermitApplication;
+
+    let hermit = Vm::hermit("sys-clipboard", MiB(32), HermitApplication::Clipboard).unwrap();
+    let mut machine = Machine::default();
+    machine.add(&hermit).unwrap();
+    hermit.set_vcpus(2);
+    assert!(machine.finish().is_err());
+    hermit.set_vcpus(1);
+    hermit.set_memory(Memory::Ballooned {
+        initial: MiB(32),
+        maximum: MiB(64),
+    });
+    assert!(machine.finish().is_err());
+    hermit.set_memory(Memory::Fixed(MiB(32)));
+    hermit.set_feature("qrexec", "1").unwrap();
+    assert!(machine.finish().is_err());
+}
