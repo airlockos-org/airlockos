@@ -193,19 +193,18 @@ fn image_build_rejects_stale_application_content_before_prerequisites() -> Resul
     Ok(())
 }
 
-/// Human build logs omit empty prefixes without changing JSON stdout, failures or explicit log protocols.
+/// Human build logs omit setup chatter without changing JSON stdout, failures or explicit log protocols.
 #[test]
 fn image_build_logs_preserve_diagnostics_and_exit_status() -> Result<()> {
     let fixture = Repository::new()?;
-    let diagnostics =
-        "nixos-disk-image>\nnixos-disk-image> copying store\nerror: fixture failure\n";
+    let diagnostics = "nixos-disk-image>\nimage> structuredAttrs is enabled\nnixos-disk-image> copying store\nimage> structuredAttrs is enabled: warning\nerror: fixture failure\n";
     let release = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-built";
     fixture.configure(json!({"nix_stderr": diagnostics, "nix_exit": 42, "release": release}))?;
 
     for (format, expected) in [
         (
             None,
-            "nixos-disk-image> copying store\nerror: fixture failure\n",
+            "nixos-disk-image> copying store\nimage> structuredAttrs is enabled: warning\nerror: fixture failure\n",
         ),
         (Some("--log-format=internal-json"), diagnostics),
     ] {
@@ -223,7 +222,7 @@ fn image_build_logs_preserve_diagnostics_and_exit_status() -> Result<()> {
     }
 
     fixture.configure(json!({
-        "nix_stderr": "nixos-disk-image> copying store\nnixos-disk-image>\n",
+        "nix_stderr": "nixos-disk-image> copying store\nnixos-disk-image>\nimage> structuredAttrs is enabled\n",
         "nix_wait_stdin": true,
         "nix_exit": 42,
         "release": release,

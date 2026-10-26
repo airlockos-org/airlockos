@@ -166,7 +166,9 @@ fn forward(mut input: impl Read, mut output: impl Write) -> io::Result<()> {
             result => result?,
         };
         if size == 0 {
-            output.write_all(&bytes)?;
+            if !quiet_record(&bytes, true) {
+                output.write_all(&bytes)?;
+            }
             return output.flush();
         }
 
@@ -176,7 +178,7 @@ fn forward(mut input: impl Read, mut output: impl Write) -> io::Result<()> {
                 output.write_all(part)?;
             } else {
                 bytes.extend_from_slice(part);
-                if bytes.len() >= buffer.len() || !empty_record(&bytes, complete) {
+                if bytes.len() >= buffer.len() || !quiet_record(&bytes, complete) {
                     output.write_all(&bytes)?;
                     bytes.clear();
                     continuation = !complete;
@@ -192,8 +194,8 @@ fn forward(mut input: impl Read, mut output: impl Write) -> io::Result<()> {
     }
 }
 
-/// Recognize an empty record or its incomplete prefix, allowing Nix's SGR colors.
-fn empty_record(bytes: &[u8], complete: bool) -> bool {
+/// Recognize empty Nix records and exact setup chatter, allowing SGR colors and incomplete prefixes.
+fn quiet_record(bytes: &[u8], complete: bool) -> bool {
     let mut plain = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
@@ -219,13 +221,27 @@ fn empty_record(bytes: &[u8], complete: bool) -> bool {
 
     let separator = plain.iter().position(|byte| *byte == b'>');
     let prefix_end = separator.unwrap_or(plain.len());
-    (!complete || separator.is_some())
-        && (!complete || prefix_end > 0)
-        && plain[..prefix_end]
-            .iter()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"+-._?=".contains(byte))
-        && separator
-            .is_none_or(|separator| plain[separator + 1..].iter().all(u8::is_ascii_whitespace))
+    let nix_prefix = plain[..prefix_end]
+        .iter()
+        .all(|byte| byte.is_ascii_alphanumeric() || b"+-._?=".contains(byte));
+    let message = match separator {
+        Some(separator) if nix_prefix && prefix_end > 0 => &plain[separator + 1..],
+        Some(_) => return false,
+        None if nix_prefix && !complete => return true,
+        None => plain.as_slice(),
+    }
+    .trim_ascii();
+
+    if separator.is_some() && message.is_empty() {
+        return true;
+    }
+
+    let setup_message = b"structuredAttrs is enabled";
+    if complete {
+        message == setup_message
+    } else {
+        setup_message.starts_with(message)
+    }
 }
 
 #[cfg(test)]
@@ -256,14 +272,14 @@ mod tests {
         assert!(progress.report(start + Duration::from_secs(36)).is_none());
     }
 
-    /// Suppressed blank records cannot reset the fallback status clock or manufacture work.
+    /// Suppressed setup and blank records cannot reset the fallback status clock or manufacture work.
     #[test]
     fn blank_build_output_still_allows_quiet_status() -> io::Result<()> {
         let now = Instant::now();
         let progress = Arc::new(Mutex::new(Progress::new(now - INTERVAL)));
         let mut output = Vec::new();
         forward(
-            &b"nixos-disk-image>\nnixos-disk-image> \n\n"[..],
+            &b"nixos-disk-image>\nnixos-disk-image> \n\nimage> structuredAttrs is enabled\nstructuredAttrs is enabled\n"[..],
             Observed {
                 output: &mut output,
                 progress: progress.clone(),
@@ -289,11 +305,11 @@ mod tests {
         }
     }
 
-    /// Empty records disappear while colors, binary bytes, progress and incomplete diagnostics survive.
+    /// Exact setup chatter disappears while colors, similar diagnostics and arbitrary read splits survive.
     #[test]
     fn preserves_useful_output() -> io::Result<()> {
-        let input = b"nixos-disk-image>\nnixos-disk-image> \r\n\x1b[32;1mnixos-disk-image>\x1b[0m \n\nnixos-disk-image> copying store\nerror: build failed\nhello >\n\xff>\nimage> final diagnostic";
-        let expected = b"\nnixos-disk-image> copying store\nerror: build failed\nhello >\n\xff>\nimage> final diagnostic";
+        let input = b"nixos-disk-image>\nnixos-disk-image> \r\n\x1b[32;1mnixos-disk-image>\x1b[0m \n\nstructuredAttrs is enabled\n\x1b[32;1mimage>\x1b[0m structuredAttrs is enabled\r\nnixos-disk-image> copying store\nimage> structuredAttrs is enabled: warning\nwarning: structuredAttrs is enabled\nerror: build failed\nhello >\n\xff>\nimage> final diagnostic";
+        let expected = b"\nnixos-disk-image> copying store\nimage> structuredAttrs is enabled: warning\nwarning: structuredAttrs is enabled\nerror: build failed\nhello >\n\xff>\nimage> final diagnostic";
         for size in 1..=input.len() {
             let mut output = Vec::new();
             forward(
@@ -307,7 +323,11 @@ mod tests {
         }
         // A prompt is ordinary output as soon as its punctuation arrives; it
         // must not be held until a newline while the child waits for input.
-        assert!(!empty_record(b"Password: ", false));
+        assert!(!quiet_record(b"Password: ", false));
+        assert!(!quiet_record(b"image> structuredAttrs is", true));
+        let mut output = Vec::new();
+        forward(&b"image> structuredAttrs is enabled"[..], &mut output)?;
+        assert!(output.is_empty());
         Ok(())
     }
 
