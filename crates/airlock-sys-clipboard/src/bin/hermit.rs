@@ -1,10 +1,21 @@
-//! Hermit PVH entry point for the controlled clipboard laboratory service.
+//! Hermit PVH entry point. Deployment stays disconnected from clipboard traffic
+//! until a production GUI authorization path is provisioned.
 
 #[cfg(target_os = "hermit")]
 use hermit as _;
 
+/// Report execution without granting a peer access or accepting clipboard requests.
+/// Parking uses Hermit's scheduler; no polling loop or dom0 runtime broker is needed.
+#[cfg(all(target_os = "hermit", not(feature = "lab-authority")))]
+fn main() {
+    println!("AIRLOCK_CLIPBOARD_EXECUTING authority=disconnected readiness=isolated");
+    loop {
+        std::thread::park();
+    }
+}
+
 /// Establish the laboratory's dom0-only grant channel and run the real service.
-#[cfg(target_os = "hermit")]
+#[cfg(all(target_os = "hermit", feature = "lab-authority"))]
 fn main() {
     use xen_transport::{Peer, hermit::Hermit};
 

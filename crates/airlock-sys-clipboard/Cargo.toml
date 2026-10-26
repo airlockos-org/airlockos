@@ -24,7 +24,6 @@ xen-transport = { git = "https://github.com/airlockos-org/hermit-xen", rev = "70
 [[bin]]
 name = "sys-clipboard"
 path = "src/bin/hermit.rs"
-required-features = ["lab-authority"]
 
 [[bin]]
 name = "clipboard-peer"

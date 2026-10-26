@@ -25,6 +25,9 @@ pub mod identity;
 /// Sparse boot-image identity without transport or filesystem dependencies.
 pub mod root_artifact;
 
+/// Immutable Hermit executable identity and Xen PVH loader validation.
+pub mod hermit_artifact;
+
 /// Shared guest-admission claims and candidate bindings.
 pub mod admission;
 
