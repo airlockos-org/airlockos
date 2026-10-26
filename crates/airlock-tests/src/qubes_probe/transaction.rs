@@ -129,7 +129,7 @@ pub(super) fn observe(py: Python<'_>) -> Result<Value> {
     kwargs.set_item("label", "green")?;
     let vm = app.call_method("add_new_vm", ("StandaloneVM",), Some(&kwargs))?;
     vm.setattr("events_enabled", false)?;
-    vm.setattr("kernel", "test-kernel")?;
+    vm.setattr("kernel", "")?;
     vm.setattr("netvm", py.None())?;
     vm.setattr("guivm", py.None())?;
     fs::create_dir_all(vm.getattr("dir_path")?.extract::<std::path::PathBuf>()?)?;
@@ -138,6 +138,28 @@ pub(super) fn observe(py: Python<'_>) -> Result<Value> {
 
     let app = open(py, store, true)?;
     let vm = app.getattr("domains")?.get_item("usr-home")?;
+    let empty_kernel =
+        snapshot::read(&app, &vm).context("observe a newly created kernel-free VM")?;
+    ensure!(
+        empty_kernel["volumes"]
+            .as_array()
+            .context("volumes")?
+            .iter()
+            .all(|volume| volume["name"] != "kernel"),
+        "unused kernel slot is not a backing resource"
+    );
+    let private = vm.getattr("volumes")?.get_item("private")?;
+    let private_id = private.getattr("vid")?;
+    private.setattr("vid", py.None())?;
+    ensure!(
+        snapshot::read(&app, &vm).is_err(),
+        "missing writable backing identity was accepted"
+    );
+    private.setattr("vid", private_id)?;
+    vm.setattr("events_enabled", false)?;
+    vm.setattr("kernel", "test-kernel")?;
+    app.setattr("default_kernel", "")?;
+    app.call_method0("save")?;
     let before = snapshot::read(&app, &vm).context("read initial upstream storage objects")?;
     app.call_method0("close")?;
     let mut volume = before["volumes"]
@@ -209,13 +231,18 @@ pub(super) fn observe(py: Python<'_>) -> Result<Value> {
     };
     let saved = fs::read(store)?;
     let app = open(py, store, false)?;
-    let rejected_private = storage::on_app(
+    let result = storage::on_app(
         &app,
         airlock_dom0_service::storage_objects_request(request.clone())?,
         &guard,
         &runner,
-    )
-    .is_err();
+    );
+    ensure!(
+        guards.get() == 1,
+        "storage rejected before the locked guard: {error:?}",
+        error = result.as_ref().err()
+    );
+    let rejected_private = result.is_err();
     app.call_method0("close")?;
     ensure!(
         rejected_private && saved == fs::read(store)?,

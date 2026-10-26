@@ -1,9 +1,30 @@
 //! Observe reloaded upstream storage objects for the native image verifier.
 
 use super::values::{identity, optional, plain};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use pyo3::{prelude::*, types::PyDict};
 use serde_json::{Value, json};
+
+/// Qubes keeps a kernel slot even when no kernel is selected; that slot has no backing object.
+/// Reject missing identities on every other volume, especially writable root/private storage.
+fn backed(volume: &Bound<'_, PyAny>) -> Result<bool> {
+    let identity = volume.getattr("vid")?;
+    if !identity.is_none() && !identity.extract::<String>()?.is_empty() {
+        return Ok(true);
+    }
+    let kernel = volume
+        .py()
+        .import("qubes.storage.kernels")?
+        .getattr("LinuxModules")?;
+    ensure!(
+        volume.is_instance(&kernel)?
+            && !volume.getattr("rw")?.is_truthy()?
+            && volume.getattr("source")?.is_none()
+            && volume.getattr("path")?.is_none(),
+        "missing backing identity on a real Qubes volume"
+    );
+    Ok(false)
+}
 
 /// Read each volume's persisted configuration and resolved upstream metadata.
 fn volumes(vm: &Bound<'_, PyAny>) -> Result<Vec<Value>> {
@@ -17,7 +38,13 @@ fn volumes(vm: &Bound<'_, PyAny>) -> Result<Vec<Value>> {
         .map_err(PyErr::from)?;
     volumes
         .iter()
-        .map(|(name, volume)| {
+        .filter_map(|(name, volume)| match backed(&volume) {
+            Ok(true) => Some(Ok((name, volume))),
+            Ok(false) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .map(|entry| {
+            let (name, volume) = entry?;
             let name: String = name.extract()?;
             let config = configurations
                 .get_item(&name)?
@@ -71,6 +98,9 @@ pub fn read(app: &Bound<'_, PyAny>, vm: &Bound<'_, PyAny>) -> Result<Value> {
             .try_iter()?
         {
             let volume = volume?;
+            if !backed(&volume)? {
+                continue;
+            }
             let source = volume.getattr("source")?;
             let mut reference = identity(&volume)?;
             reference["domain"] = json!(other_name);
