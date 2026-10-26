@@ -100,6 +100,28 @@ impl Fixture {
     }
 }
 
+/// Copy validation must not silently replace a caller's backing file with another segment.
+#[test]
+fn copied_extent_cannot_substitute_its_backing_path() -> Result<()> {
+    let fixture = Fixture::new()?;
+    segments::with_verification(|| {
+        fixture.request()?;
+        let value = read(&segments::object_metadata(fixture.root(), "object")?)?;
+        let mut replacement = fixture.replacement.clone();
+        replacement.segment_blob = fixture.source.segment_blob.clone();
+        let planned = plan(
+            fixture.root(),
+            "object",
+            &value,
+            &fixture.source,
+            "compaction",
+        )?;
+        assert!(copied(planned, &replacement).is_err());
+        Ok(json!({}))
+    })?;
+    Ok(())
+}
+
 #[test]
 fn mirror_disagreement_refuses_before_canonical_publication() -> Result<()> {
     let fixture = Fixture::new()?;

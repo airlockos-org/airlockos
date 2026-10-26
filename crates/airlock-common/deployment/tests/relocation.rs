@@ -3,6 +3,7 @@
 use airlock_deployment_core::retention::relocation::{
     Entry, Identity, Location, MirrorRequest, MovePlan, Phase, RefreshRequest, Snapshot,
     Transaction,
+    extent::{Backing, CheckedExtent},
 };
 
 /// Original immutable object at a named physical segment, with a complete record revision.
@@ -209,4 +210,81 @@ fn shared_terminator_has_explicit_identity_and_follows_the_same_content_rules() 
         .copied(location("000002"))
         .unwrap();
     assert_eq!(request.source().identity.name, ".tar-eof");
+}
+
+/// Exact canonical backing metadata, supplied independently of the claimed extent.
+fn backing(length: u64) -> Backing {
+    Backing {
+        path: "/pool/objects/segments/000002.blob".into(),
+        length,
+        regular: true,
+    }
+}
+
+/// Interior and maximum-number ranges keep their original read bounds and relocation identity.
+#[test]
+fn checked_extents_preserve_exact_read_and_relocation_coordinates() {
+    for offset in [128, u64::MAX - 1024] {
+        let mut claimed = location("000002");
+        claimed.offset = offset;
+        let checked = CheckedExtent::check(
+            claimed,
+            "/pool/objects/segments/000002.blob",
+            backing(offset + 1024),
+        )
+        .unwrap();
+        assert_eq!(checked.end(), offset + 1024);
+        assert_eq!(checked.location().offset, offset);
+        assert_eq!(checked.backing(), "/pool/objects/segments/000002.blob");
+        let request = MovePlan::new(snapshot("000001", "b"), "compaction".into())
+            .unwrap()
+            .copied_extent(checked)
+            .unwrap();
+        let target = request.target();
+        assert_eq!(target.pool, "/pool");
+        assert_eq!(target.segment, "000002");
+        assert_eq!(target.offset, offset);
+        assert_eq!(target.size, 1024);
+        assert_eq!(target.digest, "a".repeat(64));
+    }
+}
+
+/// Invalid backing observations, range arithmetic and digest encodings fail closed.
+#[test]
+fn checked_extents_refuse_redirected_or_invalid_ranges() {
+    for defect in [
+        "backing",
+        "directory",
+        "zero",
+        "past-end",
+        "overflow",
+        "short-digest",
+        "uppercase-digest",
+        "nonhex-digest",
+        "unicode-digest",
+    ] {
+        let mut claimed = location("000002");
+        let mut observed = backing(1024);
+        match defect {
+            "backing" => observed.path = "/other/000002.blob".into(),
+            "directory" => observed.regular = false,
+            "zero" => claimed.size = 0,
+            "past-end" => claimed.offset = 1,
+            "overflow" => {
+                claimed.offset = u64::MAX;
+                observed.length = u64::MAX;
+            }
+            "short-digest" => {
+                claimed.digest.pop();
+            }
+            "uppercase-digest" => claimed.digest = "A".repeat(64),
+            "nonhex-digest" => claimed.digest = "g".repeat(64),
+            "unicode-digest" => claimed.digest = "é".repeat(32),
+            _ => unreachable!(),
+        }
+        assert!(
+            CheckedExtent::check(claimed, "/pool/objects/segments/000002.blob", observed).is_none(),
+            "accepted {defect}"
+        );
+    }
 }

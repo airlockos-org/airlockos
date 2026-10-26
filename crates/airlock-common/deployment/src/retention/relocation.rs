@@ -1,6 +1,10 @@
 //! Moving immutable software preserves content and identity before any reference changes.
 //! Adapters authenticate decoded records, content hashes, durable writes and locked observations.
 
+/// Typed backing-file and byte-range checks used before relocation content verification.
+pub mod extent;
+
+use extent::CheckedExtent;
 use vstd::prelude::*;
 
 verus! {
@@ -171,6 +175,15 @@ impl MovePlan {
 
     #[verifier::type_invariant]
     closed spec fn valid(&self) -> bool { valid_snapshot(self.source) && self.transaction@.len() > 0 }
+
+    /// Bind a checked native read to the content-preserving publication request without a target override.
+    pub fn copied_extent(self, checked: CheckedExtent) -> (out: Option<PublishRequest>)
+        ensures out.is_some() ==> out.unwrap().origin() == self
+            && out.unwrap().destination() == checked@.0
+            && out.unwrap().destination().offset + out.unwrap().destination().size <= checked@.1.length,
+    {
+        self.copied(checked.into_location())
+    }
 
     /// Accept only independently observed replacement bytes with the original content in disjoint storage.
     pub fn copied(self, target: Location) -> (out: Option<PublishRequest>)

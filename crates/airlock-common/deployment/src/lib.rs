@@ -234,6 +234,16 @@
 //!   I/O, exclusive scheduling, and terminating/reconcilable helpers. Revocation or
 //!   damaged authority intentionally blocks execution.
 //!
+//! Relocation validates native fragment coordinates directly. `retention::relocation::extent::CheckedExtent`
+//! checks exact supplied-versus-canonical backing identity, lowercase SHA-256 syntax, regular-file
+//! evidence and a positive mathematical byte range within the observed length, without overflow.
+//! The storage adapter hashes the selected range on the same open file; `MovePlan::copied_extent`
+//! consumes the opaque result and proves that content-preserving publication retains those exact
+//! validated coordinates. Native dispatch supplies no independent replacement target.
+//! Record decoding still resolves logical image paths against the physical pool before this check.
+//! Canonical path derivation, file metadata, lock exclusion, hash implementation/cache observations,
+//! faithful byte reads and external publication remain adapter obligations, not new theorems.
+//!
 //! Storage attachment and checked boot setup retain their own verified generation identities.
 //! `attachment::prepared::CheckedGeneration` accepts a prepared descriptor only when its boot
 //! identity and the committed manifest agree with the requested pool, namespace, system, root,

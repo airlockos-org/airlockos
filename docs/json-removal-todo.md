@@ -39,7 +39,7 @@ Existing transport, persistence, diagnostic and upstream formats stay in place.
    [generation admission](../crates/airlock-dom0/service/src/store/generations.rs),
    [host publication](../crates/airlock-dom0/service/src/store/host_machine.rs).
 
-5. [ ] **Check relocation extents directly as Rust values.**
+5. [x] **Check relocation extents directly as Rust values.**
    Replace the typed `Extent` to JSON conversion before extent validation with
    a typed validation entry point. Keep all backing-path, content and range checks.
    Sources: [relocation](../crates/airlock-dom0/service/src/store/relocation.rs),

@@ -84,9 +84,8 @@ pub(super) fn plan(
 /// Verify the actual appended bytes, then compare them with the captured original contents.
 pub(super) fn copied(plan: MovePlan, extent: &segments::Extent) -> Result<PublishRequest> {
     let root = Path::new(&plan.source().location.pool);
-    let checked = segments::extent(root, &serde_json::to_value(extent)?, true)?;
-    let target = location(root, &checked)?;
-    plan.copied(target)
+    let checked = segments::check_extent(root, extent, true)?;
+    plan.copied_extent(checked)
         .context("relocation replacement changes original contents or overlaps source")
 }
 

@@ -2,6 +2,10 @@
 //! Each published extent records its segment, bounds and content digest.
 
 use super::fs::*;
+use airlock_deployment_core::retention::relocation::{
+    Location,
+    extent::{Backing, CheckedExtent},
+};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -13,7 +17,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// Checked physical identity of one immutable fragment inside a pool segment.
+/// Claimed physical identity of one immutable fragment inside a pool segment.
+/// Use `check_extent` before relying on the current backing bytes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct Extent {
     /// Numeric segment identity, independent of its mount location.
@@ -270,28 +275,59 @@ pub(super) fn extent(root: &Path, meta: &Value, verify: bool) -> Result<Extent> 
         .and_then(|items| items.iter().find(|item| item["status"] == "current"))
         .unwrap_or(meta);
     let id = text(location, "segment_id")?;
-    let path = blob(root, &id)?;
-    let offset = number(location, "segment_offset")?;
-    let size = number(location, "size")?;
-    let digest = text(location, "sha256")?;
-    pool_path(root, &path)?;
-    ensure!(
-        digest.len() == 64
-            && digest
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
-        "invalid fragment digest"
-    );
+    // Persisted image records may name a logical installation path. Resolve that
+    // path against this physical pool, as before; native extents carry their real path.
+    let claimed = Extent {
+        segment_blob: blob(root, &id)?,
+        segment_id: id,
+        segment_offset: number(location, "segment_offset")?,
+        size: number(location, "size")?,
+        sha256: text(location, "sha256")?,
+    };
+    let checked = check_extent(root, &claimed, verify)?;
+    let location = checked.location();
+    Ok(Extent {
+        segment_id: location.segment.clone(),
+        segment_blob: checked.backing().into(),
+        segment_offset: location.offset,
+        size: location.size,
+        sha256: location.digest.clone(),
+    })
+}
+
+/// Check native coordinates directly; only the open canonical file supplies bytes and metadata.
+/// Pool path/symlink checks and byte hashing remain ordinary Rust adapters. The verified
+/// value binds their supplied observation to the complete original location and bounded range.
+pub(super) fn check_extent(root: &Path, extent: &Extent, verify: bool) -> Result<CheckedExtent> {
+    let path = blob(root, &extent.segment_id)?;
     let mut file = File::open(&path)?;
     let metadata = file.metadata()?;
-    ensure!(
-        metadata.is_file()
-            && size > 0
-            && offset
-                .checked_add(size)
-                .is_some_and(|end| end <= metadata.len()),
-        "fragment extent outside segment"
-    );
+    let checked = CheckedExtent::check(
+        Location {
+            pool: root.to_str().context("non-UTF-8 extent pool")?.to_owned(),
+            segment: extent.segment_id.clone(),
+            offset: extent.segment_offset,
+            size: extent.size,
+            digest: extent.sha256.clone(),
+        },
+        extent
+            .segment_blob
+            .to_str()
+            .context("non-UTF-8 extent backing")?,
+        Backing {
+            path: path
+                .to_str()
+                .context("non-UTF-8 segment backing")?
+                .to_owned(),
+            length: metadata.len(),
+            regular: metadata.is_file(),
+        },
+    )
+    .context("invalid fragment backing, digest or byte range")?;
+    let location = checked.location();
+    let offset = location.offset;
+    let size = location.size;
+    let digest = &location.digest;
     let key = VerificationKey {
         identity: (
             metadata.dev(),
@@ -318,7 +354,7 @@ pub(super) fn extent(root: &Path, meta: &Value, verify: bool) -> Result<Extent> 
     if verify && !cached {
         file.seek(SeekFrom::Start(offset))?;
         let mut digest_actual = Sha256::new();
-        let mut remaining = size;
+        let mut remaining = checked.end() - offset;
         let mut buffer = [0; 1024 * 1024];
         while remaining > 0 {
             let count = file.read(&mut buffer[..remaining.min(1024 * 1024) as usize])?;
@@ -348,7 +384,7 @@ pub(super) fn extent(root: &Path, meta: &Value, verify: bool) -> Result<Extent> 
             "segment changed during verification"
         );
         ensure!(
-            hex(&digest_actual.finalize()) == digest,
+            hex(&digest_actual.finalize()) == *digest,
             "segment extent checksum mismatch"
         );
         VERIFICATION.with_borrow_mut(|scope| {
@@ -358,13 +394,7 @@ pub(super) fn extent(root: &Path, meta: &Value, verify: bool) -> Result<Extent> 
             }
         });
     }
-    Ok(Extent {
-        segment_id: id,
-        segment_blob: path,
-        segment_offset: offset,
-        size,
-        sha256: digest,
-    })
+    Ok(checked)
 }
 
 pub(super) use airlock_nix_core::artifact::create_tar_fragment as tar_fragment;
@@ -619,6 +649,99 @@ pub(super) fn with_verification(operation: impl FnOnce() -> Result<Value>) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fragment occupies an interior byte range; its neighboring bytes are not part of its digest.
+    fn fragment() -> Result<(tempfile::TempDir, Extent)> {
+        let temporary = tempfile::tempdir()?;
+        fs::create_dir_all(temporary.path().join("objects/segments"))?;
+        let path = blob(temporary.path(), "000001")?;
+        fs::write(&path, b"prefix:fragment:suffix")?;
+        let extent = Extent {
+            segment_id: "000001".into(),
+            segment_blob: path,
+            segment_offset: 7,
+            size: 8,
+            sha256: hex(&Sha256::digest(b"fragment")),
+        };
+        Ok((temporary, extent))
+    }
+
+    /// The native path checks exactly the requested bytes and invalidates cached hashes after changes.
+    #[test]
+    fn typed_extent_checks_the_original_range_and_cache_identity() -> Result<()> {
+        let (temporary, claimed) = fragment()?;
+        let root = temporary.path();
+        let result = with_verification(|| {
+            let checked = check_extent(root, &claimed, true)?;
+            assert_eq!(checked.location().offset, 7);
+            assert_eq!(checked.end(), 15);
+            assert_eq!(checked.backing(), claimed.segment_blob.to_str().unwrap());
+            check_extent(root, &claimed, true)?;
+            Ok(json!({}))
+        })?;
+        assert_eq!(result["verification"]["payload_bytes_hashed"], 8);
+        assert_eq!(result["verification"]["cache_hits"], 1);
+
+        with_verification(|| {
+            check_extent(root, &claimed, true)?;
+            let mut file = OpenOptions::new().write(true).open(&claimed.segment_blob)?;
+            file.seek(SeekFrom::Start(claimed.segment_offset))?;
+            file.write_all(b"changed!")?;
+            file.sync_all()?;
+            assert!(check_extent(root, &claimed, true).is_err());
+            // Metadata-only admission retains its existing explicit policy.
+            check_extent(root, &claimed, false)?;
+            Ok(json!({}))
+        })?;
+        Ok(())
+    }
+
+    /// Persisted image locations still resolve against this physical pool and select the current row.
+    #[test]
+    fn record_decode_and_native_validation_share_one_checked_range() -> Result<()> {
+        let (temporary, claimed) = fragment()?;
+        let root = temporary.path();
+        let mut record = serde_json::to_value(&claimed)?;
+        record["segment_blob"] = json!("/installed/logical/pool/000001.blob");
+        record["locations"] = json!([
+            {"status":"retired", "segment_id":"999999", "segment_offset":0, "size":8, "sha256":"0".repeat(64)},
+            {"status":"current", "segment_id":claimed.segment_id, "segment_blob":"/installed/logical/pool/000001.blob",
+                "segment_offset":claimed.segment_offset, "size":claimed.size, "sha256":claimed.sha256},
+        ]);
+        assert_eq!(extent(root, &record, true)?, claimed);
+        Ok(())
+    }
+
+    /// Invalid arithmetic and unsafe backing paths cannot proceed even with payload hashing disabled.
+    #[test]
+    fn typed_extent_rejects_invalid_ranges_and_backing_files() -> Result<()> {
+        let (temporary, claimed) = fragment()?;
+        let root = temporary.path();
+        for defect in ["zero", "past-end", "overflow", "digest", "segment", "path"] {
+            let mut invalid = claimed.clone();
+            match defect {
+                "zero" => invalid.size = 0,
+                "past-end" => invalid.segment_offset = 20,
+                "overflow" => invalid.segment_offset = u64::MAX,
+                "digest" => invalid.sha256 = "z".repeat(64),
+                "segment" => invalid.segment_id = "../000001".into(),
+                "path" => invalid.segment_blob = root.join("other.blob"),
+                _ => unreachable!(),
+            }
+            assert!(
+                check_extent(root, &invalid, false).is_err(),
+                "accepted {defect}"
+            );
+        }
+        let saved = root.join("original.blob");
+        fs::rename(&claimed.segment_blob, &saved)?;
+        std::os::unix::fs::symlink(&saved, &claimed.segment_blob)?;
+        assert!(check_extent(root, &claimed, false).is_err());
+        fs::remove_file(&claimed.segment_blob)?;
+        fs::create_dir(&claimed.segment_blob)?;
+        assert!(check_extent(root, &claimed, false).is_err());
+        Ok(())
+    }
 
     /// Image reuse preserves object metadata while still rejecting changed source trees and backing bytes.
     #[test]
