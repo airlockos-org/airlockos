@@ -107,7 +107,13 @@ pub(crate) fn constructor(
                 "src": source(pkgs, workspace, &integration),
                 "bin": "sys-clipboard",
                 "pname": "airlock-sys-clipboard",
-            });
+            })
+            .select("overrideAttrs")
+            .call(NixValue::function(|_| {
+                nix_record! {
+                    "AIRLOCK_SOURCE_REVISION": revision.clone(),
+                }
+            }));
         let image = image.bind(|image| {
             pkgs.clone().select("runCommand").call("airlock-hermit-clipboard").call(nix_record! {
                 // Build paths in DWARF and panic strings must not import a compiler into dom0.

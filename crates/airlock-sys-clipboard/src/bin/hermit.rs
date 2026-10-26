@@ -8,6 +8,10 @@ use hermit as _;
 /// Parking uses Hermit's scheduler; no polling loop or dom0 runtime broker is needed.
 #[cfg(all(target_os = "hermit", not(feature = "lab-authority")))]
 fn main() {
+    // The immutable builder supplies this identity; it is diagnostic evidence,
+    // never an authorization token or a replacement for the executable digest.
+    let source = option_env!("AIRLOCK_SOURCE_REVISION").unwrap_or("unrecorded");
+    println!("AIRLOCK_CLIPBOARD_BUILD source={source}");
     let nonce = std::env::args()
         .find_map(|argument| argument.strip_prefix("airlock.boot=").map(str::to_owned))
         .filter(|value| {

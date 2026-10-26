@@ -111,7 +111,9 @@ the external builder retains the original debug image. Source object identities 
 base64-encoded in provenance (avoiding Nix runtime references), and the final
 executable is hashed after this transformation.
 The deployment output permits only its own store reference, keeping the compiler
-and dependency sources out of dom0's runtime closure. Local Nix
+and dependency sources out of dom0's runtime closure. The executable reports its
+build source revision for correlation with the admitted artifact; that diagnostic
+does not grant authority. Local Nix
 input overrides must select the same Git commit; a dirty path override is not a
 replacement for a reviewed revision. Published use requires making the pinned
 commits available upstream, without changing the local dependency contract.
@@ -135,8 +137,9 @@ host boot and Xen domain ID; stop and failed-start events invalidate it. The
 Xen console daemon writes to `/var/log/airlock-xen-console`, whose parent chain
 is root-owned and not writable by the Qubes administration group. This is required
 because console data participates in execution evidence. Existing historical Xen
-logs remain available to boot diagnostics. The existing Qubes shutdown timeout may kill a guest that does not acknowledge Xen
-shutdown. Updates and rollback always start fresh volatile state.
+logs remain available to boot diagnostics. The existing Qubes shutdown timeout
+may kill a guest that does not acknowledge Xen shutdown. Updates and rollback
+always start fresh volatile state.
 
 The deployment completion specification requires the exact executable descriptor
 and application execution identity. ELF parsing, Nix provenance, protected-file
