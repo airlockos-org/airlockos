@@ -558,7 +558,7 @@ fn install_shared(
         );
         let before = snapshot(&target.domain)?;
         ensure!(
-            serde_json::to_value(&before)? == serde_json::to_value(inspected)?,
+            &before == inspected,
             "Qubes storage changed before installation"
         );
         ensure!(
@@ -833,7 +833,7 @@ fn ensure_builder(target: &Target) -> Result<Attachment> {
         );
         let before = snapshot(&target.domain)?;
         ensure!(
-            serde_json::to_value(&before)? == serde_json::to_value(&vm)?,
+            before == vm,
             "Qubes storage changed before builder installation"
         );
         ensure!(

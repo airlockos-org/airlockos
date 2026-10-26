@@ -51,7 +51,7 @@ pub struct ReleaseBinding {
 }
 
 /// Whole-machine or guest-only target bound to a human source review.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "family", rename_all = "snake_case")]
 pub enum ReviewTarget {
     /// Apply the enclosing operation to the whole machine, including dom0.
@@ -67,6 +67,7 @@ pub enum ReviewTarget {
 }
 
 /// Exact source and target whose effects a protected approval may authorize.
+/// Equality includes every declared field and all retained extension metadata.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(try_from = "ReviewBindingWire")]
 pub struct ReviewBinding {
@@ -81,6 +82,65 @@ pub struct ReviewBinding {
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
+
+impl ReviewBinding {
+    /// Project every declared field explicitly; added fields require updating this handoff.
+    fn comparison(
+        &self,
+    ) -> (
+        airlock_machine_planning::review_identity::Identity<'_>,
+        &BTreeMap<String, Value>,
+    ) {
+        use airlock_machine_planning::review_identity::{Identity, Target};
+        let Self {
+            revision,
+            lock_hash,
+            target,
+            extra,
+        } = self;
+        let target = match target {
+            ReviewTarget::Machine { target: () } => Target::Machine,
+            ReviewTarget::Guest { target } => Target::Guest(target.as_str()),
+        };
+        (
+            Identity {
+                revision: revision.as_str(),
+                lock: lock_hash.as_str(),
+                target,
+            },
+            extra,
+        )
+    }
+
+    /// Match the complete binding and deployed baseline before reusing a protected review.
+    /// Verus checks the source, lock, target and baseline; ordinary typed map equality
+    /// also requires every retained extension to match. No approval is granted by equality.
+    pub fn matches_context(
+        &self,
+        baseline: &BaselineFingerprint,
+        requested: &Self,
+        requested_baseline: &BaselineFingerprint,
+    ) -> bool {
+        let (saved, saved_extra) = self.comparison();
+        let (requested, requested_extra) = requested.comparison();
+        airlock_machine_planning::review_identity::same_context(
+            &saved,
+            baseline.as_str(),
+            &requested,
+            requested_baseline.as_str(),
+        ) && saved_extra == requested_extra
+    }
+}
+
+impl PartialEq for ReviewBinding {
+    fn eq(&self, other: &Self) -> bool {
+        let (left, left_extra) = self.comparison();
+        let (right, right_extra) = other.comparison();
+        airlock_machine_planning::review_identity::equal(&left, &right) && left_extra == right_extra
+    }
+}
+
+impl Eq for ReviewBinding {}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]

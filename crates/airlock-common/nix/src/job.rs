@@ -200,7 +200,7 @@ struct JobWire {
 
 // A recorded approval always carries its authorization ID and a post-approval
 // phase. Pending and stopped jobs cannot accidentally acquire that decision.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum JobState {
     Queued {
         /// Protected source-review identity, when one has been allocated.
@@ -225,10 +225,11 @@ enum JobState {
 }
 
 /// Read-only worker record whose approval decision remains visible after work ends.
+/// Equality includes request identity, validated worker state and all retained details.
 ///
 /// Deserialize saved job JSON to inspect feedback; parsing does not grant authority
 /// or resume a worker. Invalid phase/decision combinations are rejected.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "JobWire", into = "JobWire")]
 pub struct JobSnapshot {
     /// Correlation identity used to associate requests, decisions and status replies.

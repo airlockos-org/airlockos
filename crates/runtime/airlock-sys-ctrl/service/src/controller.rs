@@ -361,7 +361,7 @@ fn wait(id: &JobId) -> Result<u8> {
         {
             // Do not rewrite the interrupted worker's durable record.
             let latest = records::job(id)?;
-            if serde_json::to_value(latest)? != serde_json::to_value(&job)? {
+            if latest != job {
                 continue;
             }
             value["status"] = json!(if job.status() == JobStatus::AwaitingApproval {
@@ -771,7 +771,7 @@ fn status(id: &JobId, refresh: bool) -> Result<Value> {
         match worker_alive(id) {
             Ok(false) => {
                 let current = records::job(id)?;
-                if serde_json::to_value(current)? != serde_json::to_value(&job)? {
+                if current != job {
                     return status(id, false);
                 }
                 value["status"] = json!(if job.decision().is_some() {

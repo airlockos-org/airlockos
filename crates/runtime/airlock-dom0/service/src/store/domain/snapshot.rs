@@ -49,7 +49,69 @@ pub(super) struct Volume {
     pub(super) config: Value,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+// Snapshot freshness compares recorded spellings, not filesystem-equivalent paths.
+// Exhaustive destructuring keeps every volume field in this comparison as the record evolves.
+impl PartialEq for Volume {
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            name,
+            identity,
+            rw,
+            snap_on_start,
+            save_on_stop,
+            source,
+            generation,
+            closure_hash,
+            path,
+            blob_map_path,
+            size,
+            config,
+        } = self;
+        let Self {
+            name: other_name,
+            identity: other_identity,
+            rw: other_rw,
+            snap_on_start: other_snap,
+            save_on_stop: other_save,
+            source: other_source,
+            generation: other_generation,
+            closure_hash: other_closure,
+            path: other_path,
+            blob_map_path: other_blob,
+            size: other_size,
+            config: other_config,
+        } = other;
+
+        (name, identity, rw, snap_on_start, save_on_stop, source)
+            == (
+                other_name,
+                other_identity,
+                other_rw,
+                other_snap,
+                other_save,
+                other_source,
+            )
+            && (
+                generation,
+                closure_hash,
+                path.as_ref().map(|p| p.as_os_str()),
+                blob_map_path.as_ref().map(|p| p.as_os_str()),
+                size,
+                config,
+            ) == (
+                other_generation,
+                other_closure,
+                other_path.as_ref().map(|p| p.as_os_str()),
+                other_blob.as_ref().map(|p| p.as_os_str()),
+                other_size,
+                other_config,
+            )
+    }
+}
+
+impl Eq for Volume {}
+
+#[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
 struct Reference {
     // Other VM owning or deriving from the observed backing volume.
     domain: String,
@@ -61,7 +123,7 @@ struct Reference {
 }
 
 /// One observed Qubes state used for policy validation and compare-and-swap updates.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub(super) struct Snapshot {
     /// VM whose exact state was inspected through Qubes.
     pub(super) domain: GuestName,
@@ -260,3 +322,6 @@ pub(super) fn config_matches(actual: &Value, desired: &Value) -> bool {
         })
     })
 }
+
+#[cfg(test)]
+mod tests;

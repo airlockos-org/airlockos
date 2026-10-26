@@ -205,10 +205,11 @@ impl Coordinator {
                             path == self.review_path(&saved.request_id),
                             "review filename differs from identity"
                         );
-                        if saved.baseline_state == fingerprint
-                            && serde_json::to_value(&saved.binding)?
-                                == serde_json::to_value(&binding)?
-                        {
+                        if saved.binding.matches_context(
+                            &saved.baseline_state,
+                            &binding,
+                            &fingerprint,
+                        ) {
                             return Ok(serde_json::to_value(saved)?);
                         }
                     }

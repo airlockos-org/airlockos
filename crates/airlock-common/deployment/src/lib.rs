@@ -15,6 +15,14 @@
 //! termination measures prove membership checking for arbitrary lists, including
 //! duplicates and empty lists.
 //!
+//! Review-context reuse calls the executable `airlock_machine_planning::review_identity` matcher:
+//! revision, dependency lock, target family/guest and deployed baseline must all match exactly.
+//! The model adapter destructures every binding field and also compares all retained extensions
+//! using ordinary Rust map equality. Snapshot and controller-job freshness use typed equality;
+//! snapshot volume paths compare their literal recorded spellings, and list order is retained.
+//! Nominal-field projection, map/JSON-value equality and decoding remain tested Rust boundaries,
+//! outside this identity theorem. Serialization for persisted hashes and operation IDs is unchanged.
+//!
 //! `AuthorizedPlan::reviewed` computes its own complete effect projection; its
 //! `Identity` input has no effect list or reboot flag. The independent
 //! [`affects` relation](../../machine-planning/src/effects.rs) names every source of VM

@@ -26,3 +26,6 @@ pub mod private_storage;
 
 /// Typed topology-owned IPC policy, exact ordered encoding and publication/refresh bindings.
 pub mod ipc_policy;
+
+/// Exact review-source, target-family and baseline comparisons before protected-record reuse.
+pub mod review_identity;
