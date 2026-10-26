@@ -878,6 +878,34 @@ fn native_vm_setup_coordinates_root_private_and_shared_store() -> Result<()> {
     );
     assert!(calls.iter().any(|call| call["command"] == "qvm-volume"
         && call["args"] == json!(["resize", "usr-home:private", "8589934592"])));
+
+    // Publish the next boot identity only after root, private and shared-store work finishes.
+    let root_import = calls
+        .iter()
+        .position(|call| call["command"] == "qvm-volume" && call["args"][0] == "import")
+        .context("missing root import")?;
+    let private_resize = calls
+        .iter()
+        .position(|call| call["command"] == "qvm-volume" && call["args"][0] == "resize")
+        .context("missing private resize")?;
+    let store_install = calls
+        .iter()
+        .position(|call| {
+            call["command"] == "airlock-dom0-service" && call["args"][2] == "ensure-store"
+        })
+        .context("missing store installation")?;
+    let boot_identity = calls
+        .iter()
+        .position(|call| {
+            call["command"] == "qvm-features"
+                && call["args"][1] == "airlock-system-source"
+                && call["args"].as_array().is_some_and(|args| args.len() == 3)
+        })
+        .context("missing boot identity publication")?;
+    assert!(root_import < private_resize);
+    assert!(private_resize < store_install);
+    assert!(store_install < boot_identity);
+
     // A halted VM with unavailable capacity must not acquire resizing permission.
     setup
         .peers
