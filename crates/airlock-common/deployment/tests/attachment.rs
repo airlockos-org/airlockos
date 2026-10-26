@@ -223,3 +223,56 @@ fn builder_pair_requires_its_own_namespace_and_supported_consumer() {
         .is_none()
     );
 }
+
+/// Bind a checked plan to the exact immutable pool used for ordered dispatch.
+fn installation() -> airlock_deployment_core::attachment::CheckedInstallation {
+    use airlock_deployment_core::attachment::{CheckedInstallation, Pool};
+    CheckedInstallation::new(
+        plan(definitions(), "Halted").unwrap(),
+        Pool::new("airlock-closure".into(), "/pool".into()).unwrap(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn dispatch_preserves_target_generation_fields_and_order_until_exhaustion() {
+    let checked = installation();
+    let expected = definitions();
+    let mut dispatch = checked.dispatch();
+    for definition in expected {
+        let request = dispatch.next_request().unwrap();
+        assert_eq!(request.target(), checked.plan().target());
+        let actual = request.definition();
+        assert_eq!(actual.slot.name(), definition.slot.name());
+        assert_eq!(actual.pool, definition.pool);
+        assert_eq!(actual.domain, definition.domain);
+        assert_eq!(actual.generation, definition.generation);
+        assert_eq!(actual.closure_hash, definition.closure_hash);
+        assert_eq!(actual.manifest, definition.manifest);
+        assert_eq!(actual.path, definition.path);
+        assert_eq!(actual.size, definition.size);
+        assert!(!actual.writable && actual.persistent && !actual.snap_on_start);
+    }
+    assert!(dispatch.next_request().is_none());
+    assert!(dispatch.next_request().is_none());
+    assert!(std::ptr::eq(dispatch.finish().unwrap(), &checked));
+}
+
+#[test]
+fn dispatch_cannot_finish_early_or_bind_a_different_pool() {
+    use airlock_deployment_core::attachment::{CheckedInstallation, Pool};
+    let checked = installation();
+    assert!(checked.dispatch().finish().is_none());
+    let mut dispatch = checked.dispatch();
+    assert!(dispatch.next_request().is_some());
+    assert!(dispatch.finish().is_none());
+    assert!(
+        CheckedInstallation::new(
+            plan(definitions(), "Halted").unwrap(),
+            Pool::new("other-pool".into(), "/pool".into()).unwrap()
+        )
+        .is_none()
+    );
+    assert!(Pool::new("".into(), "/pool".into()).is_none());
+    assert!(Pool::new("airlock-closure".into(), "".into()).is_none());
+}

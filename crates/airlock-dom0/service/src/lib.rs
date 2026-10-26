@@ -531,3 +531,15 @@ pub fn storage_request(request: Value) -> Result<Value> {
 pub fn gpu_request(request: Value) -> Result<Value> {
     gpu::qubes_request(request)
 }
+
+/// Decode the isolated worker's serialized storage declarations without granting installation permission.
+#[cfg(feature = "qubes")]
+pub fn storage_objects_request(request: Value) -> Result<airlock_qubes::storage::Request> {
+    store::objects_request(request)
+}
+
+/// Supply the installed locked-observation and post-installation checks to upstream Qubes adapters.
+#[cfg(feature = "qubes")]
+pub fn storage_objects_policy() -> impl airlock_qubes::storage::Policy {
+    store::ObjectsPolicy
+}

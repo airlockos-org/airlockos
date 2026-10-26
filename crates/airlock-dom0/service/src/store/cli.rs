@@ -56,8 +56,8 @@ pub(crate) fn execute(command: Command) -> Result<()> {
         Command::BuildProgress(request) => return super::progress::execute(request),
         #[cfg(feature = "qubes")]
         Command::QubesObjects => airlock_qubes::storage::execute(
-            &crate::input_value("-")?,
-            super::qubes_inspect::execute,
+            super::objects_request(crate::input_value("-")?)?,
+            super::ObjectsPolicy,
         )?,
         Command::QubesInspect => super::qubes_inspect::run()?,
         Command::Domain(request) => super::domain_cli::run(*request)?,

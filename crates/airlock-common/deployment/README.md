@@ -30,6 +30,17 @@ Ordinary Cargo and `test-quick` never install or run the prover. Tool preparatio
 uses Rust orchestration in `airlock-dev`; the [workspace pin](../../verus.json)
 is shared by both crates and the Nix development shell.
 
+The isolated storage worker decodes incoming declarations, then revalidates them
+against a fresh Qubes observation under the database lock. Its typed policy returns
+an opaque checked installation. Verified request selection retains the exact VM,
+pool and ordered immutable definitions; completion cannot skip a selection.
+Post-installation checks consume the same plan and preserve the original writable
+root/private observations. Selection counts requests, not external success or
+exactly-once execution. The adapter stops on errors before save. Python argument
+construction, upstream execution and observation completeness remain trusted;
+the installed policy and its filesystem checks are ordinary Rust. JSON remains
+at the worker transport and observation boundaries, not the checked dispatch.
+
 Cargo tests exercise the erased executable code; compile-fail doctests enforce
 identity distinctions, evidence-versus-authority separation and request lifetimes.
 The dom0 `durable_handoff` namespace scenario also exercises the real persistence

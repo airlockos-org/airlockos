@@ -1,5 +1,7 @@
 //! Observe real Qubes file locking and persistence using a disposable offline database.
 
+use airlock_deployment_core::attachment::CheckedInstallation;
+use airlock_qubes::storage::Policy;
 use airlock_qubes::{snapshot, storage, values};
 use anyhow::{Context, Result, ensure};
 use pyo3::{prelude::*, types::PyDict};
@@ -148,18 +150,72 @@ pub(super) fn observe(py: Python<'_>) -> Result<Value> {
     volume["size"] = json!(1048576);
     let request = json!({"operation":"install", "domain":"usr-home", "expected":before,
         "pool":{"name":"airlock-closure", "driver":"airlock-closure", "root_dir":root, "revisions_to_keep":0}, "volumes":[volume]});
+    let private_rejected = airlock_dom0_service::storage_objects_request(request.clone()).is_err();
+    ensure!(
+        private_rejected,
+        "worker decoded a writable private-volume request"
+    );
+    let mut volumes = Vec::new();
+    for (index, name) in ["store", "store-data"].iter().enumerate() {
+        let generation = index + 1;
+        let mut config = json!({"name":name,"pool":"airlock-closure",
+            "vid":format!("domains/usr-home-runtime-store/generations/{generation}/{name}"),
+            "rw":false,"save_on_stop":true,"snap_on_start":false,"source":null,
+            "revisions_to_keep":0,"domain_name":"usr-home-runtime-store",
+            "generation":generation.to_string(),"closure_hash":"a".repeat(64),
+            "manifest_path":"/pool/manifest.json","size":4096});
+        if index == 0 {
+            config["view_kind"] = json!("metadata-image");
+            config["view_path"] = json!("/pool/metadata.img");
+        } else {
+            config["view_kind"] = json!("erofs-blob-map");
+            config["blob_map_path"] = json!("/pool/map.json");
+            config["blob_logical_size"] = json!(4096);
+        }
+        volumes.push(config);
+    }
+    let mut request = request;
+    request["volumes"] = json!(volumes);
     let guards = Cell::new(0);
-    let guard = |request: Value| -> Result<Value> {
-        ensure!(
-            contended(store)?,
-            "Qubes released its database lock before the native guard"
-        );
-        guards.set(guards.get() + 1);
-        airlock_dom0_service::storage_request(request)
+    /// Observe the actual upstream database lock while delegating to production policy.
+    struct LockedPolicy<'a> {
+        /// Disposable database used by the cross-process lock contender.
+        store: &'a str,
+        /// Number of authorization attempts made under the upstream lock.
+        guards: &'a Cell<usize>,
+    }
+
+    impl Policy for LockedPolicy<'_> {
+        fn authorize(
+            &self,
+            input: storage::InstallInput,
+            observed: &Value,
+        ) -> Result<CheckedInstallation> {
+            ensure!(
+                contended(self.store)?,
+                "Qubes released its database lock before the native guard"
+            );
+            self.guards.set(self.guards.get() + 1);
+            airlock_dom0_service::storage_objects_policy().authorize(input, observed)
+        }
+
+        fn verify(&self, installation: &CheckedInstallation, observed: &Value) -> Result<()> {
+            airlock_dom0_service::storage_objects_policy().verify(installation, observed)
+        }
+    }
+    let guard = LockedPolicy {
+        store,
+        guards: &guards,
     };
     let saved = fs::read(store)?;
     let app = open(py, store, false)?;
-    let rejected_private = storage::on_app(&app, &request, &guard, &runner).is_err();
+    let rejected_private = storage::on_app(
+        &app,
+        airlock_dom0_service::storage_objects_request(request.clone())?,
+        &guard,
+        &runner,
+    )
+    .is_err();
     app.call_method0("close")?;
     ensure!(
         rejected_private && saved == fs::read(store)?,
@@ -173,7 +229,13 @@ pub(super) fn observe(py: Python<'_>) -> Result<Value> {
     let mut stale = request;
     stale["expected"]["running"] = json!(true);
     let app = open(py, store, false)?;
-    let rejected = storage::on_app(&app, &stale, &guard, &runner).is_err();
+    let rejected = storage::on_app(
+        &app,
+        airlock_dom0_service::storage_objects_request(stale)?,
+        &guard,
+        &runner,
+    )
+    .is_err();
     app.call_method0("close")?;
     ensure!(
         rejected && saved == fs::read(store)?,
@@ -189,7 +251,7 @@ pub(super) fn observe(py: Python<'_>) -> Result<Value> {
         "Qubes resolved volume properties changed on reload"
     );
     Ok(
-        json!({"guards_under_lock":guards.get(), "private_unchanged":true, "private_effect_rejected":rejected_private,
+        json!({"guards_under_lock":guards.get(), "private_unchanged":true, "private_effect_rejected":private_rejected,
         "stale_rejected":rejected, "lock_released":true}),
     )
 }

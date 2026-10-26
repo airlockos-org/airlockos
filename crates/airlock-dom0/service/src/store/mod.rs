@@ -447,3 +447,11 @@ impl<'a> Store<'a> {
 pub(crate) fn qubes_request(request: serde_json::Value) -> anyhow::Result<serde_json::Value> {
     qubes_inspect::execute(request)
 }
+
+/// Decode declarations at the isolated Qubes worker's input boundary.
+#[cfg(feature = "qubes")]
+pub(crate) use domain::objects_request;
+
+/// Installed typed attachment policy, separate from the plugin callback protocol.
+#[cfg(feature = "qubes")]
+pub(crate) use domain::ObjectsPolicy;

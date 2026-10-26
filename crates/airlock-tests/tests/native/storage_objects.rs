@@ -318,11 +318,29 @@ fn storage_bridge_persists_volume_identity_across_generation_switches() -> Resul
     let running = common::run(switch()?.env("AIRLOCK_FAKE_QUBES_RUNNING", "1"), None)?;
     assert!(!running.status.success());
     assert!(String::from_utf8_lossy(&running.stdout).contains("domain is running"));
+    // A failed first or second external call cannot reach database save. Retrying
+    // starts from freshly loaded persisted state and must retain both writable disks.
+    let before_failure = saved()?;
+    for slot in ["store", "store-data"] {
+        let failed = common::run(
+            switch()?.env("AIRLOCK_FAKE_QUBES_INSTALL_FAIL_VOLUME", slot),
+            None,
+        )?;
+        assert!(!failed.status.success());
+        assert_eq!(saved()?, before_failure);
+        assert_eq!(fs::read_to_string(peers.path("systemctl.state"))?, "active");
+    }
     let switched = common::json(&mut switch()?, None)?;
     assert_eq!(switched["generation"], 1);
     assert_eq!(switched["engine_current_generation"], 1);
     assert_eq!(switched["system"], systems[0]);
     assert_eq!(switched["kernel_name"], "kernel-a");
+    for slot in ["root", "private"] {
+        assert_eq!(
+            saved()?["domains"]["usr-assistant"]["volume_config"][slot],
+            before_failure["domains"]["usr-assistant"]["volume_config"][slot]
+        );
+    }
     features(&successor, "/approved-2")?;
     let repaired = ensure(1)?;
     assert_eq!(repaired["generation"], 2);

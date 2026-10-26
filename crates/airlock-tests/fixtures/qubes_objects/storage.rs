@@ -136,6 +136,12 @@ fn storage(
         "__init__" => object.setattr("vm", argument(args, 1)?)?,
         "init_volume" => {
             let vm = object.getattr("vm")?;
+            let name: String = argument(args, 1)?.extract()?;
+            if std::env::var("AIRLOCK_FAKE_QUBES_INSTALL_FAIL_VOLUME").as_deref() == Ok(&name) {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "injected volume installation failure",
+                ));
+            }
             let config = argument(args, 2)?.cast_into::<PyDict>()?;
             let pool = vm
                 .getattr("app")?

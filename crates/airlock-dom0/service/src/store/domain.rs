@@ -421,6 +421,85 @@ fn install(target: &Target, before: &Snapshot, configs: &[Value]) -> Result<Snap
     Ok(persisted)
 }
 
+/// Decode serialized worker declarations once; this never creates installation authority.
+#[cfg(feature = "qubes")]
+pub(crate) fn objects_request(value: Value) -> Result<airlock_qubes::storage::Request> {
+    use airlock_qubes::storage::{InstallInput, Request};
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    #[serde(tag = "operation", rename_all = "kebab-case", deny_unknown_fields)]
+    enum Wire {
+        Snapshot {
+            /// Explicit inspected VM; dom0 and invalid guest names are rejected.
+            domain: GuestName,
+        },
+        Install {
+            /// Consuming VM whose identity is checked again against the locked snapshot.
+            domain: GuestName,
+            /// Closed pool declaration, decoded below into the semantic pool type.
+            pool: Value,
+            /// Closed wire definitions, decoded once before entering the adapter.
+            volumes: Vec<Value>,
+            /// Complete prior observation used only for locked comparison.
+            expected: Value,
+        },
+    }
+    Ok(match serde_json::from_value(value)? {
+        Wire::Snapshot { domain } => Request::Snapshot {
+            target: domain.to_string(),
+        },
+        Wire::Install {
+            domain,
+            pool,
+            volumes,
+            expected,
+        } => Request::Install(InstallInput {
+            target: domain.to_string(),
+            pool: attachment::pool(&pool)?,
+            definitions: volumes
+                .iter()
+                .map(attachment::WireDefinition::decode)
+                .collect::<Result<_>>()?,
+            expected,
+        }),
+    })
+}
+
+/// Installed policy supplied directly to the Qubes adapter; the plugin JSON dispatcher is separate.
+#[cfg(feature = "qubes")]
+pub(crate) struct ObjectsPolicy;
+
+#[cfg(feature = "qubes")]
+impl airlock_qubes::storage::Policy for ObjectsPolicy {
+    fn authorize(
+        &self,
+        input: airlock_qubes::storage::InstallInput,
+        observed: &Value,
+    ) -> Result<airlock_deployment_core::attachment::CheckedInstallation> {
+        ensure!(
+            *observed == input.expected,
+            "Qubes storage changed since it was inspected"
+        );
+        let before: Snapshot = serde_json::from_value(observed.clone())?;
+        attachment::checked(
+            &input.target.parse()?,
+            &before,
+            input.pool,
+            input.definitions,
+        )
+    }
+
+    fn verify(
+        &self,
+        installation: &airlock_deployment_core::attachment::CheckedInstallation,
+        observed: &Value,
+    ) -> Result<()> {
+        let after: Snapshot = serde_json::from_value(observed.clone())?;
+        attachment::check_after(installation, &after)
+    }
+}
+
 /// Repeat semantic checks while Qubes holds its database lock and return only checked fields.
 pub(super) fn authorize_install(
     domain: &GuestName,

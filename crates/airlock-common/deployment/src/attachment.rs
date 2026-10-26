@@ -317,6 +317,13 @@ impl View for AttachmentPlan {
 }
 
 impl AttachmentPlan {
+    #[verifier::type_invariant]
+    closed spec fn well_formed(&self) -> bool {
+        pair(self.target@, self.definitions@)
+            && independent(self.root) && independent(self.private)
+            && !same_backing(self.root.backing, self.private.backing)
+    }
+
     /// Require isolated writable backing, an explicitly halted standalone VM and a complete immutable pair.
     pub fn new(target: String, klass: &str, power: PowerState, running: bool,
         writable: WritablePair, references: &[Backing], definitions: Vec<Definition>) -> (out: Option<Self>)
@@ -352,6 +359,187 @@ impl AttachmentPlan {
         backing_equal(&self.root.backing, &root.backing) && backing_equal(&self.private.backing, &private.backing)
             && self.root.record == root.record && self.private.record == private.record
             && is_independent(root) && is_independent(private)
+    }
+}
+
+/// Exact immutable Qubes pool selected before installation; driver options are fixed.
+pub struct Pool {
+    // Upstream pool name shared by every checked volume.
+    name: String,
+    // Filesystem root validated by the adapter, never supplied again at dispatch.
+    root: String,
+}
+
+impl View for Pool {
+    type V = (Seq<char>, Seq<char>);
+
+    closed spec fn view(&self) -> Self::V { (self.name@, self.root@) }
+}
+
+impl Pool {
+    #[verifier::type_invariant]
+    closed spec fn well_formed(&self) -> bool { self.name@.len() > 0 && self.root@.len() > 0 }
+
+    /// Refuse missing pool identities; filesystem validation remains the adapter's duty.
+    pub fn new(name: String, root: String) -> (out: Option<Self>)
+        ensures out.is_some() == (name@.len() > 0 && root@.len() > 0),
+            out.is_some() ==> out.unwrap()@ == (name@, root@),
+    {
+        if name.is_empty() || root.is_empty() { None } else { Some(Self { name, root }) }
+    }
+
+    /// Exact checked upstream pool name.
+    pub fn name(&self) -> (out: &str)
+        ensures out@ == self@.0,
+    { self.name.as_str() }
+
+    /// Exact checked root passed to the external pool constructor.
+    pub fn root(&self) -> (out: &str)
+        ensures out@ == self@.1,
+    { self.root.as_str() }
+}
+
+/// Checked attachment and its sole permitted upstream pool.
+/// This token has no deserializer; received wire data must pass the checks again.
+///
+/// ```compile_fail
+/// use airlock_deployment_core::attachment::CheckedInstallation;
+/// let forged = CheckedInstallation { plan: todo!(), pool: todo!() };
+/// ```
+pub struct CheckedInstallation {
+    // Original opaque request retaining target, ordered definitions and writable identities.
+    plan: AttachmentPlan,
+    // Pool identity bound to every definition in that request.
+    pool: Pool,
+}
+
+impl View for CheckedInstallation {
+    type V = (AttachmentPlan, Pool);
+
+    closed spec fn view(&self) -> Self::V { (self.plan, self.pool) }
+}
+
+impl CheckedInstallation {
+    #[verifier::type_invariant]
+    closed spec fn well_formed(&self) -> bool {
+        pair(self.plan@.0, self.plan@.3)
+            && forall|i: int| 0 <= i < self.plan@.3.len() ==>
+                #[trigger] self.plan@.3[i].pool@ == self.pool@.0
+    }
+
+    /// Bind a complete checked attachment to one pool, rejecting mixed pool identities.
+    pub fn new(plan: AttachmentPlan, pool: Pool) -> (out: Option<Self>)
+        ensures out.is_some() ==> out.unwrap()@ == (plan, pool),
+            out.is_some() ==> forall|i: int| 0 <= i < plan@.3.len() ==>
+                #[trigger] plan@.3[i].pool@ == pool@.0,
+    {
+        proof { use_type_invariant(&plan); }
+        let definitions = plan.definitions();
+        let mut i = 0;
+        while i < definitions.len()
+            invariant 0 <= i <= definitions.len(), definitions@ == plan@.3,
+                pair(plan@.0, plan@.3),
+                forall|j: int| 0 <= j < i ==> #[trigger] definitions@[j].pool@ == pool@.0,
+            decreases definitions.len() - i,
+        {
+            if definitions[i].pool.as_str() != pool.name() { return None; }
+            i += 1;
+        }
+        Some(Self { plan, pool })
+    }
+
+    /// Borrow the original checked attachment for post-installation preservation checks.
+    pub fn plan(&self) -> (out: &AttachmentPlan)
+        ensures *out == self@.0,
+    { &self.plan }
+
+    /// Borrow the only pool the adapter may create.
+    pub fn pool(&self) -> (out: &Pool)
+        ensures *out == self@.1,
+    { &self.pool }
+
+    /// Start ordered dispatch at the first checked volume.
+    pub fn dispatch(&self) -> (out: Dispatch<'_>)
+        ensures out@ == (self@, 0),
+    { Dispatch { installation: self, next: 0 } }
+}
+
+/// A single immutable operation, borrowing its identity and definition from the checked installation.
+pub struct VolumeRequest<'a> {
+    // The original installation remains borrowed throughout external execution.
+    installation: &'a CheckedInstallation,
+    // Exact ordered volume selected from the checked plan.
+    definition: &'a Definition,
+}
+
+impl<'a> View for VolumeRequest<'a> {
+    type V = ((AttachmentPlan, Pool), Definition);
+
+    closed spec fn view(&self) -> Self::V { (self.installation@, *self.definition) }
+}
+
+impl<'a> VolumeRequest<'a> {
+    #[verifier::type_invariant]
+    closed spec fn well_formed(&self) -> bool {
+        !self.definition.writable && self.definition.persistent && !self.definition.snap_on_start
+    }
+
+    /// Exact consuming VM, never an independently supplied adapter argument.
+    pub fn target(&self) -> (out: &str)
+        ensures out@ == self@.0.0@.0,
+    { self.installation.plan.target() }
+
+    /// Exact immutable volume definition, including its slot and generation.
+    pub fn definition(&self) -> (out: &Definition)
+        ensures *out == self@.1 && !out.writable && out.persistent && !out.snap_on_start,
+    {
+        proof { use_type_invariant(self); }
+        self.definition
+    }
+}
+
+/// Ordered request selection; completion requires selecting every checked definition once.
+/// External success is established by the adapter, which stops immediately on errors.
+pub struct Dispatch<'a> {
+    // Original installation, held by reference so no new target or definitions can be substituted.
+    installation: &'a CheckedInstallation,
+    // Number of operations selected in their original order.
+    next: usize,
+}
+
+impl<'a> View for Dispatch<'a> {
+    type V = ((AttachmentPlan, Pool), int);
+
+    closed spec fn view(&self) -> Self::V { (self.installation@, self.next as int) }
+}
+
+impl<'a> Dispatch<'a> {
+    /// Select exactly the next checked volume; exhaustion never produces another operation.
+    pub fn next_request(&mut self) -> (out: Option<VolumeRequest<'a>>)
+        ensures final(self)@.0 == old(self)@.0,
+            out.is_some() == (old(self)@.1 < old(self)@.0.0@.3.len()),
+            out.is_some() ==> final(self)@.1 == old(self)@.1 + 1
+                && out.unwrap()@ == (old(self)@.0, old(self)@.0.0@.3[old(self)@.1]),
+            out.is_none() ==> final(self)@.1 == old(self)@.1,
+    {
+        proof { use_type_invariant(self.installation); }
+        let definitions = self.installation.plan.definitions();
+        if self.next >= definitions.len() { return None; }
+        // Instantiate the pair's immutable-volume guarantee at the selected position.
+        assert(definitions@[self.next as int].size > 0);
+        let definition = &definitions[self.next];
+        self.next += 1;
+        Some(VolumeRequest { installation: self.installation, definition })
+    }
+
+    /// Return the same installation only after all of its volume requests have been selected.
+    pub fn finish(self) -> (out: Option<&'a CheckedInstallation>)
+        ensures out.is_some() == (self@.1 == self@.0.0@.3.len()),
+            out.is_some() ==> out.unwrap()@ == self@.0,
+    {
+        if self.next == self.installation.plan.definitions().len() {
+            Some(self.installation)
+        } else { None }
     }
 }
 

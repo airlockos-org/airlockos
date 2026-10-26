@@ -161,6 +161,19 @@ fn qubes_installation_guard_uses_native_fresh_state() -> Result<()> {
     let checked = airlock_dom0_service::storage_request(request.clone())?;
     assert_eq!(checked["volumes"], request["volumes"]);
     assert_eq!(checked["domain"], request["domain"]);
+    let policy = airlock_dom0_service::storage_objects_policy();
+    use airlock_qubes::storage::{Policy, Request};
+    let mut worker = request.clone();
+    worker["operation"] = json!("install");
+    worker.as_object_mut().unwrap().remove("snapshot");
+    let Request::Install(input) = airlock_dom0_service::storage_objects_request(worker.clone())?
+    else {
+        anyhow::bail!("installation decoded as a read-only request");
+    };
+    let installation = policy.authorize(input, &snapshot)?;
+    assert_eq!(installation.plan().target(), "usr-home");
+    assert_eq!(installation.pool().name(), "airlock-closure");
+    assert_eq!(installation.pool().root(), "/pool");
     for damage in [
         "private",
         "unknown",
@@ -216,9 +229,21 @@ fn qubes_installation_guard_uses_native_fresh_state() -> Result<()> {
         "volumes":volumes, "before":snapshot, "after":after,
     });
     airlock_dom0_service::storage_request(verification.clone())?;
+    policy.verify(&installation, &after)?;
     let mut replaced = verification;
     replaced["after"]["volumes"][1]["vid"] = json!("replacement-private");
+    assert!(policy.verify(&installation, &replaced["after"]).is_err());
     assert!(airlock_dom0_service::storage_request(replaced).is_err());
+
+    let mut stale = snapshot.clone();
+    stale["features"]["external-change"] = json!("1");
+    let Request::Install(input) = airlock_dom0_service::storage_objects_request(worker.clone())?
+    else {
+        unreachable!();
+    };
+    assert!(policy.authorize(input, &stale).is_err());
+    worker["unclassified-effect"] = json!(true);
+    assert!(airlock_dom0_service::storage_objects_request(worker).is_err());
 
     Ok(())
 }

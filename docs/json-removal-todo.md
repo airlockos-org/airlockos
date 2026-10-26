@@ -5,7 +5,7 @@ Each item replaces avoidable JSON glue with direct Rust values. This list exclud
 the separate proposals to strengthen legitimate JSON protocols and records.
 Existing transport, persistence, diagnostic and upstream formats stay in place.
 
-1. [ ] **Carry checked storage installations directly into Qubes dispatch.**
+1. [x] **Carry checked storage installations directly into Qubes dispatch.**
    Replace the in-process `Fn(Value) -> Result<Value>` validation callback with
    typed requests and a checked installation result. Dispatch must consume the
    checked VM, pool and ordered volume definitions without extracting them from

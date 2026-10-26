@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [features]
 default = ["qubes"]
-qubes = ["dep:airlock-dom0-service", "dep:airlock-qubes", "dep:pyo3"]
+qubes = ["dep:airlock-dom0-service", "airlock-dom0-service/qubes", "dep:airlock-qubes", "dep:pyo3"]
 
 [[bin]]
 name = "airlock-qubes-probe"
@@ -35,6 +35,7 @@ sha2 = "0.10"
 tar = "0.4"
 tempfile = "3.0"
 airlock-vm-service = { path = "../airlock-vm/service" }
+airlock-deployment-core = { path = "../airlock-common/deployment" }
 
 [dev-dependencies]
 airlock-machine-core = { path = "../airlock-common/machine" }

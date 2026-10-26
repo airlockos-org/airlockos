@@ -4,7 +4,8 @@
 
 use super::{Snapshot, Target, generations, snapshot::Volume};
 use airlock_deployment_core::attachment::{
-    self, AttachmentPlan, Definition, Generation, Slot, StorePair, WritablePair,
+    self, AttachmentPlan, CheckedInstallation, Definition, Generation, Pool, Slot, StorePair,
+    WritablePair,
 };
 use airlock_nix_core::identity::{GuestName, StoreNamespace};
 use anyhow::{Context, Result, ensure};
@@ -124,7 +125,7 @@ fn encode(definition: &Definition) -> Value {
 /// The accepted wire vocabulary is closed: extra storage effects cannot be silently discarded.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct WireDefinition {
+pub(super) struct WireDefinition {
     // Immutable slot decoded through the core's exhaustive selector.
     name: String,
     // Requested Qubes storage pool.
@@ -162,7 +163,7 @@ struct WireDefinition {
 }
 
 impl WireDefinition {
-    fn decode(value: &Value) -> Result<Definition> {
+    pub(super) fn decode(value: &Value) -> Result<Definition> {
         let wire: Self = serde_json::from_value(value.clone())?;
         let generation: NonZeroU64 = wire.generation.parse()?;
         ensure!(
@@ -218,14 +219,30 @@ impl WireDefinition {
     }
 }
 
-/// Checked request consumed by both the coordinator and the locked Qubes adapter.
+/// Decode a closed pool declaration at the worker boundary.
+pub(super) fn pool(value: &Value) -> Result<Pool> {
+    let name = value["name"].as_str().context("missing attachment pool")?;
+    let root = value["root_dir"]
+        .as_str()
+        .context("missing attachment pool root")?;
+    super::super::qubes_inspect::absolute(Path::new(root))?;
+    ensure!(
+        value["driver"] == "airlock-closure" && value["revisions_to_keep"] == 0,
+        "unsupported attachment pool"
+    );
+    ensure!(
+        value.as_object().is_some_and(|fields| fields.len() == 4),
+        "unsupported attachment pool fields"
+    );
+    Pool::new(name.into(), root.into()).context("missing attachment pool identity")
+}
+
+/// Checked request retained across the isolated worker's serialized transport.
 pub(super) struct Installation<'a> {
-    // Opaque semantic request; the adapter never dispatches the caller's original definitions.
-    plan: AttachmentPlan,
+    // Semantic request consumed directly by typed dispatch inside the worker.
+    checked: CheckedInstallation,
     // Exact observed state retained for Qubes' locked compare-and-swap.
     before: &'a Snapshot,
-    // Existing pool identity already checked against the observed Qubes pool.
-    pool: Value,
 }
 
 impl<'a> Installation<'a> {
@@ -235,96 +252,89 @@ impl<'a> Installation<'a> {
         pool: &Value,
         configs: &[Value],
     ) -> Result<Self> {
-        before.validate(domain)?;
-        let name = pool["name"].as_str().context("missing attachment pool")?;
-        let root = pool["root_dir"]
-            .as_str()
-            .context("missing attachment pool root")?;
-        super::super::qubes_inspect::absolute(Path::new(root))?;
-        ensure!(
-            pool["driver"] == "airlock-closure" && pool["revisions_to_keep"] == 0,
-            "unsupported attachment pool"
-        );
-        ensure!(
-            pool.as_object().is_some_and(|fields| fields.len() == 4),
-            "unsupported attachment pool fields"
-        );
-        if let Some(existing) = before.pools.get(name) {
-            ensure!(
-                existing["driver"] == "airlock-closure" && existing["root_dir"] == root,
-                "existing Qubes pool differs from the requested driver or root"
-            );
-        }
-
         let definitions = configs
             .iter()
             .map(WireDefinition::decode)
             .collect::<Result<Vec<_>>>()?;
-        let (root, private, references) = before.writable()?;
-        for definition in &definitions {
-            ensure!(
-                definition.pool == name,
-                "attachment volume names another pool"
-            );
-            let id = vid(definition);
-            for writable in [&root, &private] {
-                ensure!(
-                    definition.pool != writable.backing.pool || id != writable.backing.vid,
-                    "immutable volume aliases writable backing"
-                );
-            }
-        }
-        let plan = AttachmentPlan::new(
-            domain.to_string(),
-            &before.klass,
-            before.power(),
-            before.running,
-            WritablePair { root, private },
-            &references,
-            definitions,
-        ).context("attachment requires an isolated, halted standalone VM and one immutable generation pair")?;
-        let expected = frontends(plan.definitions());
-        before.frontends(configs, &expected)?;
         Ok(Self {
-            plan,
+            checked: checked(domain, before, self::pool(pool)?, definitions)?,
             before,
-            pool: pool.clone(),
         })
     }
 
     pub(super) fn wire(&self) -> Value {
-        json!({
-            "operation": "install", "domain": self.plan.target(), "expected": self.before,
-            "pool": self.pool, "volumes": self.plan.definitions().iter().map(encode).collect::<Vec<_>>(),
-        })
+        let pool = self.checked.pool();
+        json!({"operation": "install", "domain": self.checked.plan().target(), "expected": self.before,
+            "pool": {"name":pool.name(), "root_dir":pool.root(), "driver":"airlock-closure", "revisions_to_keep":0},
+            "volumes": self.checked.plan().definitions().iter().map(encode).collect::<Vec<_>>()})
     }
 
     pub(super) fn check_after(&self, after: &Snapshot) -> Result<()> {
-        after.validate(&self.before.domain)?;
-        let (root, private, references) = after.writable()?;
-        ensure!(
-            !after.running && after.power().is_halted(),
-            "VM is not halted after storage installation"
-        );
-        ensure!(
-            self.plan.preserves(&root, &private)
-                && attachment::isolation(&root, &private, &references),
-            "storage installation changed or shared writable root/private state"
-        );
-        let configs = self
-            .plan
-            .definitions()
-            .iter()
-            .map(encode)
-            .collect::<Vec<_>>();
-        ensure!(
-            after.matches(&configs),
-            "installed Qubes volumes differ from requested configuration"
-        );
-        let expected = frontends(self.plan.definitions());
-        after.frontends(&[], &expected)?;
-        Ok(())
+        check_after(&self.checked, after)
     }
+}
+
+/// Validate typed declarations against the fresh locked observation, producing no JSON authority.
+pub(super) fn checked(
+    domain: &GuestName,
+    before: &Snapshot,
+    pool: Pool,
+    definitions: Vec<Definition>,
+) -> Result<CheckedInstallation> {
+    before.validate(domain)?;
+    super::super::qubes_inspect::absolute(Path::new(pool.root()))?;
+    if let Some(existing) = before.pools.get(pool.name()) {
+        ensure!(
+            existing["driver"] == "airlock-closure" && existing["root_dir"] == pool.root(),
+            "existing Qubes pool differs from the requested driver or root"
+        );
+    }
+    let (root, private, references) = before.writable()?;
+    for definition in &definitions {
+        let id = vid(definition);
+        for writable in [&root, &private] {
+            ensure!(
+                definition.pool != writable.backing.pool || id != writable.backing.vid,
+                "immutable volume aliases writable backing"
+            );
+        }
+    }
+    let plan = AttachmentPlan::new(
+        domain.to_string(),
+        &before.klass,
+        before.power(),
+        before.running,
+        WritablePair { root, private },
+        &references,
+        definitions,
+    )
+    .context(
+        "attachment requires an isolated, halted standalone VM and one immutable generation pair",
+    )?;
+    let configs = plan.definitions().iter().map(encode).collect::<Vec<_>>();
+    before.frontends(&configs, &frontends(plan.definitions()))?;
+    CheckedInstallation::new(plan, pool).context("attachment volume names another pool")
+}
+
+/// Check post-installation evidence using the same opaque plan selected before dispatch.
+pub(super) fn check_after(checked: &CheckedInstallation, after: &Snapshot) -> Result<()> {
+    let plan = checked.plan();
+    after.validate(&plan.target().parse()?)?;
+    let (root, private, references) = after.writable()?;
+    ensure!(
+        !after.running && after.power().is_halted(),
+        "VM is not halted after storage installation"
+    );
+    ensure!(
+        plan.preserves(&root, &private) && attachment::isolation(&root, &private, &references),
+        "storage installation changed or shared writable root/private state"
+    );
+    let configs = plan.definitions().iter().map(encode).collect::<Vec<_>>();
+    ensure!(
+        after.matches(&configs),
+        "installed Qubes volumes differ from requested configuration"
+    );
+    after.frontends(&[], &frontends(plan.definitions()))
 }
 
 /// Fixed Xen slots for immutable views; writable disks keep their upstream assignments.
