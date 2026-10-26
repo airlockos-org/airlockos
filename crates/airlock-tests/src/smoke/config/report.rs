@@ -355,7 +355,7 @@ pub(super) fn diagnostics(session: &mut Session, scenario: &Scenario) -> Result<
                 observations.push_str(&format!("== {guest} {program} ==\n{text}\n"));
             }
         }
-        if let Ok(console) = fs::read_to_string(format!("/var/log/xen/console/guest-{guest}.log")) {
+        if let Ok(console) = fs::read_to_string(format!("/var/log/airlock-xen-console/guest-{guest}.log")) {
             let lines = console
                 .lines()
                 .rev()

@@ -185,7 +185,10 @@ pub(crate) fn configure(
                     name = vm.name
                 ),
                 Reader::File {
-                    path: format!("/var/log/xen/console/guest-{name}.log", name = vm.name),
+                    path: format!(
+                        "/var/log/airlock-xen-console/guest-{name}.log",
+                        name = vm.name
+                    ),
                     tail: true,
                     owner: 0,
                 },

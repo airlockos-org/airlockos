@@ -33,6 +33,7 @@ impl Supervisor {
         let mut copied = Vec::new();
         let mut errors = String::new();
         for (directory, airlock) in [
+            ("var/log/airlock-xen-console", false),
             ("var/log/xen/console", false),
             ("var/log/xen", false),
             ("var/log/qubes", false),

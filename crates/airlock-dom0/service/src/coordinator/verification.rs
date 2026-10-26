@@ -170,7 +170,16 @@ impl Coordinator {
                                 .runner
                                 .text("qvm-prefs", &[name.as_str(), "xid"])?
                                 .parse()?;
-                            crate::hermit::ready(name.as_str(), artifact, xid)
+                            crate::hermit::ready(name.as_str(), artifact, xid)?;
+                            let after: u32 = self
+                                .runner
+                                .text("qvm-prefs", &[name.as_str(), "xid"])?
+                                .parse()?;
+                            ensure!(
+                                xid == after,
+                                "Hermit domain changed during readiness observation"
+                            );
+                            Ok(())
                         })();
                         match readiness {
                             Ok(()) => return Ok(expected.clone()),

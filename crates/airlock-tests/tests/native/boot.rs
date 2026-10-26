@@ -153,7 +153,7 @@ fn namespace_boot_guest_progress_is_read_only_and_retains_completed_guests() -> 
 #[ignore = "requires explicitly prepared bubblewrap and unprivileged user namespaces"]
 fn namespace_boot_interruption_recovers_evidence_before_another_attempt() -> Result<()> {
     let boot = Boot::new("first-boot")?;
-    let console = boot.peers.path("root/var/log/xen/console");
+    let console = boot.peers.path("root/var/log/airlock-xen-console");
     fs::create_dir_all(&console)?;
     fs::write(console.join("guest-sys-gui.log"), "last VM output\n")?;
     boot.run(&["prepare"])?;
@@ -178,7 +178,7 @@ fn namespace_boot_interruption_recovers_evidence_before_another_attempt() -> Res
         .context("recovered snapshot")?
         .path();
     assert_eq!(
-        fs::read(recovered.join("var/log/xen/console/guest-sys-gui.log"))?,
+        fs::read(recovered.join("var/log/airlock-xen-console/guest-sys-gui.log"))?,
         b"last VM output\n"
     );
     assert!(fs::read_to_string(recovered.join("journal.txt"))?.contains("--boot first-boot"));

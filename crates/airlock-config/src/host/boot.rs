@@ -35,19 +35,27 @@ pub(super) fn module(source: &NixPath, workspace: &Workspace) -> NixValue {
             },
         };
 
-        ModuleBody::new(
-            context
-                .lib
-                .clone()
-                .select("mkIf")
-                .call(
-                    context
-                        .config
-                        .clone()
-                        .select("airlock.bootSupervisor.enable"),
-                )
+        // Readiness consumes console evidence. Qubes deliberately permits its admin
+        // group to write /var/log/xen, so keep Xen's logs under a protected parent.
+        let console = nix_record! {
+            "systemd": nix_record! {
+                "services": nix_record! {
+                    "xenconsoled": nix_record! {
+                        "environment": nix_record! { "XENCONSOLED_LOG_DIR": "/var/log/airlock-xen-console" },
+                        "serviceConfig": nix_record! {
+                            "LogsDirectory": "airlock-xen-console",
+                            "LogsDirectoryMode": "0755",
+                        },
+                    },
+                },
+            },
+        };
+        ModuleBody::new(context.lib.clone().select("mkMerge").call(NixValue::list([
+            console,
+            context.lib.clone().select("mkIf")
+                .call(context.config.clone().select("airlock.bootSupervisor.enable"))
                 .call(config),
-        )
+        ])))
         .key("airlock.host.boot-supervisor")
         .import_value(declaration)
     })

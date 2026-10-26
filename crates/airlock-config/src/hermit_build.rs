@@ -109,10 +109,18 @@ pub(crate) fn constructor(
                 "pname": "airlock-sys-clipboard",
             });
         let image = image.bind(|image| {
-            pkgs.clone().select("runCommand").call("airlock-hermit-clipboard").call(nix_record! {}).call(nix_text!(r#"
+            pkgs.clone().select("runCommand").call("airlock-hermit-clipboard").call(nix_record! {
+                // Build paths in DWARF and panic strings must not import a compiler into dom0.
+                "allowedReferences": NixValue::list(["out".into()]),
+            }).call(nix_text!(r#"
                 mkdir -p "$out"
                 cp {image}/kernel.elf "$out/kernel.elf"
-                cp {image}/provenance.json {image}/application.json {image}/Cargo.lock "$out/"
+                chmod u+w "$out/kernel.elf"
+                {binutils}/bin/strip --strip-debug "$out/kernel.elf"
+                {nuke_references}/bin/nuke-refs "$out/kernel.elf"
+                {jq}/bin/jq '.sources_base64 = (.sources | @base64) | del(.sources)' {image}/provenance.json > "$out/provenance.json"
+                {jq}/bin/jq '.source_base64 = (.source | @base64) | del(.source)' {image}/application.json > "$out/application.json"
+                cp {image}/Cargo.lock "$out/"
                 digest=$(sha256sum "$out/kernel.elf" | cut -d' ' -f1)
                 bytes=$(stat -c %s "$out/kernel.elf")
                 {jq}/bin/jq -n --arg executable "$out/kernel.elf" --arg digest "$digest" --argjson bytes "$bytes" \
@@ -120,6 +128,8 @@ pub(crate) fn constructor(
                   '{{schema:"airlock.hermit-pvh.v1",executable:$executable,sha256:$digest,bytes:$bytes,
                     source_revision:$revision,integration_revision:$integration,build_lock:$lock,authority:"disconnected"}}' > "$out/artifact.json"
             "#, image = image, jq = pkgs.clone().select("jq"),
+                binutils = pkgs.clone().select("binutils"),
+                nuke_references = pkgs.clone().select("nukeReferences"),
                 revision = pkgs.clone().select("lib.escapeShellArg").call(revision.clone()),
                 integration_revision = INTEGRATION_REVISION,
                 lock = NixValue::builtin("hashFile").call("sha256").call(nix_text!("{integration}/flake.lock", integration = integration.clone()))))

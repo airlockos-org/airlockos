@@ -59,7 +59,7 @@ fn record(name: &airlock_nix_core::identity::GuestName) -> std::path::PathBuf {
 
 /// Existing Xen console log; this observer never writes guest console data.
 fn console(name: &airlock_nix_core::identity::GuestName) -> std::path::PathBuf {
-    Path::new("/var/log/xen/console").join(format!("guest-{name}.log"))
+    Path::new("/var/log/airlock-xen-console").join(format!("guest-{name}.log"))
 }
 
 /// Capture a console boundary before Xen starts an already authenticated executable.
@@ -147,11 +147,31 @@ pub fn ready(name: &str, artifact: &Descriptor, xid: u32) -> Result<()> {
     let mut output = String::new();
     file.take(256 * 1024).read_to_string(&mut output)?;
     ensure!(
-        output.lines().any(|line| line.trim_end()
+        output.lines().any(|line| console_line(line).trim_end()
             == format!("AIRLOCK_CLIPBOARD_EXECUTING authority=disconnected readiness=isolated boot={nonce}", nonce = execution.nonce)),
         "Hermit application has not reported isolated readiness"
     );
     Ok(())
+}
+
+/// Remove Xen's optional console timestamp, without accepting arbitrary log prefixes.
+/// The timestamp is formatting only; boot identity comes from the protected nonce.
+fn console_line(line: &str) -> &str {
+    let prefix = b"[0000-00-00 00:00:00] ";
+    let timestamp = line.as_bytes().get(..prefix.len()).is_some_and(|bytes| {
+        bytes.iter().zip(prefix).all(|(byte, expected)| {
+            if *expected == b'0' {
+                byte.is_ascii_digit()
+            } else {
+                byte == expected
+            }
+        })
+    });
+    if timestamp {
+        &line[prefix.len()..]
+    } else {
+        line
+    }
 }
 
 /// Bind the upstream XML to the authenticated executable and a fresh execution challenge.
@@ -330,6 +350,24 @@ pub fn boot_xml(xml: &str, artifact: &Descriptor, memory: u64, nonce: &str) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Real Xen console decoration must preserve exact challenge matching.
+    #[test]
+    fn xen_timestamps_do_not_hide_application_execution() {
+        let marker = "AIRLOCK_CLIPBOARD_EXECUTING authority=disconnected readiness=isolated boot=01234567-89ab-cdef-0123-456789abcdef";
+        assert_eq!(console_line(marker), marker);
+        assert_eq!(
+            console_line(&format!("[2026-10-26 19:03:59] {marker}")),
+            marker
+        );
+        for prefix in ["kernel arguments: ", "[guest] ", "[2026-10-26x19:03:59] "] {
+            assert_ne!(console_line(&format!("{prefix}{marker}")), marker);
+        }
+        assert_ne!(
+            console_line(&format!("[2026-10-26 19:03:59] {marker} stale")),
+            marker
+        );
+    }
 
     /// A structurally valid identity; XML checks do not open this test artifact.
     fn artifact() -> Descriptor {

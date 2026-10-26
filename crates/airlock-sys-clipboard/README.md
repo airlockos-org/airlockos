@@ -105,7 +105,13 @@ fetch this local-only commit; use the local workflow above.
 `Vm::hermit` selects an independent guest backend with fixed memory, one vCPU,
 no disks, network, GUI agent or qrexec. The production build constructor uses the
 external pinned Hermit builder, emits a bounded ELF descriptor with its SHA-256,
-application and integration revisions, and dependency-lock digest. Local Nix
+application and integration revisions, and dependency-lock digest. Deployment
+packaging strips DWARF and non-runtime store references from the ELF;
+the external builder retains the original debug image. Source object identities remain
+base64-encoded in provenance (avoiding Nix runtime references), and the final
+executable is hashed after this transformation.
+The deployment output permits only its own store reference, keeping the compiler
+and dependency sources out of dom0's runtime closure. Local Nix
 input overrides must select the same Git commit; a dirty path override is not a
 replacement for a reviewed revision. Published use requires making the pinned
 commits available upstream, without changing the local dependency contract.
@@ -126,7 +132,10 @@ challenge and console boundary before starting the executable, then requires its
 current-boot response. This reports **isolated execution**, not clipboard traffic
 readiness. The protected observation associates the VM, generation, executable,
 host boot and Xen domain ID; stop and failed-start events invalidate it. The
-existing Qubes shutdown timeout may kill a guest that does not acknowledge Xen
+Xen console daemon writes to `/var/log/airlock-xen-console`, whose parent chain
+is root-owned and not writable by the Qubes administration group. This is required
+because console data participates in execution evidence. Existing historical Xen
+logs remain available to boot diagnostics. The existing Qubes shutdown timeout may kill a guest that does not acknowledge Xen
 shutdown. Updates and rollback always start fresh volatile state.
 
 The deployment completion specification requires the exact executable descriptor
