@@ -12,6 +12,9 @@
 /// Verified guest/runtime namespace derivation shared with admission matching.
 pub use airlock_machine_planning::names::runtime_namespace;
 
+/// Prepared-generation identity checks before an immutable view can be selected.
+pub mod prepared;
+
 use crate::inventory::PowerState;
 use vstd::prelude::*;
 

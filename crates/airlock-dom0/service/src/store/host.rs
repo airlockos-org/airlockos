@@ -2,7 +2,7 @@
 //! Publication retains the view before a boot entry can refer to it; selection never reboots.
 
 use super::{
-    boot_artifacts, builder, database,
+    HostReceipt, boot_artifacts, builder, database,
     fs::*,
     generations::{self, Admission},
     records, views,
@@ -34,21 +34,17 @@ pub(super) fn validate(
     logical: &Path,
     system: &str,
     allow_retired: bool,
-) -> Result<Value> {
+) -> Result<HostReceipt> {
     let path = root
         .join("host/boots")
         .join(format!("{}.json", entry(system)?));
     pool_path(root, &path)?;
-    let value: Value = read(&path)?;
-    let _: super::HostReceipt = serde_json::from_value(value.clone())?;
+    let receipt: HostReceipt = read(&path)?;
     ensure!(
-        value["schema"] == "airlock.host-store.v1"
-            && value["system"] == system
-            && (allow_retired || value["retired"] != true),
+        receipt.system.as_str() == system && (allow_retired || receipt.retired != Some(true)),
         "host boot record identity mismatch or retired"
     );
-    let physical = |path: &str| -> Result<PathBuf> {
-        let path = Path::new(path);
+    let physical = |path: &Path| -> Result<PathBuf> {
         ensure!(
             !path
                 .components()
@@ -58,14 +54,22 @@ pub(super) fn validate(
         Ok(root.join(path.strip_prefix(logical)?))
     };
 
-    let manifest: Value = read(&physical(&text(&value, "manifest")?)?)?;
+    let manifest: Value = read(&physical(&receipt.manifest)?)?;
     ensure!(
         records::committed(root, &manifest)?
             && manifest["domain"] == "dom0"
-            && manifest["generation"] == value["generation"]
-            && manifest["store"]["closure_hash"] == value["closure_hash"]
-            && manifest["store"]["canonical_metadata_image"] == value["metadata_image"]
-            && manifest["store"]["canonical_blob_map"] == value["blob_map"],
+            && manifest["generation"] == receipt.generation.get()
+            && manifest["store"]["closure_hash"] == receipt.closure_hash.as_str()
+            && manifest["store"]["canonical_metadata_image"]
+                == receipt
+                    .metadata_image
+                    .to_str()
+                    .context("non-UTF-8 host metadata path")?
+            && manifest["store"]["canonical_blob_map"]
+                == receipt
+                    .blob_map
+                    .to_str()
+                    .context("non-UTF-8 host map path")?,
         "host generation differs from boot record"
     );
 
@@ -74,44 +78,57 @@ pub(super) fn validate(
         paths.contains(system),
         "host system absent from admitted view"
     );
-    for key in ["registration", "metadata_image", "blob_map"] {
-        let path = physical(&text(&value, key)?)?;
+    for (key, path, expected) in [
+        (
+            "registration",
+            &receipt.registration,
+            &receipt.registration_sha256,
+        ),
+        (
+            "metadata_image",
+            &receipt.metadata_image,
+            &receipt.metadata_image_sha256,
+        ),
+        ("blob_map", &receipt.blob_map, &receipt.blob_map_sha256),
+    ] {
+        let path = physical(path)?;
         pool_path(root, &path)?;
         ensure!(
-            hash(&path)? == text(&value, &format!("{key}_sha256"))?,
+            hash(&path)? == expected.as_str(),
             "host {key} checksum mismatch"
         );
     }
 
-    let registered = builder::registration(&fs::read_to_string(physical(&text(
-        &value,
-        "registration",
-    )?)?)?)?;
+    let registered = builder::registration(&fs::read_to_string(physical(&receipt.registration)?)?)?;
     ensure!(
         registered.keys().cloned().collect::<BTreeSet<_>>() == paths,
         "host registration differs from view"
     );
 
-    let generation = number(&value, "generation")?;
+    let generation = receipt.generation.get();
     let pin: Value = read(&records::running_path(
         root,
         "dom0",
         generation,
         "host-retained",
     )?)?;
-    let map: Value = read(&physical(&text(&value, "blob_map")?)?)?;
+    let map: Value = read(&physical(&receipt.blob_map)?)?;
     let refs = views::references(&map, &format!("running:dom0:{generation}:host-retained"))?;
     ensure!(
         pin["schema"] == "airlock.closure-store.running-ref.v1"
             && pin["status"] == "running"
             && pin["domain"] == "dom0"
             && pin["generation"] == generation
-            && pin["manifest"] == value["manifest"]
-            && pin["closure_hash"] == value["closure_hash"]
+            && pin["manifest"]
+                == receipt
+                    .manifest
+                    .to_str()
+                    .context("non-UTF-8 host manifest path")?
+            && pin["closure_hash"] == receipt.closure_hash.as_str()
             && pin["physical_references"] == json!(refs),
         "host retention pin mismatch"
     );
-    Ok(value)
+    Ok(receipt)
 }
 
 fn admit(
@@ -121,7 +138,7 @@ fn admit(
     registration: &str,
     incremental: bool,
     previous: Option<&Value>,
-) -> Result<Value> {
+) -> Result<generations::AdmittedGeneration> {
     let registered = builder::registration(registration)?;
     ensure!(
         registered.contains_key(system),
@@ -161,7 +178,7 @@ fn admit(
         mountpoint: "/nix/store",
     })?;
 
-    let manifest = PathBuf::from(text(&result, "manifest")?);
+    let manifest = &result.manifest;
     atomic(
         &manifest
             .parent()
@@ -179,7 +196,7 @@ pub(super) fn publish(
     registration: &str,
     systems: &[String],
     incremental: bool,
-) -> Result<Value> {
+) -> Result<HostReceipt> {
     pool_path(root, &root.join("host/boots"))?;
     if root
         .join("host/boots")
@@ -193,7 +210,7 @@ pub(super) fn publish(
     let previous = if running.try_exists()? {
         let running: Value = read(&running)?;
         let old = validate(root, root, &text(&running, "system")?, false)?;
-        Some(read::<Value>(Path::new(&text(&old, "manifest")?))?["store"].clone())
+        Some(read::<Value>(&old.manifest)?["store"].clone())
     } else {
         None
     };
@@ -206,8 +223,8 @@ pub(super) fn publish(
         incremental,
         previous.as_ref(),
     )?;
-    let manifest_path = PathBuf::from(text(&result, "manifest")?);
-    let manifest: Value = read(&manifest_path)?;
+    let manifest_path = &result.manifest;
+    let manifest: Value = read(manifest_path)?;
 
     let registered = builder::registration(registration)?;
     ensure!(
@@ -215,18 +232,26 @@ pub(super) fn publish(
         "host boot choice absent from admitted closure"
     );
     let store = &manifest["store"];
-    let record = json!({
-        "schema": "airlock.host-store.v1",
-        "generation": manifest["generation"],
-        "manifest": manifest_path,
-        "registration": manifest_path.parent().context("missing manifest parent")?.join("registration"),
-        "registration_sha256": hex(&Sha256::digest(registration)),
-        "metadata_image": store["canonical_metadata_image"],
-        "metadata_image_sha256": hash(Path::new(&text(store,"canonical_metadata_image")?))?,
-        "blob_map": store["canonical_blob_map"],
-        "blob_map_sha256": hash(Path::new(&text(store,"canonical_blob_map")?))?,
-        "closure_hash": store["closure_hash"],
-    });
+    let record = HostReceipt {
+        schema: super::host_receipt::Schema::V1,
+        system: system.parse()?,
+        generation: result.identity.generation,
+        manifest: manifest_path.clone(),
+        registration: manifest_path
+            .parent()
+            .context("missing manifest parent")?
+            .join("registration"),
+        registration_sha256: hex(&Sha256::digest(registration)).parse()?,
+        metadata_image: text(store, "canonical_metadata_image")?.into(),
+        metadata_image_sha256: hash(Path::new(&text(store, "canonical_metadata_image")?))?
+            .parse()?,
+        blob_map: text(store, "canonical_blob_map")?.into(),
+        blob_map_sha256: hash(Path::new(&text(store, "canonical_blob_map")?))?.parse()?,
+        closure_hash: text(store, "closure_hash")?.parse()?,
+        retired: None,
+        timings: None,
+        extensions: BTreeMap::new(),
+    };
 
     records::running(
         root,
@@ -235,14 +260,16 @@ pub(super) fn publish(
         "host-retained",
         true,
     )?;
-    let map: Value = read(Path::new(&text(&record, "blob_map")?))?;
+    let map: Value = read(&record.blob_map)?;
     let mut durable: BTreeSet<PathBuf> = views::extents(&map)?
         .iter()
         .map(|e| e.segment_blob.clone())
         .collect();
-    for key in ["registration", "metadata_image", "blob_map"] {
-        durable.insert(PathBuf::from(text(&record, key)?));
-    }
+    durable.extend([
+        record.registration.clone(),
+        record.metadata_image.clone(),
+        record.blob_map.clone(),
+    ]);
     for path in durable {
         File::open(path)?.sync_all()?;
     }
@@ -253,16 +280,14 @@ pub(super) fn publish(
         .chain(std::iter::once(system))
     {
         let mut selected = record.clone();
-        selected["system"] = json!(choice);
+        selected.system = choice.parse()?;
         let path = root
             .join("host/boots")
             .join(format!("{}.json", entry(choice)?));
         pool_path(root, &path)?;
         write(&path, &selected, 0o644)?;
     }
-    let mut result = record;
-    result["system"] = json!(system);
-    Ok(result)
+    Ok(record)
 }
 
 pub(super) fn refresh_builder(
@@ -310,10 +335,10 @@ pub(super) fn refresh_builder(
         Some(&old["store"]),
     )?;
 
-    let manifest = PathBuf::from(text(&result, "manifest")?);
+    let manifest = &result.manifest;
     builder::prepare(
         root,
-        &result,
+        &result.manifest,
         &manifest
             .parent()
             .context("missing new builder directory")?
@@ -354,7 +379,7 @@ fn publication_registration(system: &str) -> Result<String> {
         .collect())
 }
 
-pub(super) fn publish_live(system: &str) -> Result<Value> {
+pub(super) fn publish_live(system: &str) -> Result<HostReceipt> {
     let root = Path::new(POOL);
     ensure_pool(root)?;
     let temporary = Path::new(HOST).join("publishing");
@@ -376,7 +401,7 @@ pub(super) fn publish_live(system: &str) -> Result<Value> {
     let record = publish(root, system, &registration, &[], true)?;
     let directory = Path::new(HOST)
         .join("generations")
-        .join(number(&record, "generation")?.to_string());
+        .join(record.generation.to_string());
     if !directory.join("nix/var/nix/db/db.sqlite").try_exists()? {
         database::seed(
             Path::new("/nix/var/nix/db/db.sqlite"),
@@ -388,9 +413,9 @@ pub(super) fn publish_live(system: &str) -> Result<Value> {
     Ok(record)
 }
 
-pub(super) fn select(root: &Path, esp: &Path, system: &str, firmware: bool) -> Result<Value> {
+pub(super) fn select(root: &Path, esp: &Path, system: &str, firmware: bool) -> Result<HostReceipt> {
     let record = validate(root, root, system, false)?;
-    let entry = boot_artifacts::verify(root, esp, &record)?;
+    let entry = boot_artifacts::verify(root, esp, &record.system, record.generation)?;
     boot_artifacts::select_entry(esp, &entry, firmware)?;
     write(&root.join("host/selected.json"), &record, 0o644)?;
     Ok(record)
@@ -411,7 +436,7 @@ pub(super) fn retire(root: &Path, esp: &Path, system: &str) -> Result<Value> {
         .join(format!("{}.json", entry(system)?));
     if path.try_exists()? {
         let mut record = validate(root, root, system, true)?;
-        record["retired"] = json!(true);
+        record.retired = Some(true);
         write(&path, &record, 0o644)?;
     }
     boot_artifacts::forget(root, esp, system)?;

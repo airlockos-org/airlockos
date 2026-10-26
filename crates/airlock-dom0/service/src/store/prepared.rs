@@ -188,7 +188,7 @@ pub(super) fn prepare_pool(
         if spec["builder"] == true {
             builder::prepare(
                 root,
-                &result,
+                &result.manifest,
                 &source.join("registration"),
                 Some(&source.join("flake-inputs.json")),
                 None,
@@ -200,7 +200,7 @@ pub(super) fn prepare_pool(
     relocate_pool(root, &root.to_string_lossy(), &runtime.to_string_lossy())?;
     let mut fingerprints = BTreeMap::new();
     for (target, result) in prepared {
-        let path = PathBuf::from(text(&result, "manifest")?);
+        let path = result.manifest;
         let manifest: Value = read(&path)?;
         let store = &manifest["store"];
         let relative = path
@@ -348,79 +348,151 @@ pub(super) fn verify_outputs(root: &Path, descriptors: &Path) -> Result<Value> {
     Ok(json!({"status":"passed","variants":manifests.len(),"files":files}))
 }
 
-pub(super) fn verify_prepared(request: &Value) -> Result<Value> {
-    let artifact = PathBuf::from(text(request, "artifact")?);
+/// Software identity supplied independently of a prepared descriptor.
+/// JSON decoding belongs to the image CLI; native setup constructs this value directly.
+#[derive(serde::Deserialize)]
+pub(super) struct Verification {
+    /// Directory containing the frozen closure and its prepared descriptor.
+    artifact: PathBuf,
+    /// Installed pool whose files must authenticate the descriptor.
+    pool_root: PathBuf,
+    /// Consuming VM; its storage namespace is derived by verified code.
+    domain: airlock_nix_core::identity::GuestName,
+    /// Logical guest system, including manual local-artifact compatibility.
+    system: String,
+    /// Approved immutable root source.
+    root: String,
+    /// Approved kernel selection.
+    kernel: String,
+    /// Original closure source, distinct from the resolved artifact directory.
+    source: String,
+    /// Required metadata frontend.
+    device: String,
+    /// Required external-data frontend.
+    blob_device: String,
+    /// Required guest mountpoint.
+    mountpoint: String,
+    /// Required immutable view implementation.
+    view_backend: String,
+    /// Optional exact generation from the authorised plan.
+    #[serde(default)]
+    generation: Option<crate::model::GenerationId>,
+}
+
+impl TryFrom<&super::domain_cli::Ensure> for Verification {
+    type Error = anyhow::Error;
+
+    fn try_from(args: &super::domain_cli::Ensure) -> Result<Self> {
+        Ok(Self {
+            artifact: args.artifact.clone(),
+            pool_root: args.target.pool_root.clone(),
+            domain: args.target.domain.clone(),
+            system: args.system.clone(),
+            root: args.root.clone(),
+            kernel: args.kernel.clone(),
+            source: args.source.clone(),
+            device: args.target.device.clone(),
+            blob_device: args.target.blob_device.clone(),
+            mountpoint: args.target.mountpoint.clone(),
+            view_backend: args.view_backend.clone(),
+            generation: args.generation.map(TryInto::try_into).transpose()?,
+        })
+    }
+}
+
+pub(super) fn verify_prepared(
+    request: &Verification,
+) -> Result<Option<airlock_deployment_core::attachment::prepared::CheckedGeneration>> {
+    use airlock_deployment_core::attachment::prepared::{
+        Boot, CheckedGeneration, Descriptor, Expected, Layout, Manifest,
+    };
+
+    let artifact = &request.artifact;
     let path = artifact.join("prepared.json");
     if !path.try_exists()? {
-        return Ok(Value::Null);
+        return Ok(None);
     }
-    let root = PathBuf::from(text(request, "pool_root")?);
+    let root = &request.pool_root;
+    let pool = root.to_str().context("non-UTF-8 prepared pool path")?;
     let descriptor: Value = read(&path)?;
     ensure!(
         descriptor["schema"] == "airlock.closure-store.prepared.v1",
         "unsupported prepared descriptor"
     );
-    for (field, expected) in [
-        ("pool_root", "pool_root"),
-        ("system", "system"),
-        ("root_source", "root"),
-        ("kernel_name", "kernel"),
-    ] {
-        ensure!(
-            descriptor[field] == request[expected],
-            "prepared {field} mismatch"
-        );
-    }
-    let namespace = runtime_namespace(&text(request, "domain")?);
-    ensure!(
-        descriptor["domain"] == namespace,
-        "prepared domain mismatch"
-    );
+    let namespace = runtime_namespace(request.domain.as_str());
     let generation = number(&descriptor, "generation")?;
-    ensure!(generation > 0, "invalid prepared generation");
-    let paths = store_paths(&artifact, &text(request, "system")?)?;
-    let closure = closure_hash(
-        &paths,
-        &text(request, "system")?,
-        &text(request, "root")?,
-        &text(request, "kernel")?,
-    );
-    ensure!(
-        descriptor["closure_hash"] == closure,
-        "prepared closure mismatch"
-    );
-    let manifest_path = records::manifest_path(&root, &namespace, generation)?;
+    let paths = store_paths(artifact, &request.system)?;
+    let closure = closure_hash(&paths, &request.system, &request.root, &request.kernel);
+    let manifest_path = records::manifest_path(root, &namespace, generation)?;
     ensure!(
         descriptor["files"]
             .get(
                 manifest_path
-                    .strip_prefix(&root)?
+                    .strip_prefix(root)?
                     .to_str()
                     .context("invalid manifest path")?
             )
             .is_some(),
         "prepared manifest checksum missing"
     );
-    verify_files(&root, &descriptor["files"], true)?;
-    let manifest = records::generation(&root, &namespace, generation)?;
-    records::root_image(&root, &manifest)?;
+    verify_files(root, &descriptor["files"], true)?;
+    let manifest = records::generation(root, &namespace, generation)?;
+    records::root_image(root, &manifest)?;
     let store = &manifest["store"];
-    ensure!(
-        manifest["system"] == request["system"]
-            && store["closure_hash"] == closure
-            && store["paths"] == json!(paths)
-            && store["source"] == request["source"],
-        "prepared generation identity mismatch"
-    );
-    for (field, key) in [
-        ("device", "device"),
-        ("blob_device", "blob_device"),
-        ("mountpoint", "mountpoint"),
-        ("view_backend", "view_backend"),
-    ] {
-        ensure!(store[field] == request[key], "prepared {field} mismatch");
-    }
-    Ok(json!(generation))
+    ensure!(store["paths"] == json!(paths), "prepared paths mismatch");
+
+    // Record decoding and authenticated-byte hashing are external to this verified decision.
+    let expected = Expected {
+        boot: Boot {
+            pool: pool.into(),
+            namespace,
+            system: request.system.clone(),
+            root: request.root.clone(),
+            kernel: request.kernel.clone(),
+            closure,
+        },
+        layout: Layout {
+            source: request.source.clone(),
+            device: request.device.clone(),
+            blob_device: request.blob_device.clone(),
+            mountpoint: request.mountpoint.clone(),
+            backend: request.view_backend.clone(),
+        },
+        number: request.generation.map(|g| g.get()),
+    };
+    let described = Descriptor {
+        boot: Boot {
+            pool: text(&descriptor, "pool_root")?,
+            namespace: text(&descriptor, "domain")?,
+            system: text(&descriptor, "system")?,
+            root: text(&descriptor, "root_source")?,
+            kernel: text(&descriptor, "kernel_name")?,
+            closure: text(&descriptor, "closure_hash")?,
+        },
+        number: generation,
+    };
+    let loaded = Manifest {
+        boot: Boot {
+            pool: pool.into(),
+            namespace: text(&manifest, "domain")?,
+            system: text(&manifest, "system")?,
+            root: text(&manifest["root"], "source")?,
+            kernel: text(&manifest["kernel"], "name")?,
+            closure: text(store, "closure_hash")?,
+        },
+        layout: Layout {
+            source: text(store, "source")?,
+            device: text(store, "device")?,
+            blob_device: text(store, "blob_device")?,
+            mountpoint: text(store, "mountpoint")?,
+            backend: text(store, "view_backend")?,
+        },
+        number: number(&manifest, "generation")?,
+    };
+    Ok(Some(
+        CheckedGeneration::check(&expected, &described, loaded)
+            .context("prepared generation identity mismatch")?,
+    ))
 }
 
 pub(super) fn prepare_host(

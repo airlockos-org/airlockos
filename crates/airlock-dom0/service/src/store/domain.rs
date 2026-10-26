@@ -243,12 +243,13 @@ fn admit(args: &Ensure) -> Result<GenerationReceipt> {
     let target = &args.target;
     let _lock = PoolLock::acquire(&target.pool_root.join("admission.lock"))?;
     if args.artifact.join("prepared.json").try_exists()? {
-        let generation = prepared::verify_prepared(&serde_json::to_value(args)?)?;
+        let generation = prepared::verify_prepared(&prepared::Verification::try_from(args)?)?
+            .context("prepared descriptor disappeared")?;
         return generations::load(
             &target.pool_root,
             &target.pool_root,
-            &runtime_namespace(target.domain.as_str()),
-            generation.as_u64().context("invalid prepared generation")?,
+            generation.namespace(),
+            generation.number(),
         );
     }
 
@@ -263,7 +264,7 @@ fn admit(args: &Ensure) -> Result<GenerationReceipt> {
         !args.require_retained,
         "reviewed deployment requires a retained or prepared generation; refusing implicit admission"
     );
-    let value = generations::admit(&Admission {
+    generations::guest_receipt(generations::admit(&Admission {
         pool: &target.pool_root,
         domain: &runtime_namespace(target.domain.as_str()),
         system: &args.system,
@@ -282,8 +283,7 @@ fn admit(args: &Ensure) -> Result<GenerationReceipt> {
         device: &target.device,
         blob_device: &target.blob_device,
         mountpoint: &target.mountpoint,
-    })?;
-    Ok(serde_json::from_value(value)?)
+    })?)
 }
 
 /// Reuse the exact current boot identity or attach an approved successor to a stopped VM.

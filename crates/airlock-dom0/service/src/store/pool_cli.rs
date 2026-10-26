@@ -269,7 +269,7 @@ pub(super) fn run(command: Request) -> Result<Value> {
             } else {
                 PathBuf::from(&id.closure_source)
             };
-            generations::admit(&Admission {
+            Ok(serde_json::to_value(generations::admit(&Admission {
                 pool: &root,
                 domain: &id.domain,
                 system: &id.system,
@@ -288,7 +288,7 @@ pub(super) fn run(command: Request) -> Result<Value> {
                 device: &args.store_device,
                 blob_device: &args.store_blob_device,
                 mountpoint: &args.store_mountpoint,
-            })
+            })?)?)
         }
         Operation::FindGeneration(id) => Ok(serde_json::to_value(generations::find(
             &root,

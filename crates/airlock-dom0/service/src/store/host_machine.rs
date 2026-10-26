@@ -80,8 +80,13 @@ enum Publication {
     Checkpoint,
 }
 
-pub(super) fn save(root: &Path, storage: &Path, machine: &Path, record: &Value) -> Result<()> {
-    publish_snapshot(root, storage, machine, record, Publication::Candidate).map(|_| ())
+pub(super) fn save(
+    root: &Path,
+    storage: &Path,
+    machine: &Path,
+    receipt: &HostReceipt,
+) -> Result<()> {
+    publish_snapshot(root, storage, machine, receipt, Publication::Candidate).map(|_| ())
 }
 
 /// Preserve an existing boot binding when the running host has an unfinished live selection.
@@ -89,20 +94,19 @@ pub(super) fn checkpoint(
     root: &Path,
     storage: &Path,
     machine: &Path,
-    record: &Value,
+    receipt: &HostReceipt,
 ) -> Result<bool> {
-    publish_snapshot(root, storage, machine, record, Publication::Checkpoint)
+    publish_snapshot(root, storage, machine, receipt, Publication::Checkpoint)
 }
 
-/// Share decoding and capture; only the candidate path can snapshot the precommit phase.
+/// Capture one typed host identity; only the candidate path can snapshot the precommit phase.
 fn publish_snapshot(
     root: &Path,
     storage: &Path,
     machine: &Path,
-    record: &Value,
+    receipt: &HostReceipt,
     publication: Publication,
 ) -> Result<bool> {
-    let receipt: HostReceipt = serde_json::from_value(record.clone())?;
     let boot = receipt.observation()?;
     let selection: Option<Selection> = state::optional(&machine.join("selection.json"))?;
     let release = selection
@@ -150,26 +154,25 @@ fn publish_snapshot(
         );
     }
 
-    write(&binding_path(storage, &receipt), &binding, 0o600)?;
+    write(&binding_path(storage, receipt), &binding, 0o600)?;
     Ok(true)
 }
 
-pub(super) fn restore(sysroot: &Path, record: &Value) -> Result<()> {
-    restore_with(sysroot, record, |_| Ok(()))
+pub(super) fn restore(sysroot: &Path, receipt: &HostReceipt) -> Result<()> {
+    restore_with(sysroot, receipt, |_| Ok(()))
 }
 
 /// The hook represents interruption before publication or immediately after a durable effect.
 /// Production supplies a no-op; tests replay the same production loop after each interruption.
 fn restore_with(
     sysroot: &Path,
-    record: &Value,
+    receipt: &HostReceipt,
     mut boundary: impl FnMut(usize) -> Result<()>,
 ) -> Result<()> {
     let storage = sysroot.join(host::HOST.trim_start_matches('/'));
     let machine = sysroot.join(host::MACHINE.trim_start_matches('/'));
-    let receipt: HostReceipt = serde_json::from_value(record.clone())?;
     let boot = receipt.observation()?;
-    let path = binding_path(&storage, &receipt);
+    let path = binding_path(&storage, receipt);
     let Some(binding) = state::optional::<BootBinding>(&path)? else {
         ensure!(
             receipt.generation.get() == 1

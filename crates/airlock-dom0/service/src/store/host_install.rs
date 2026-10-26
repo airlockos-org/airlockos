@@ -3,7 +3,6 @@
 
 use super::{boot_artifacts, fs::*};
 use anyhow::{Context, Result, ensure};
-use serde_json::Value;
 use std::{
     collections::BTreeSet,
     fs,
@@ -145,8 +144,8 @@ pub(super) fn install(system: &str, profiles: &Path, loader: &Path, pool: &Path)
     let copied = temporary.path().join("profiles");
     let mut sealed = BTreeSet::new();
     for path in children(&pool.join("host/boots"))? {
-        let record: Value = read(&path)?;
-        if record["retired"] == true
+        let record: boot_artifacts::BootRecord = read(&path)?;
+        if record.retired == Some(true)
             || !pool
                 .join("host/artifacts")
                 .join(path.file_name().context("missing boot record name")?)
@@ -154,8 +153,13 @@ pub(super) fn install(system: &str, profiles: &Path, loader: &Path, pool: &Path)
         {
             continue;
         }
-        boot_artifacts::verify(pool, loader.parent().context("loader has no ESP")?, &record)?;
-        sealed.insert(PathBuf::from(text(&record, "system")?));
+        boot_artifacts::verify(
+            pool,
+            loader.parent().context("loader has no ESP")?,
+            &record.system,
+            record.generation,
+        )?;
+        sealed.insert(PathBuf::from(record.system.as_str()));
     }
     prepare_profiles(profiles, &copied, &sealed, Path::new(system))?;
     ensure!(

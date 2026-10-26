@@ -11,7 +11,7 @@ struct Fixture {
     /// Owns all boot state and is removed without touching deployed data.
     root: tempfile::TempDir,
     /// Authenticated host-loader output supplied to restoration.
-    receipt: Value,
+    receipt: HostReceipt,
     /// Saved boot binding, before any corruption or interruption.
     binding: Value,
 }
@@ -63,7 +63,7 @@ impl Fixture {
             "selection":selection,"release_fingerprint":loaded.fingerprint,"staged":{"usr-home":7}});
         let fixture = Self {
             root,
-            receipt,
+            receipt: serde_json::from_value(receipt)?,
             binding,
         };
         fixture.save_binding(&fixture.binding)?;
@@ -246,7 +246,7 @@ fn boot_binding_protocol_is_typed_and_fail_closed() -> Result<()> {
     }
     // The verified core checks mathematical entries as well as document equality.
     let decoded: BootBinding = serde_json::from_value(fixture.binding.clone())?;
-    let boot = serde_json::from_value::<HostReceipt>(fixture.receipt.clone())?.observation()?;
+    let boot = fixture.receipt.observation()?;
     let observed = evidence(
         &fixture.machine(),
         Path::new(host::MACHINE),
@@ -304,7 +304,7 @@ fn image_binding_and_bootstrap_exception_do_not_invent_a_transaction() -> Result
     fs::remove_file(fixture.storage().join("generations/2/machine.json"))?;
     assert!(restore(fixture.root.path(), &fixture.receipt).is_err());
     let mut initial = fixture.receipt.clone();
-    initial["generation"] = json!(1);
+    initial.generation = 1.try_into()?;
     assert!(restore(fixture.root.path(), &initial).is_err());
     fs::remove_file(fixture.storage().join("boot-staged.json"))?;
     restore(fixture.root.path(), &initial)?;

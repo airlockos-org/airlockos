@@ -35,14 +35,23 @@ pub struct StorageIdentity {
 /// Admission protocol marker shared with build and controller components.
 pub use airlock_nix_core::admission::GenerationReceiptSchema;
 
-/// A generation projection whose domain is a storage namespace, never a consuming guest.
+/// A generation projection addressed to storage, never a consuming guest.
+/// The default namespace names a guest runtime or builder. Pool admission also uses
+/// a local namespace type for host and administrative generations; callers must
+/// validate that namespace before supplying a guest receipt to attachment.
+///
+/// ```compile_fail
+/// use airlock_machine_core::model::GenerationReceipt;
+/// fn attach(receipt: GenerationReceipt) {}
+/// fn administrative_receipt(receipt: GenerationReceipt<String>) { attach(receipt); }
+/// ```
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct GenerationReceipt {
+pub struct GenerationReceipt<Namespace = StoreNamespace> {
     /// Admission marker when present; installed or inspection schemas cannot masquerade as a load.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<GenerationReceiptSchema>,
     /// Runtime or builder namespace; attachment applies its stricter runtime-pair checks.
-    pub domain: StoreNamespace,
+    pub domain: Namespace,
     /// Complete boot and frontend identity retained from the committed manifest.
     #[serde(flatten)]
     pub identity: StorageIdentity,

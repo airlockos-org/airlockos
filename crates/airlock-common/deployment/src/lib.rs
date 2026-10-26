@@ -235,6 +235,13 @@
 //!   damaged authority intentionally blocks execution.
 //!
 //! Storage attachment and checked boot setup retain their own verified generation identities.
+//! `attachment::prepared::CheckedGeneration` accepts a prepared descriptor only when its boot
+//! identity and the committed manifest agree with the requested pool, namespace, system, root,
+//! kernel, calculated closure, original source and frontends, including any explicit generation
+//! pin. Its accessors carry the original namespace and positive generation to loading. Native
+//! admission and host publication pass typed receipts directly; JSON remains at file/CLI edges.
+//! Descriptor/manifest decoding, checksums, closure hashing, faithful load dispatch and pool
+//! exclusion remain adapter obligations; this match grants no deployment or write authority.
 //! `boot::SelectedGeneration` compares every boot field against committed-record evidence;
 //! its requests select the exact retained-only storage command, generation-specific root lookup,
 //! halted root import and fixed kernel/system/root/store identity settings. Checked boot uses

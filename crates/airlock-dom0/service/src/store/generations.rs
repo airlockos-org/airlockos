@@ -49,6 +49,48 @@ pub(super) struct Admission<'a> {
     pub(super) mountpoint: &'a str,
 }
 
+/// Pool namespaces include dom0 and administrative names, not just guest runtime stores.
+/// Component validation prevents path traversal; guest attachment requires its stricter type.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(transparent)]
+pub(super) struct PoolNamespace {
+    /// Validated single path component addressed by the admission operation.
+    name: String,
+}
+
+impl PoolNamespace {
+    /// Preserve the requested namespace after the same path check used by pool operations.
+    fn new(name: &str) -> Result<Self> {
+        component(name)?;
+        Ok(Self { name: name.into() })
+    }
+}
+
+/// Admission has the same receipt fields for host and guest storage namespaces.
+pub(super) type AdmittedGeneration = crate::model::GenerationReceipt<PoolNamespace>;
+
+/// Guest installation cannot consume host or arbitrary administrative admission namespaces.
+pub(super) fn guest_receipt(
+    receipt: AdmittedGeneration,
+) -> Result<crate::model::GenerationReceipt> {
+    Ok(crate::model::GenerationReceipt {
+        domain: receipt.domain.name.parse()?,
+        schema: receipt.schema,
+        identity: receipt.identity,
+        manifest: receipt.manifest,
+        metadata_image: receipt.metadata_image,
+        blob_map: receipt.blob_map,
+        blob_logical_size: receipt.blob_logical_size,
+        closure_hash: receipt.closure_hash,
+        approval_source: receipt.approval_source,
+        view_image: receipt.view_image,
+        image: receipt.image,
+        blob_volume: receipt.blob_volume,
+        view_created: receipt.view_created,
+        diagnostics: receipt.diagnostics,
+    })
+}
+
 fn verification(paths: &[String], mode: &str, recursive: bool) -> Result<Value> {
     if paths.is_empty() {
         return Ok(json!({"mode":mode,"status":"passed","reason":"no new objects"}));
@@ -90,10 +132,10 @@ fn verification(paths: &[String], mode: &str, recursive: bool) -> Result<Value> 
     }))
 }
 
-pub(super) fn admit(args: &Admission<'_>) -> Result<Value> {
+pub(super) fn admit(args: &Admission<'_>) -> Result<AdmittedGeneration> {
     let started = Instant::now();
     let root = args.pool;
-    component(args.domain)?;
+    let namespace = PoolNamespace::new(args.domain)?;
     entry(args.system)?;
 
     let artifact = if args.root_source.is_empty() {
@@ -286,42 +328,80 @@ pub(super) fn admit(args: &Admission<'_>) -> Result<Value> {
         records::select(root, args.domain, generation)?;
     }
 
-    let mut result = store.clone();
-    result["schema"] = json!("airlock.closure-store.admission.v1");
-    result["status"] = json!("passed");
+    // Keep extension diagnostics at the wire edge; authoritative fields are constructed directly.
+    let mut diagnostics = store.as_object().context("invalid store record")?.clone();
+    for key in [
+        "schema",
+        "domain",
+        "manifest",
+        "approval_source",
+        "view_image",
+        "view_created",
+        "generation",
+        "system",
+        "root_source",
+        "source",
+        "kernel_name",
+        "mode",
+        "device",
+        "blob_device",
+        "mountpoint",
+        "view_backend",
+        "metadata_image",
+        "blob_map",
+        "blob_logical_size",
+        "closure_hash",
+        "image",
+        "blob_volume",
+    ] {
+        diagnostics.remove(key);
+    }
     for (key, value) in json!({
-        "timings": timings,
-        "pool_root": root,
-        "domain": args.domain,
-        "generation": generation,
+        "status": "passed", "timings": timings, "pool_root": root,
         "previous_generation": previous,
-        "current_generation": records::current(root,args.domain)?,
-        "activated": args.activate,
-        "retained": args.retain,
-        "manifest": manifest_path,
-        "system": args.system,
-        "root_source": args.root_source,
-        "root_artifact": artifact,
-        "kernel_name": args.kernel,
-        "closure_hash": closure,
-        "verification": verified.take(),
-        "store": store,
-        "objects_total": paths.len(),
-        "objects_admitted": admitted.len(),
-        "objects_reused": reused.len(),
-        "admitted": admitted,
-        "reused": reused,
-        "view_created": view_created,
-        "view_image": store["image"],
+        "current_generation": records::current(root, args.domain)?,
+        "activated": args.activate, "retained": args.retain,
+        "root_artifact": artifact, "verification": verified.take(), "store": store,
+        "objects_total": paths.len(), "objects_admitted": admitted.len(),
+        "objects_reused": reused.len(), "admitted": admitted, "reused": reused,
         "canonical_view_image": store["canonical_image"],
-        "view_size": fs::metadata(Path::new(&text(&store,"canonical_image")?))?.len(),
+        "view_size": fs::metadata(Path::new(&text(&store, "canonical_image")?))?.len(),
     })
     .as_object()
-    .context("invalid admission receipt")?
+    .context("invalid admission diagnostics")?
     {
-        result[key] = value.clone();
+        diagnostics.insert(key.clone(), value.clone());
     }
-    Ok(result)
+
+    Ok(crate::model::GenerationReceipt {
+        schema: Some(airlock_nix_core::admission::GenerationReceiptSchema::Admission),
+        domain: namespace,
+        identity: crate::model::StorageIdentity {
+            generation: generation.try_into()?,
+            system: args.system.into(),
+            root_source: args.root_source.into(),
+            source: args.source_identity.into(),
+            kernel_name: args.kernel.into(),
+            mode: crate::model::StoreMode::SharedClosure,
+            device: args.device.into(),
+            blob_device: args.blob_device.into(),
+            mountpoint: args.mountpoint.into(),
+            view_backend: text(&store, "view_backend")?,
+        },
+        manifest: manifest_path,
+        metadata_image: text(&store, "metadata_image")?.into(),
+        blob_map: text(&store, "blob_map")?.into(),
+        blob_logical_size: number(&store, "blob_logical_size")?,
+        closure_hash: closure,
+        approval_source: None,
+        view_image: Some(text(&store, "image")?),
+        image: store["image"].as_str().map(str::to_owned),
+        blob_volume: store["blob_volume"].as_str().map(str::to_owned),
+        view_created: view_created
+            .as_bool()
+            .context("invalid view-created result")?,
+        diagnostics: diagnostics.into_iter().collect(),
+    })
 }
 
 pub(super) fn describe(root: &Path, domain: &str, generation: u64) -> Result<Value> {

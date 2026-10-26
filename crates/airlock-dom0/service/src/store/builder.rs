@@ -139,14 +139,13 @@ pub(super) fn reference_closure(
 
 pub(super) fn prepare(
     root: &Path,
-    admission: &Value,
+    path: &Path,
     registration_source: &Path,
     offline: Option<&Path>,
     predecessor: Option<&Value>,
 ) -> Result<Value> {
-    let path = PathBuf::from(text(admission, "manifest")?);
-    pool_path(root, &path)?;
-    let mut manifest: Value = read(&path)?;
+    pool_path(root, path)?;
+    let mut manifest: Value = read(path)?;
     let domain = text(&manifest, "domain")?;
     ensure!(
         ["usr-assistant-build-store", "sys-ctrl-build-store"].contains(&domain.as_str()),
@@ -276,7 +275,7 @@ pub(super) fn prepare(
     if let Some(bytes) = &offline_bytes {
         atomic(&directory.join("flake-inputs.json"), bytes, 0o444)?;
     }
-    write(&path, &manifest, 0o644)?;
+    write(path, &manifest, 0o644)?;
     records::running(
         root,
         &domain,

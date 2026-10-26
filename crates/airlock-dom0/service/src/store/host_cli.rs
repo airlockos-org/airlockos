@@ -54,8 +54,7 @@ impl Expected {
                 system.is_none_or(|system| system == expected.as_str()),
                 "expected host target differs"
             );
-            let record: HostReceipt =
-                serde_json::from_value(host::validate(pool, pool, expected.as_str(), false)?)?;
+            let record = host::validate(pool, pool, expected.as_str(), false)?;
             let expected = self
                 .observation()?
                 .context("missing expected host identity")?;
@@ -273,9 +272,7 @@ pub(super) fn run(command: Request) -> Result<Value> {
                 pool == Path::new(host::POOL),
                 "live publication requires the installed pool"
             );
-            Ok(serde_json::to_value(
-                serde_json::from_value::<HostReceipt>(host::publish_live(&system)?)?,
-            )?)
+            Ok(serde_json::to_value(host::publish_live(&system)?)?)
         }
         Operation::Status => Ok(json!({
             "schema": "airlock.host-store.status.v1",
@@ -288,14 +285,14 @@ pub(super) fn run(command: Request) -> Result<Value> {
             ensure_pool(pool)?;
             let _lock = PoolLock::acquire(&pool.join("admission.lock"))?;
             match operation {
-                Operation::Validate { system } => Ok(serde_json::to_value(
-                    serde_json::from_value::<HostReceipt>(host::validate(
-                        pool, pool, &system, false,
-                    )?)?,
-                )?),
+                Operation::Validate { system } => Ok(serde_json::to_value(host::validate(
+                    pool, pool, &system, false,
+                )?)?),
                 Operation::Select { system } => {
                     command.expected.check(pool, Some(&system))?;
-                    host::select(pool, esp, &system, firmware)
+                    Ok(serde_json::to_value(host::select(
+                        pool, esp, &system, firmware,
+                    )?)?)
                 }
                 Operation::Retire { system } => host::retire(pool, esp, &system),
                 Operation::Recover { system } => {
@@ -303,11 +300,18 @@ pub(super) fn run(command: Request) -> Result<Value> {
                         Path::new("/etc/airlock/pool-recovery").is_file(),
                         "recover is available only in independent recovery"
                     );
-                    host::select(pool, esp, &system, firmware)
+                    Ok(serde_json::to_value(host::select(
+                        pool, esp, &system, firmware,
+                    )?)?)
                 }
                 Operation::ProtectBoot => {
                     let running: Value = read(&pool.join("host/running.json"))?;
-                    host::select(pool, esp, &text(&running, "system")?, firmware)
+                    Ok(serde_json::to_value(host::select(
+                        pool,
+                        esp,
+                        &text(&running, "system")?,
+                        firmware,
+                    )?)?)
                 }
                 Operation::SealBoot { keep_default } => {
                     command.expected.check(pool, None)?;
@@ -321,20 +325,20 @@ pub(super) fn run(command: Request) -> Result<Value> {
                     Ok(json!({"bound":system}))
                 }
                 Operation::CheckpointMachine => {
-                    let record: Value = read(&pool.join("host/running.json"))?;
+                    let record: HostReceipt = read(&pool.join("host/running.json"))?;
                     let selection = machine.join("selection.json");
                     if selection.try_exists()? {
                         let selection: Value = read(&selection)?;
                         let release = PathBuf::from(text(&selection, "release")?);
                         let manifest: Value = read(&release.join("release.json"))?;
-                        if manifest["host"] != record["system"] {
-                            return Ok(json!({"checkpoint":"unchanged","system":record["system"]}));
+                        if manifest["host"] != record.system.as_str() {
+                            return Ok(json!({"checkpoint":"unchanged","system":record.system}));
                         }
                     }
                     if !host_machine::checkpoint(pool, storage, machine, &record)? {
-                        return Ok(json!({"checkpoint":"unchanged","system":record["system"]}));
+                        return Ok(json!({"checkpoint":"unchanged","system":record.system}));
                     }
-                    Ok(json!({"bound":record["system"]}))
+                    Ok(json!({"bound":record.system}))
                 }
                 _ => unreachable!("handled before acquiring pool lock"),
             }

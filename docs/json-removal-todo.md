@@ -28,7 +28,7 @@ Existing transport, persistence, diagnostic and upstream formats stay in place.
    Sources: [session](../crates/airlock-dom0/service/src/setup_config/runtime.rs),
    [setup preparation](../crates/airlock-dom0/service/src/setup_config/run.rs).
 
-4. [ ] **Remove JSON round trips from internal storage helper calls.**
+4. [x] **Remove JSON round trips from internal storage helper calls.**
    Pass typed prepared-generation verification inputs directly instead of
    serializing setup arguments. Return typed generation identities and admission
    receipts from internal calls; serialize only in their CLI adapters. Apply the

@@ -92,8 +92,7 @@ pub(super) fn assemble(sysroot: &Path, cmdline: &str) -> Result<Value> {
     let root = sysroot.join(host::POOL.trim_start_matches('/'));
     let storage = sysroot.join(host::HOST.trim_start_matches('/'));
     mkdir_all(&storage)?;
-    let physical = |path: &str| -> Result<PathBuf> {
-        let path = Path::new(path);
+    let physical = |path: &Path| -> Result<PathBuf> {
         ensure!(
             path.is_absolute()
                 && !path
@@ -112,13 +111,13 @@ pub(super) fn assemble(sysroot: &Path, cmdline: &str) -> Result<Value> {
     }
 
     let record = host::validate(&root, Path::new(host::POOL), &system, false)?;
-    let generation = number(&record, "generation")?;
+    let generation = record.generation.get();
     let generation_root = storage.join("generations").join(generation.to_string());
     let upper = generation_root.join("upper");
     mkdir_all(&upper)?;
     mkdir_all(generation_root.join("work"))?;
 
-    let registration = fs::read_to_string(physical(&text(&record, "registration")?)?)?;
+    let registration = fs::read_to_string(physical(&record.registration)?)?;
     let registered = builder::registration(&registration)?;
     database::recover(&generation_root)?;
     let old = if generation_root
@@ -163,7 +162,7 @@ pub(super) fn assemble(sysroot: &Path, cmdline: &str) -> Result<Value> {
             "host base already mounted"
         );
 
-        let map: Value = read(&physical(&text(&record, "blob_map")?)?)?;
+        let map: Value = read(&physical(&record.blob_map)?)?;
         let mut mapped = map.clone();
         prepared::relocate(&mut mapped, host::POOL, &root.to_string_lossy());
         let device = views::attach_map(&root, &format!("airlock-host-{generation}"), &mapped)?;
@@ -175,7 +174,7 @@ pub(super) fn assemble(sysroot: &Path, cmdline: &str) -> Result<Value> {
                 "erofs",
                 "-o",
                 &format!("ro,loop,device={}", text(&device, "device")?),
-                &physical(&text(&record, "metadata_image")?)?.to_string_lossy(),
+                &physical(&record.metadata_image)?.to_string_lossy(),
                 &target.to_string_lossy(),
             ],
             None,
@@ -249,8 +248,8 @@ pub(super) fn assemble(sysroot: &Path, cmdline: &str) -> Result<Value> {
                 "status": "running",
                 "domain": "dom0",
                 "generation": generation,
-                "manifest": record["manifest"],
-                "closure_hash": record["closure_hash"],
+                "manifest": record.manifest,
+                "closure_hash": record.closure_hash,
                 "volume": "host-upper",
                 "physical_references": views::references(&map,"host-upper")?,
             }),
@@ -290,7 +289,7 @@ pub(super) fn assemble(sysroot: &Path, cmdline: &str) -> Result<Value> {
         mounts.push(database);
         write(
             &storage.join("base.json"),
-            &json!({"schema":"airlock.host-base.v2","systems":[system],"generation":generation,"closure_hash":record["closure_hash"]}),
+            &json!({"schema":"airlock.host-base.v2","systems":[system],"generation":generation,"closure_hash":record.closure_hash}),
             0o644,
         )?;
         remove(&trash)?;
@@ -305,7 +304,7 @@ pub(super) fn assemble(sysroot: &Path, cmdline: &str) -> Result<Value> {
             sync_dir(&links)?;
         }
         ensure!(
-            physical(&system)?.join("init").is_file(),
+            physical(Path::new(&system))?.join("init").is_file(),
             "selected init missing from assembled view"
         );
         host_machine::restore(sysroot, &record)?;

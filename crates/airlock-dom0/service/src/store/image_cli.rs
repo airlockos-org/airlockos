@@ -182,7 +182,19 @@ fn execute(command: Request) -> Result<Value> {
             prepared::install_host(&root, &recovery_paths, &recovery_system)
         }),
         Operation::VerifyHost { seed } => prepared::verify_host(&seed),
-        Operation::VerifyPrepared { request: path } => prepared::verify_prepared(&request(&path)?),
+        Operation::VerifyPrepared { request: path } => {
+            let value = request(&path)?;
+            if !Path::new(&text(&value, "artifact")?)
+                .join("prepared.json")
+                .try_exists()?
+            {
+                return Ok(Value::Null);
+            }
+            let input: prepared::Verification = serde_json::from_value(value)?;
+            Ok(serde_json::to_value(
+                prepared::verify_prepared(&input)?.map(|g| g.number()),
+            )?)
+        }
         Operation::InspectPrepared { request: path } => {
             let request = request(&path)?;
             let descriptor: Value = read(Path::new(&text(&request, "descriptor")?))?;

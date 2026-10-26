@@ -9,7 +9,6 @@ use airlock_nix_core::{
 };
 use anyhow::{Result, ensure};
 use clap::{Args, Subcommand};
-use serde::Serialize;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 
@@ -22,7 +21,7 @@ pub(crate) struct Request {
 }
 
 /// One guest and its installed pool/device bindings; parsing does not open Qubes.
-#[derive(Args, Serialize)]
+#[derive(Args)]
 pub(super) struct Target {
     /// Existing Qubes VM whose boot volumes are being inspected.
     pub(super) domain: GuestName,
@@ -52,11 +51,10 @@ pub(super) struct Target {
 }
 
 /// Exact software and boot identity to reuse or admit before attaching volumes.
-#[derive(Args, Serialize)]
+#[derive(Args)]
 pub(super) struct Ensure {
     /// VM, pool and frontend binding shared with generation switching.
     #[command(flatten)]
-    #[serde(flatten)]
     pub(super) target: Target,
     /// Frozen closure or prepared descriptor supplying the requested packages.
     pub(super) artifact: PathBuf,
@@ -76,11 +74,9 @@ pub(super) struct Ensure {
     pub(super) kernel: String,
     /// Exact retained generation requested by a checked deployment, when present.
     #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) generation: Option<u64>,
     /// Reviewed activation may attach retained or prepared generations without admitting bytes.
     #[arg(long)]
-    #[serde(skip)]
     pub(super) require_retained: bool,
     /// Object verification policy used only when admission is necessary.
     #[arg(long, env = "AIRLOCK_CLOSURE_STORE_VERIFY", default_value = "nix-store", value_parser = ["none", "tree", "nix-store", "nix-store-trust", "incremental"])]

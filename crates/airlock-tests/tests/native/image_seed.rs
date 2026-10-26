@@ -595,6 +595,13 @@ fn prepared_image_adoption_needs_no_source_or_repacking() -> Result<()> {
     for index in 0..2 {
         let result: Value = serde_json::from_slice(&seed.verify(&seed.request(index))?.checked()?)?;
         assert_eq!(result, json!(index + 1));
+        let mut pinned = seed.request(index);
+        pinned["generation"] = json!(index + 1);
+        assert!(seed.verify(&pinned)?.status.success());
+        pinned["generation"] = json!(2 - index);
+        assert!(!seed.verify(&pinned)?.status.success());
+        pinned["generation"] = json!(0);
+        assert!(!seed.verify(&pinned)?.status.success());
     }
     assert_eq!(
         fs::read_dir(seed.installed.join("objects/metadata"))?.count(),

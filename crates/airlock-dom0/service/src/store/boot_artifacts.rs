@@ -2,6 +2,7 @@
 //! Checksummed descriptors authorize exact files; cleanup removes only authenticated duplicates.
 
 use super::{fs::*, presentation};
+use crate::model::{GenerationId, StorePath};
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -11,6 +12,19 @@ use std::{
     os::unix::fs::FileExt,
     path::{Path, PathBuf},
 };
+
+/// Boot-file selection needs only these coordinates, including initial image records.
+/// This projection does not authenticate storage bytes and cannot replace a HostReceipt.
+#[derive(serde::Deserialize)]
+pub(super) struct BootRecord {
+    /// Exact host system whose retained EFI descriptor is addressed.
+    pub(super) system: StorePath,
+    /// Positive storage generation named by that descriptor.
+    pub(super) generation: GenerationId,
+    /// Retired systems are excluded from ordinary boot-file installation.
+    #[serde(default)]
+    pub(super) retired: Option<bool>,
+}
 
 pub(super) fn xen_config(binary: &Path) -> Result<BTreeMap<String, String>> {
     fn read_at<const N: usize>(file: &File, offset: u64) -> Result<[u8; N]> {
@@ -161,12 +175,17 @@ pub(super) fn safe_artifact(esp: &Path, name: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-pub(super) fn verify(root: &Path, esp: &Path, record: &Value) -> Result<String> {
-    let descriptor: Value = read(&descriptor_path(root, &text(record, "system")?)?)?;
+pub(super) fn verify(
+    root: &Path,
+    esp: &Path,
+    system: &StorePath,
+    generation: GenerationId,
+) -> Result<String> {
+    let descriptor: Value = read(&descriptor_path(root, system.as_str())?)?;
     ensure!(
         descriptor["schema"] == "airlock.host-boot-artifacts.v1"
-            && descriptor["system"] == record["system"]
-            && descriptor["generation"] == record["generation"],
+            && descriptor["system"] == system.as_str()
+            && descriptor["generation"] == generation.get(),
         "host boot artifact binding mismatch"
     );
     let entries = descriptor["entries"]
@@ -390,16 +409,16 @@ pub(super) fn seal(root: &Path, esp: &Path, keep_default: bool, firmware: bool) 
     let mut records = Vec::new();
     let mut authenticated = BTreeMap::new();
     for path in children(&root.join("host/boots"))? {
-        let record: Value = read(&path)?;
-        if record["retired"] == true {
+        let record: BootRecord = read(&path)?;
+        if record.retired == Some(true) {
             continue;
         }
-        let system = text(&record, "system")?;
-        let descriptor = descriptor_path(root, &system)?;
+        let system = record.system.as_str();
+        let descriptor = descriptor_path(root, system)?;
         if descriptor.try_exists()? {
-            let selected = verify(root, esp, &record)?;
+            let selected = verify(root, esp, &record.system, record.generation)?;
             refresh_presentation(&descriptor, esp)?;
-            remove_native_duplicates(esp, &system, &selected)?;
+            remove_native_duplicates(esp, system, &selected)?;
             let value: Value = read(&descriptor)?;
             for entry in value["entries"]
                 .as_array()
@@ -421,9 +440,9 @@ pub(super) fn seal(root: &Path, esp: &Path, keep_default: bool, firmware: bool) 
         if descriptor.try_exists()? {
             continue;
         }
-        let system = text(&record, "system")?;
+        let system = record.system.as_str();
         let mut retained = Vec::new();
-        for entry in inventory(esp, &system)? {
+        for entry in inventory(esp, system)? {
             let original = text(&entry, "entry")?;
             let name = format!("airlock-{original}");
             let source_entry = esp.join("loader/entries").join(&original);
@@ -454,7 +473,7 @@ pub(super) fn seal(root: &Path, esp: &Path, keep_default: bool, firmware: bool) 
             let metadata = presentation::identity(&text);
             let role = match metadata.get("airlock-role") {
                 Some(role) => role.clone(),
-                None => fs::read_to_string(Path::new(&system).join("etc/airlock/boot-role"))?
+                None => fs::read_to_string(Path::new(system).join("etc/airlock/boot-role"))?
                     .trim()
                     .to_owned(),
             };
@@ -462,8 +481,8 @@ pub(super) fn seal(root: &Path, esp: &Path, keep_default: bool, firmware: bool) 
                 &text,
                 presentation::generation(&text, true)?,
                 &role,
-                &system,
-                presentation::source(Path::new(&system))?.as_ref(),
+                system,
+                presentation::source(Path::new(system))?.as_ref(),
             )?;
             let target = esp.join("loader/entries").join(&name);
             atomic(&target, formatted.as_bytes(), 0o644)?;
@@ -476,11 +495,11 @@ pub(super) fn seal(root: &Path, esp: &Path, keep_default: bool, firmware: bool) 
         if !retained.is_empty() {
             write(
                 &descriptor,
-                &json!({"schema":"airlock.host-boot-artifacts.v1","system":system,"generation":record["generation"],"entries":retained}),
+                &json!({"schema":"airlock.host-boot-artifacts.v1","system":system,"generation":record.generation,"entries":retained}),
                 0o644,
             )?;
-            let selected = verify(root, esp, &record)?;
-            remove_native_duplicates(esp, &system, &selected)?;
+            let selected = verify(root, esp, &record.system, record.generation)?;
+            remove_native_duplicates(esp, system, &selected)?;
             for entry in retained {
                 authenticated.extend(
                     entry["files"]
