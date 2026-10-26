@@ -19,7 +19,7 @@ pub fn qubes(pkgs: &NixValue, workspace: &Workspace) -> Package {
     let native = pkgs.clone().select("rustPlatform.buildRustPackage").call(nix_record! {
         "pname": "airlock-qubes", "version": env!("CARGO_PKG_VERSION"),
         "src": source.source(&pkgs.clone().select("lib")),
-        "cargoLock": nix_record! { "lockFile": workspace.file("Cargo.lock").snapshot() },
+        "cargoLock": workspace.cargo_lock(),
         "cargoBuildFlags": NixValue::list(flags),
         "nativeBuildInputs": NixValue::list([pkgs.clone().select("pkg-config")]),
         "buildInputs": NixValue::list([python.clone(), pkgs.clone().select("udev")]),

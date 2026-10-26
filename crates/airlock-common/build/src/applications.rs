@@ -225,10 +225,7 @@ impl Application {
             ("pname", name.into()),
             ("version", env!("CARGO_PKG_VERSION").into()),
             ("src", source.source(&lib)),
-            (
-                "cargoLock",
-                nix_record! { "lockFile": workspace.file("Cargo.lock").snapshot() },
-            ),
+            ("cargoLock", workspace.cargo_lock()),
             ("cargoBuildFlags", NixValue::list(flags)),
             // Behavioral checks run through Cargo against explicitly prepared binaries.
             ("doCheck", false.into()),

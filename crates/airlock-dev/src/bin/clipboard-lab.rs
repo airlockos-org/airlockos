@@ -38,6 +38,49 @@ fn nix_string(value: &str) -> String {
     serde_json::to_string(value).unwrap().replace("${", "\\${")
 }
 
+/// Replace the reviewed Git transport with the same local source in the lab projection.
+/// Native builds keep the portable Git pin; isolated Nix builds use only copied files.
+fn local_manifest(contents: &str, revision: &str) -> Result<String> {
+    let mut manifest: toml::Value = toml::from_str(contents)?;
+    let replace = |section: &mut toml::Value| -> Result<()> {
+        let Some(dependency) = section
+            .get_mut("dependencies")
+            .and_then(|table| table.get_mut("xen-transport"))
+        else {
+            return Ok(());
+        };
+        let table = dependency
+            .as_table_mut()
+            .context("transport dependency table")?;
+        ensure!(
+            table.get("git").and_then(toml::Value::as_str)
+                == Some("https://github.com/airlockos-org/hermit-xen"),
+            "unexpected transport source"
+        );
+        ensure!(
+            table.get("rev").and_then(toml::Value::as_str) == Some(revision),
+            "local Hermit HEAD must match the committed Cargo transport pin"
+        );
+        table.remove("git");
+        table.remove("rev");
+        table.insert(
+            "path".into(),
+            toml::Value::String("../../.hermit-xen/crates/xen-transport".into()),
+        );
+        Ok(())
+    };
+    replace(&mut manifest)?;
+    if let Some(targets) = manifest
+        .get_mut("target")
+        .and_then(toml::Value::as_table_mut)
+    {
+        for (_, target) in targets.iter_mut() {
+            replace(target)?;
+        }
+    }
+    Ok(toml::to_string_pretty(&manifest)?)
+}
+
 /// Prepare only the clipboard crates, matching transport and pinned lab lock.
 /// The command deliberately has no physical-machine deployment path.
 fn main() -> Result<()> {
@@ -46,6 +89,14 @@ fn main() -> Result<()> {
         args.len() == 3,
         "usage: clipboard-lab HERMIT_XEN_WORKTREE prepare|build|test|peer-failure"
     );
+    ensure!(
+        matches!(
+            args[2].as_str(),
+            "prepare" | "build" | "test" | "peer-failure"
+        ),
+        "unknown command"
+    );
+
     let hermit = fs::canonicalize(&args[1])?;
     ensure!(
         hermit.join("nix/application.nix").is_file(),
@@ -56,6 +107,25 @@ fn main() -> Result<()> {
         .unwrap()
         .parent()
         .unwrap();
+    ensure!(
+        fs::canonicalize(root.join(".hermit-xen"))? == hermit,
+        "the .hermit-xen dependency link must select the same local worktree as the builder"
+    );
+
+    let revision = Command::new("git")
+        .current_dir(&hermit)
+        .args(["rev-parse", "HEAD"])
+        .output()?;
+    ensure!(revision.status.success(), "read local Hermit revision");
+    let revision = String::from_utf8(revision.stdout)?;
+    checked(Command::new("git").current_dir(&hermit).args([
+        "diff",
+        "--exit-code",
+        "HEAD",
+        "--",
+        "crates/xen-transport",
+    ]))?;
+
     let output = root.join(".airlock-logs/clipboard");
     fs::create_dir_all(&output)?;
     let source = output.join("source");
@@ -68,7 +138,11 @@ fn main() -> Result<()> {
         let from = root.join("crates").join(name);
         let to = source.join("crates").join(name);
         copy_tree(&from.join("src"), &to.join("src"))?;
-        fs::copy(from.join("Cargo.toml"), to.join("Cargo.toml"))?;
+        let manifest = fs::read_to_string(from.join("Cargo.toml"))?;
+        fs::write(
+            to.join("Cargo.toml"),
+            local_manifest(&manifest, revision.trim())?,
+        )?;
     }
     let transport = source.join(".hermit-xen/crates/xen-transport");
     copy_tree(
@@ -106,15 +180,17 @@ strip = false
         format!(
             r#"{{
   inputs.hermit-xen.url = {input};
-  outputs = {{ self, hermit-xen }}: {{
+  outputs = {{ self, hermit-xen }}:
+    let source = builtins.path {{ path = ./source; name = "clipboard-source"; }};
+    in {{
     packages.x86_64-linux = {{
       service = hermit-xen.lib.x86_64-linux.buildHermitApplication {{
-        src = ./source;
+        src = source;
         bin = "sys-clipboard";
         features = [ "lab-authority" ];
       }};
       peer = hermit-xen.lib.x86_64-linux.buildLinuxApplication {{
-        src = ./source;
+        src = source;
         bin = "clipboard-peer";
         features = [ "linux-peer" ];
       }};
@@ -143,16 +219,14 @@ strip = false
         println!("{path}", path = output.display());
         return Ok(());
     }
-    ensure!(
-        matches!(args[2].as_str(), "build" | "test" | "peer-failure"),
-        "unknown command"
-    );
     // Refresh only the local input; other pins come from hermit-xen's committed lock.
-    checked(
-        Command::new("nix")
-            .current_dir(&output)
-            .args(["flake", "update", "hermit-xen"]),
-    )?;
+    checked(Command::new("nix").current_dir(&output).args([
+        "flake",
+        "update",
+        "hermit-xen",
+        "--flake",
+        &format!("path:{path}", path = output.display()),
+    ]))?;
     for package in ["service", "peer"] {
         checked(Command::new("nix").current_dir(&output).args([
             "build",
@@ -192,4 +266,54 @@ strip = false
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_projection_rejects_links_outside_the_selected_tree() {
+        let temporary = tempfile::tempdir().unwrap();
+        let source = temporary.path().join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("ordinary"), "content").unwrap();
+        let destination = temporary.path().join("destination");
+        copy_tree(&source, &destination).unwrap();
+        assert_eq!(
+            fs::read_to_string(destination.join("ordinary")).unwrap(),
+            "content"
+        );
+
+        std::os::unix::fs::symlink("/outside", source.join("link")).unwrap();
+        assert!(copy_tree(&source, &destination).is_err());
+        assert!(!destination.join("link").exists());
+    }
+
+    #[test]
+    fn local_projection_preserves_features_and_rejects_wrong_revisions() {
+        let source = r#"[package]
+name = "consumer"
+[dependencies]
+xen-transport = { git = "https://github.com/airlockos-org/hermit-xen", rev = "reviewed", features = ["linux"] }
+"#;
+        let manifest: toml::Value =
+            toml::from_str(&local_manifest(source, "reviewed").unwrap()).unwrap();
+        assert_eq!(
+            manifest["dependencies"]["xen-transport"]["features"][0].as_str(),
+            Some("linux")
+        );
+        assert!(
+            manifest["dependencies"]["xen-transport"]
+                .get("git")
+                .is_none()
+        );
+        assert!(local_manifest(source, "different").is_err());
+    }
+
+    #[test]
+    fn generated_paths_cannot_interpolate_nix_expressions() {
+        assert_eq!(nix_string("${untrusted}"), r#""\${untrusted}""#);
+        assert_eq!(nix_string("quote\""), r#""quote\"""#);
+    }
 }

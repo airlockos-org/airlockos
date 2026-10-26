@@ -48,32 +48,57 @@ diagnostics; rejection events contain only request IDs and categories.
 Use matching **local** Hermit transport, builder and pinned submodules. From an
 Airlock development worktree, select the integration worktree explicitly:
 
+The committed Cargo dependency names the reviewed integration commit. During local
+development, seed Cargo strictly from the local repositories (all Git network
+protocols are disabled for this command). Initialize the integration worktree's
+submodules from the primary local checkout first, including rust-vmm-ci.
+
 ```sh
 ln -s ../hermit-xen-clipboard .hermit-xen
-cargo test --locked --manifest-path crates/Cargo.toml \
+mkdir -p .airlock-logs
+HERMIT_LOCAL=$(realpath .hermit-xen)
+LOCAL_GIT_CONFIG="$PWD/.airlock-logs/clipboard-git.config"
+git config --file "$LOCAL_GIT_CONFIG" url."file://$HERMIT_LOCAL".insteadOf https://github.com/airlockos-org/hermit-xen
+git config --file "$LOCAL_GIT_CONFIG" url."file://$HERMIT_LOCAL/vendor/hermit-kernel".insteadOf https://github.com/airlockos-org/hermit-kernel.git
+git config --file "$LOCAL_GIT_CONFIG" url."file://$HERMIT_LOCAL/vendor/rust-vmm-xen".insteadOf https://github.com/airlockos-org/rust-vmm-xen.git
+git config --file "$LOCAL_GIT_CONFIG" url."file://$HERMIT_LOCAL/vendor/rust-vmm-xen/rust-vmm-ci".insteadOf https://github.com/rust-vmm/rust-vmm-ci.git
+GIT_CONFIG_GLOBAL="$LOCAL_GIT_CONFIG" GIT_ALLOW_PROTOCOL=file \
+  cargo --config net.git-fetch-with-cli=true check --locked \
+  --manifest-path crates/Cargo.toml -p airlock-sys-clipboard
+cargo test --locked --offline --manifest-path crates/Cargo.toml \
   -p airlock-clipboard-core -p airlock-sys-clipboard --all-features
-cargo run --locked --manifest-path crates/Cargo.toml -p airlock-dev \
+cargo run --locked --offline --manifest-path crates/Cargo.toml -p airlock-dev \
   --bin clipboard-lab -- ../hermit-xen-clipboard test
-cargo run --locked --manifest-path crates/Cargo.toml -p airlock-dev \
+cargo run --locked --offline --manifest-path crates/Cargo.toml -p airlock-dev \
   --bin clipboard-lab -- ../hermit-xen-clipboard peer-failure
 ```
 
-The ignored symlink is a portable local dependency slot, not a checked-in absolute
-path. The workstation tool prepares a reduced source workspace and generated Nix
-under `.airlock-logs/clipboard`, then invokes the local exported builders. `build`
-builds without booting, and `prepare` only stages sources. It uses `lab.lock` for
-the small Hermit/musl build-std-compatible dependency set; the ordinary native
-workspace retains its own lock. New dependencies require updating both locks and
-the Hermit vendor union. All application builds use `--locked --offline`.
-The selected local source, differences and content-addressed build provenance
-remain beside artifacts. Xen lifecycle, peer events and binary hashes remain in
+The process-local Git configuration never changes global Git settings. The ignored
+symlink selects the local builder, and the tool checks its HEAD against Cargo's
+pin and rejects modified transport files. In prepared lab artifacts only, it
+replaces the Git dependency with the copied local path. Both native tests and
+Hermit builds therefore consume the same reviewed local transport source, without
+fetching the published integration repository.
+
+The workstation tool prepares a reduced source workspace and generated Nix under
+`.airlock-logs/clipboard`, then invokes the local exported builders. `build` builds
+without booting; `prepare` only stages sources. It uses `lab.lock` for the small
+Hermit/musl build-std-compatible dependency set; the ordinary native workspace
+retains its own lock. New dependencies require updating both locks and the Hermit
+vendor union. Application builds use `--locked --offline`. Source files have their
+own content-addressed input, so changing diagnostic metadata does not rebuild the
+application. Source revisions, differences and build provenance remain beside
+artifacts. Xen lifecycle, peer events and binary hashes remain in
 `hermit-xen/.lab/runs`; two cycles reuse the same outer Xen/dom0 instance.
 
-For published consumption later, replace the local transport path with a Cargo
-Git dependency pinned to the reviewed `hermit-xen` revision, update both locks,
-and use the same revision in a Git flake input with `submodules=1`. Review the
-vendor fixed-output hash for that lock. No published repository is substituted
-during this development workflow.
+Airlock's existing package-source inventory includes the new workspace members;
+shared-lock Git hashes are recorded in the Rust application builder. This does not
+add a production Hermit package or VM. For published consumption later, publish
+the reviewed integration commit and remove the process-local Git redirection, or
+update Cargo's pin/lock and source hash to a subsequently reviewed revision. Use
+that same revision in a Git flake input with `submodules=1` and update the lab
+projection/vendor lock together. Until publication, a clean remote build cannot
+fetch this local-only commit; use the local workflow above.
 
 ## Subsequent deployment milestone
 

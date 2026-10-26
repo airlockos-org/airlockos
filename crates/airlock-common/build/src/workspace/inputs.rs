@@ -29,6 +29,8 @@ macro_rules! manifests {
 }
 
 const MANIFESTS: &[(&str, &str)] = manifests![
+    "airlock-clipboard-core",
+    "airlock-sys-clipboard",
     "airlock-config",
     "airlock-tests",
     "airlock-common/nix",

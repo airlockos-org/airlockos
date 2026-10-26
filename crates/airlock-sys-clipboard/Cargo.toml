@@ -14,12 +14,12 @@ linux-peer = ["lab-authority", "xen-transport/linux"]
 
 [dependencies]
 airlock-clipboard-core = { path = "../airlock-clipboard-core" }
-# Development link selected explicitly by clipboard-lab; never fetched from GitHub.
-xen-transport = { path = "../../.hermit-xen/crates/xen-transport" }
+# The pinned commit is supplied from the local integration repository during development.
+xen-transport = { git = "https://github.com/airlockos-org/hermit-xen", rev = "70f6f77034a2b1e077f91950e71033a2afd696e0" }
 
 [target.'cfg(target_os = "hermit")'.dependencies]
 hermit = { git = "https://github.com/hermit-os/hermit-rs", rev = "e9dc6784ad1a2dc6d18c6819ee51198cab9fb78a", default-features = false, features = ["pvh", "fsgsbase", "kernel-stack"] }
-xen-transport = { path = "../../.hermit-xen/crates/xen-transport", features = ["hermit"] }
+xen-transport = { git = "https://github.com/airlockos-org/hermit-xen", rev = "70f6f77034a2b1e077f91950e71033a2afd696e0", features = ["hermit"] }
 
 [[bin]]
 name = "sys-clipboard"

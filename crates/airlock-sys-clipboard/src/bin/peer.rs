@@ -98,9 +98,9 @@ impl Driver {
             let Ok(Response::Data(data)) = self.request(Request::Read { transfer, offset }) else {
                 panic!("paste frame missing")
             };
-            assert_eq!(
-                data.bytes(),
-                &expected[offset..(offset + CHUNK_SIZE).min(expected.len())]
+            assert!(
+                data.bytes() == &expected[offset..(offset + CHUNK_SIZE).min(expected.len())],
+                "paste content differs at offset {offset}"
             );
         }
         assert_eq!(

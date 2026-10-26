@@ -45,7 +45,5 @@ pub(super) fn module(workspace: &Workspace) -> NixValue {
 pub(crate) fn dependencies(pkgs: &NixValue, applications: &NixPath) -> NixValue {
     pkgs.clone()
         .select("rustPlatform.importCargoLock")
-        .call(nix_record! {
-            "lockFile": applications.join_relative("Cargo.lock").unwrap(),
-        })
+        .call(Workspace::new(applications.clone()).cargo_lock())
 }

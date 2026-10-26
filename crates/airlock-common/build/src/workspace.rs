@@ -83,6 +83,19 @@ impl Workspace {
         }
     }
 
+    /// Describe the shared Cargo lock and reviewed Git-source hashes for offline vendoring.
+    /// The whole lock is vendored even for Linux-only packages; these hashes do not
+    /// admit a Hermit image or change which applications a machine installs.
+    pub fn cargo_lock(&self) -> NixValue {
+        nix_record! {
+            "lockFile": self.file("Cargo.lock").snapshot(),
+            "outputHashes": nix_record! {
+                "hermit-0.13.2": "sha256-uY3bYdTgGjRRbg3MPPgfff3N+6AYEtTmJtjUTcSR+kk=",
+                "xen-transport-0.1.0": "sha256-zf3Mt1fv5dcNntCbEXsabZ3R5kJFmiEUK6B3pdAjoXs=",
+            },
+        }
+    }
+
     /// Return the workspace root for consumers that admit the complete application source.
     pub fn root(&self) -> NixPath {
         self.root.clone()
