@@ -1,6 +1,9 @@
 //! Shared setup session: command evidence, predicted changes and compatibility receipts.
 
-use super::report::{Counts, Mode, Schema, SetupReport};
+use super::{
+    policy::Paths,
+    report::{Counts, Mode, Schema, SetupReport},
+};
 use crate::model::CheckStatus;
 use crate::process::Runner;
 use anyhow::{Context, Result, ensure};
@@ -21,6 +24,8 @@ pub(super) struct Session {
     pub apply: bool,
     /// Child/helper receipts and command evidence belonging to this invocation.
     pub directory: PathBuf,
+    /// Selected policy execution paths, separate from the mutable diagnostic report.
+    pub policy_paths: Paths,
     /// Mutable compatibility receipt; not an authorization or transaction record.
     pub result: SetupReport,
     /// Legacy/manual or deployment generation map; checked boot carries its selection explicitly.
@@ -85,18 +90,7 @@ impl Session {
             .append(phase == "finish-only")
             .truncate(phase != "finish-only")
             .open(&command_log)?;
-        let policy_dir = path(
-            "AIRLOCK_QUBES_POLICY_DIR",
-            airlock_machine_core::services::policy_directory(),
-        );
-        let policy_name = std::env::var("AIRLOCK_QUBES_MANAGED_POLICY_FILE")
-            .unwrap_or_else(|_| airlock_machine_core::services::policy_filename().into());
-        ensure!(
-            Path::new(&policy_name)
-                .file_name()
-                .is_some_and(|name| name == policy_name.as_str()),
-            "invalid managed policy filename"
-        );
+        let policy_paths = Paths::configured(&directory)?;
         let result = SetupReport {
             schema: Schema::V1,
             status: CheckStatus::Failed,
@@ -118,10 +112,11 @@ impl Session {
             reason: "setup interrupted".into(),
             diagnostics: serde_json::from_value(json!({"topology":topology,
                 "live_actions_log":directory.join("setup-config-live-actions.jsonl"), "restart_actions_log":directory.join("setup-config-restart-actions.jsonl"), "unsupported_domains_log":directory.join("setup-config-unsupported-domains.jsonl"),
-                "qrexec_policy_file":policy_dir.join(&policy_name), "qrexec_policy_rendered":directory.join(format!("{policy_name}.rendered")), "command_log":command_log}))?,
+                "qrexec_policy_file":policy_paths.target(), "qrexec_policy_rendered":policy_paths.rendered(), "command_log":command_log}))?,
         };
         Ok(Self {
             topology: decoded,
+            policy_paths,
             apply,
             directory,
             staged: std::env::var_os("AIRLOCK_STAGED_GENERATIONS").map(PathBuf::from),
@@ -301,6 +296,33 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Compatibility diagnostics are projections of selected paths, with no reverse conversion.
+    #[test]
+    fn report_paths_match_the_typed_session_selection() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let topology = temporary.path().join("topology.json");
+        fs::write(
+            &topology,
+            br#"{"schema":"airlock.qubes-topology.v1","domains":{}}"#,
+        )?;
+        let session = Session::at(
+            &topology,
+            false,
+            "all",
+            "all",
+            temporary.path().join("logs"),
+        )?;
+        assert_eq!(
+            session.result.diagnostics["qrexec_policy_file"],
+            json!(session.policy_paths.target())
+        );
+        assert_eq!(
+            session.result.diagnostics["qrexec_policy_rendered"],
+            json!(session.policy_paths.rendered())
+        );
+        Ok(())
+    }
 
     /// Invalid input retains its read diagnostic and does not truncate earlier setup evidence.
     #[test]

@@ -22,7 +22,7 @@ Existing transport, persistence, diagnostic and upstream formats stay in place.
    [storage callbacks](../crates/airlock-qubes-python/src/storage.rs),
    [engine dispatch](../crates/airlock-dom0/service/src/store/qubes_inspect.rs).
 
-3. [ ] **Stop retrieving executable setup parameters from diagnostic JSON.**
+3. [x] **Stop retrieving executable setup parameters from diagnostic JSON.**
    Store policy installation and preview paths as typed session fields. Use those
    fields during setup; copy their values into diagnostics only for reporting.
    Sources: [session](../crates/airlock-dom0/service/src/setup_config/runtime.rs),

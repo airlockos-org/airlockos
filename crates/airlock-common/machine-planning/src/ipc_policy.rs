@@ -426,11 +426,66 @@ impl CheckedPolicy {
     }
 }
 
-/// One exact target and checked policy awaiting durable publication; it cannot request a refresh.
+/// Publication and informational preview paths selected together, without diagnostic JSON.
+/// Filesystem resolution and the configured policy-directory check remain adapter duties.
 ///
 /// ```compile_fail
 /// use airlock_machine_planning::ipc_policy::{CheckedPolicy, Installation};
-/// let pending = Installation::new("/policy/90-airlock.policy".into(), CheckedPolicy::new(vec![])).unwrap();
+/// let bypass = Installation::new("/preview".into(), CheckedPolicy::new(vec![]));
+/// ```
+pub struct PolicyPaths {
+    // Sole destination allowed to become an executable publication request.
+    target: String,
+    // Informational output, excluded from publication authority.
+    rendered: String,
+}
+
+impl View for PolicyPaths {
+    type V = (Seq<char>, Seq<char>);
+
+    closed spec fn view(&self) -> Self::V { (self.target@, self.rendered@) }
+}
+
+impl PolicyPaths {
+    #[verifier::type_invariant]
+    closed spec fn valid(&self) -> bool {
+        self.target@.len() > 0 && self.rendered@.len() > 0 && self.target@ != self.rendered@
+    }
+
+    /// Refuse missing or identical destinations while preserving both exact path identities.
+    pub fn new(target: String, rendered: String) -> (out: Option<Self>)
+        ensures out.is_some() == (target@.len() > 0 && rendered@.len() > 0 && target@ != rendered@),
+            out.is_some() ==> out.unwrap()@ == (target@, rendered@),
+    {
+        if target.is_empty() || rendered.is_empty() || target == rendered { None }
+        else { Some(Self { target, rendered }) }
+    }
+
+    /// Borrow the selected installation destination.
+    pub fn target(&self) -> (out: &str)
+        ensures out@ == self@.0,
+    { self.target.as_str() }
+
+    /// Borrow the separate informational preview destination.
+    pub fn rendered(&self) -> (out: &str)
+        ensures out@ == self@.1,
+    { self.rendered.as_str() }
+
+    /// Bind publication to this selection's target and exact checked policy, accepting no replacement path.
+    pub fn installation(&self, policy: CheckedPolicy) -> (out: Installation)
+        ensures out@ == (self@.0, policy@),
+    {
+        proof { use_type_invariant(self); }
+        Installation::new(self.target.as_str().to_string(), policy).unwrap()
+    }
+}
+
+/// One exact target and checked policy awaiting durable publication; it cannot request a refresh.
+///
+/// ```compile_fail
+/// use airlock_machine_planning::ipc_policy::{CheckedPolicy, PolicyPaths};
+/// let paths = PolicyPaths::new("/policy/90-airlock.policy".into(), "/logs/preview".into()).unwrap();
+/// let pending = paths.installation(CheckedPolicy::new(vec![]));
 /// let request = pending.request();
 /// ```
 pub struct Installation {
@@ -448,7 +503,7 @@ impl View for Installation {
 
 impl Installation {
     /// Bind a nonempty target to the complete checked policy before any publication effect.
-    pub fn new(target: String, policy: CheckedPolicy) -> (out: Option<Self>)
+    fn new(target: String, policy: CheckedPolicy) -> (out: Option<Self>)
         ensures out.is_some() == (target@.len() > 0), out.is_some() ==> out.unwrap()@ == (target@, policy@),
     {
         if target.is_empty() { return None; }

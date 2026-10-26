@@ -113,7 +113,8 @@ pub(crate) fn execute(request: Request) -> Result<()> {
             apply,
         } => {
             let raw: serde_json::Value = crate::state::configuration(&topology)?;
-            let changed = policy::reconcile(&raw, &rendered, &target, apply)?;
+            let paths = policy::Paths::new(&target, &rendered)?;
+            let changed = policy::reconcile(&raw, &paths, apply)?;
             println!("{changed}");
         }
         Action::Finalize { result } => report::finalize(&result)?,

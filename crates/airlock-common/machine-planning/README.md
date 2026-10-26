@@ -29,6 +29,10 @@ explicit source exception rather than an allowed target. Unsupported fields/acti
 fail instead of silently disappearing. JSON decoding is a trusted adapter (`wire`);
 the actual decoding decisions and renderer execute their Verus-checked bodies.
 
+Setup retains policy destinations as an opaque selection rather than reading them
+from diagnostic JSON. Its verified publication constructor binds only the selected
+target; the informational preview cannot replace it. Native path conversion,
+filesystem canonicalization and configured-directory checks remain adapter duties.
 Publication and refresh types retain that complete policy and its exact target.
 The filesystem adapter obtains publication evidence only after fsync/rename and
 readback; the service adapter consumes its request's fixed argument vectors.

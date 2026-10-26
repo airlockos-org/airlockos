@@ -1,7 +1,7 @@
 //! Exercise exact policy projection and publication-bound refresh capabilities without external effects.
 
 use airlock_machine_planning::ipc_policy::{
-    Argument, CheckedPolicy, Declaration, Endpoint, Installation, RefreshKind, RefreshOutcome,
+    Argument, CheckedPolicy, Declaration, Endpoint, PolicyPaths, RefreshKind, RefreshOutcome,
     Service,
 };
 
@@ -100,11 +100,9 @@ fn unsupported_or_broader_rules_fail_closed() {
 #[test]
 fn refresh_preserves_the_complete_original_policy_binding() {
     let make = || {
-        Installation::new(
-            "/policy/90-airlock.policy".into(),
-            CheckedPolicy::decode(declarations()).unwrap(),
-        )
-        .unwrap()
+        PolicyPaths::new("/policy/90-airlock.policy".into(), "/logs/preview".into())
+            .unwrap()
+            .installation(CheckedPolicy::decode(declarations()).unwrap())
     };
     let install = make();
     assert!(
@@ -161,6 +159,34 @@ fn refresh_preserves_the_complete_original_policy_binding() {
                 "substituted",
                 RefreshOutcome::Running
             )
+            .is_none()
+    );
+}
+
+/// Selection preserves both path roles, while only its target can bind publication and refresh.
+#[test]
+fn selected_paths_bind_publication_without_preview_or_target_substitution() {
+    for (target, rendered) in [
+        ("", "/logs/preview"),
+        ("/policy/live.policy", ""),
+        ("/same", "/same"),
+    ] {
+        assert!(PolicyPaths::new(target.into(), rendered.into()).is_none());
+    }
+    let paths = PolicyPaths::new("/policy/live.policy".into(), "/logs/preview".into()).unwrap();
+    assert_eq!(paths.target(), "/policy/live.policy");
+    assert_eq!(paths.rendered(), "/logs/preview");
+    let installation = paths.installation(CheckedPolicy::decode(declarations()).unwrap());
+    assert_eq!(installation.target(), paths.target());
+    let text = installation.text().to_owned();
+    assert!(installation.published(paths.rendered(), &text).is_none());
+    let installation = paths.installation(CheckedPolicy::decode(declarations()).unwrap());
+    let published = installation.published(paths.target(), &text).unwrap();
+    let request = published.request();
+    assert_eq!(request.target(), paths.target());
+    assert!(
+        request
+            .complete(paths.rendered(), &text, RefreshOutcome::Running)
             .is_none()
     );
 }

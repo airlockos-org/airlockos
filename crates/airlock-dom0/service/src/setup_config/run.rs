@@ -185,20 +185,13 @@ fn preflight(session: &Session) -> Result<()> {
     Ok(())
 }
 
-/// Prepare the reusable global resources and labels used by the selected VM scope.
-fn prepare(session: &mut Session, domains: &[String]) -> Result<()> {
-    preflight(session)?;
-    let rendered = PathBuf::from(
-        session.result.diagnostics["qrexec_policy_rendered"]
-            .as_str()
-            .unwrap(),
-    );
-    let target = PathBuf::from(
-        session.result.diagnostics["qrexec_policy_file"]
-            .as_str()
-            .unwrap(),
-    );
-    if policy::reconcile(&session.topology, &rendered, &target, session.apply)? {
+/// Publish selected policy paths directly; the compatibility report is output, never execution input.
+fn prepare_policy(
+    session: &mut Session,
+    reconcile: impl FnOnce(&Value, &policy::Paths, bool) -> Result<bool>,
+) -> Result<()> {
+    if reconcile(&session.topology, &session.policy_paths, session.apply)? {
+        let target = session.policy_paths.target().to_owned();
         session.count("qrexec_policy_changed")?;
         session.action(
             "qrexec-policy",
@@ -211,6 +204,13 @@ fn prepare(session: &mut Session, domains: &[String]) -> Result<()> {
             target.to_str().context("policy path")?,
         )?;
     }
+    Ok(())
+}
+
+/// Prepare the reusable global resources and labels used by the selected VM scope.
+fn prepare(session: &mut Session, domains: &[String]) -> Result<()> {
+    preflight(session)?;
+    prepare_policy(session, policy::reconcile)?;
     globals(session, false)?;
     let kernels = session.topology["kernels"]
         .as_object()
@@ -526,6 +526,60 @@ pub(super) fn execute(request: Request) -> Result<()> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Missing, redirected or malformed policy diagnostics cannot change execution destinations.
+    #[test]
+    fn policy_preparation_uses_selected_paths_instead_of_diagnostics() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let topology = temporary.path().join("topology.json");
+        fs::write(
+            &topology,
+            serde_json::to_vec(&json!({"schema":"airlock.qubes-topology.v1","domains":{}}))?,
+        )?;
+        let logs = temporary.path().join("logs");
+        let mut session = Session::at(&topology, false, "all", "all", logs.clone())?;
+        let target = temporary.path().join("selected.policy");
+        let rendered = logs.join("selected.rendered");
+        session.policy_paths = policy::Paths::new(&target, &rendered)?;
+        for (file, preview) in [
+            (None, None),
+            (
+                Some(json!("/wrong/redirect.policy")),
+                Some(json!("/wrong/preview")),
+            ),
+            (Some(json!(false)), Some(json!({"malformed":true}))),
+        ] {
+            session.result.diagnostics.remove("qrexec_policy_file");
+            session.result.diagnostics.remove("qrexec_policy_rendered");
+            if let Some(file) = file {
+                session
+                    .result
+                    .diagnostics
+                    .insert("qrexec_policy_file".into(), file);
+            }
+            if let Some(preview) = preview {
+                session
+                    .result
+                    .diagnostics
+                    .insert("qrexec_policy_rendered".into(), preview);
+            }
+            let mut dispatched = false;
+            prepare_policy(&mut session, |_, paths, apply| {
+                assert_eq!(paths.target(), target);
+                assert_eq!(paths.rendered(), rendered);
+                assert!(!apply);
+                dispatched = true;
+                Ok(true)
+            })?;
+            assert!(dispatched);
+            assert_eq!(
+                session.result.live_actions.last().unwrap()["value"],
+                json!(target)
+            );
+        }
+        assert!(!target.exists());
+        Ok(())
+    }
 
     /// Boot-critical setup closes only local NetVM dependencies; deferred setup is its complement.
     #[test]

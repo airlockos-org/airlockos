@@ -23,8 +23,8 @@
 
 use crate::process::Runner;
 use airlock_machine_planning::ipc_policy::{
-    CheckedPolicy, Declaration, Installation, PublishedPolicy, RefreshKind, RefreshOutcome,
-    RefreshRequest,
+    CheckedPolicy, Declaration, Installation, PolicyPaths, PublishedPolicy, RefreshKind,
+    RefreshOutcome, RefreshRequest,
 };
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
@@ -278,11 +278,75 @@ impl Service for Systemd {
     }
 }
 
+/// Selected execution destinations; reporting can borrow them but cannot reconstruct this binding.
+pub(super) struct Paths {
+    // Verified role binding, retained through preview creation and publication selection.
+    binding: PolicyPaths,
+}
+
+impl Paths {
+    /// Select the configured target and its setup-local informational preview.
+    pub(super) fn configured(logs: &Path) -> Result<Self> {
+        let target = configured_target()?;
+        let name = target
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("policy filename")?;
+        Self::new(&target, &logs.join(format!("{name}.rendered")))
+    }
+
+    /// Preserve native path roles; alias and daemon-directory checks remain at the I/O boundary.
+    pub(super) fn new(target: &Path, rendered: &Path) -> Result<Self> {
+        let target = target
+            .to_str()
+            .context("policy target is not UTF-8")?
+            .to_owned();
+        let rendered = rendered
+            .to_str()
+            .context("policy preview is not UTF-8")?
+            .to_owned();
+        Ok(Self {
+            binding: PolicyPaths::new(target, rendered)
+                .context("policy target and preview must be nonempty and distinct")?,
+        })
+    }
+
+    /// Exact selected installation destination, independent of diagnostic JSON.
+    pub(super) fn target(&self) -> &Path {
+        Path::new(self.binding.target())
+    }
+
+    /// Exact selected informational output, independent of diagnostic JSON.
+    pub(super) fn rendered(&self) -> &Path {
+        Path::new(self.binding.rendered())
+    }
+
+    /// Resolve both destinations together, then retain their distinct roles at publication.
+    fn canonical(&self) -> Result<Self> {
+        Self::new(&coordinate(self.target())?, &coordinate(self.rendered())?)
+    }
+}
+
+/// The installed daemon path contract; explicit overrides retain the administrative trust boundary.
+fn configured_target() -> Result<PathBuf> {
+    let directory = std::env::var_os("AIRLOCK_QUBES_POLICY_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| airlock_machine_core::services::policy_directory().into());
+    let name = std::env::var("AIRLOCK_QUBES_MANAGED_POLICY_FILE")
+        .unwrap_or_else(|_| airlock_machine_core::services::policy_filename().into());
+    ensure!(
+        Path::new(&name)
+            .file_name()
+            .is_some_and(|filename| filename == name.as_str()),
+        "invalid managed policy filename"
+    );
+    Ok(directory.join(name))
+}
+
 /// Refresh even an unchanged file: a previous attempt may have crashed after rename or failed reload.
-fn reconcile_with(
+fn reconcile_paths(
     topology: &Value,
-    rendered: &Path,
-    target: &Path,
+    paths: &Paths,
     apply: bool,
     service: &mut impl Service,
     checkpoint: &mut impl FnMut(Boundary) -> Result<()>,
@@ -292,8 +356,9 @@ fn reconcile_with(
         policy.text().len() as u64 <= LIMIT,
         "rendered policy exceeds size limit"
     );
-    let target = coordinate(target)?;
-    let rendered = coordinate(rendered)?;
+    let paths = paths.canonical()?;
+    let target = paths.target();
+    let rendered = paths.rendered();
     let filename = target
         .file_name()
         .and_then(|name| name.to_str())
@@ -323,20 +388,16 @@ fn reconcile_with(
     } else {
         None
     };
-    let old = current(&target)?;
+    let old = current(target)?;
     let changed = old.as_deref() != Some(policy.text());
     // Atomic preview publication also avoids following an existing preview symlink/hard link.
-    atomic(&rendered, policy.text(), &mut |_| Ok(()))?;
+    atomic(rendered, policy.text(), &mut |_| Ok(()))?;
     if !apply {
         return Ok(changed);
     }
     let lock = lock.as_ref().context("policy writer lock")?;
     lock.check()?;
-    let target_text = target
-        .to_str()
-        .context("policy path is not UTF-8")?
-        .to_owned();
-    let installation = Installation::new(target_text, policy).context("empty policy target")?;
+    let installation = paths.binding.installation(policy);
     let request = publish(installation, checkpoint)?.request();
     checkpoint(Boundary::BeforeRefresh)?;
     let refreshed = service.refresh(&request, RefreshKind::Reload)?
@@ -358,32 +419,32 @@ fn reconcile_with(
 
 /// Validate the entire policy, durably publish its exact encoding, and require a running refreshed daemon.
 /// The return value reports byte changes; even false still requires refresh acknowledgment in apply mode.
-pub(super) fn reconcile(
+pub(super) fn reconcile(topology: &Value, paths: &Paths, apply: bool) -> Result<bool> {
+    // Preserve the installed daemon's path check for both setup and explicit administrative callers.
+    ensure!(
+        coordinate(paths.target())? == coordinate(&configured_target()?)?,
+        "policy target differs from the configured daemon policy file"
+    );
+    reconcile_paths(topology, paths, apply, &mut Systemd, &mut |_| Ok(()))
+}
+
+/// Keep interruption scenarios focused on real I/O while exercising the typed production boundary.
+#[cfg(test)]
+fn reconcile_with(
     topology: &Value,
     rendered: &Path,
     target: &Path,
     apply: bool,
+    service: &mut impl Service,
+    checkpoint: &mut impl FnMut(Boundary) -> Result<()>,
 ) -> Result<bool> {
-    // Normal deployment and boot share the installed directory with the daemon constructor.
-    // Explicit development/admin overrides must configure the daemon to read that directory too.
-    let directory = std::env::var_os("AIRLOCK_QUBES_POLICY_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| airlock_machine_core::services::policy_directory().into());
-    let name = std::env::var("AIRLOCK_QUBES_MANAGED_POLICY_FILE")
-        .unwrap_or_else(|_| airlock_machine_core::services::policy_filename().into());
-    ensure!(
-        Path::new(&name)
-            .file_name()
-            .is_some_and(|filename| filename == name.as_str()),
-        "invalid managed policy filename"
-    );
-    ensure!(
-        coordinate(target)? == coordinate(&directory.join(name))?,
-        "policy target differs from the configured daemon policy file"
-    );
-    reconcile_with(topology, rendered, target, apply, &mut Systemd, &mut |_| {
-        Ok(())
-    })
+    reconcile_paths(
+        topology,
+        &Paths::new(target, rendered)?,
+        apply,
+        service,
+        checkpoint,
+    )
 }
 
 #[cfg(test)]
