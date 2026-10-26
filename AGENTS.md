@@ -86,6 +86,9 @@
 These are the authoritative standards for first-party Rust in this repository,
 including development tools and examples. `crates/Cargo.toml` is the application
 workspace; `tools/rust-style/Cargo.toml` is a separate development workspace.
+`crates/airlock-store-packer/Cargo.toml` has its own workspace and lockfile so
+unrelated application changes cannot invalidate every image fragment. Its format
+implementation is shared with runtime artifact transfer and follows these standards.
 `airlock-machine/` is an independent repository with its own instructions;
 vendored, generated and build output is outside this policy's editing scope.
 There are currently no nested first-party Rust `AGENTS.md` files to reconcile.
@@ -156,7 +159,7 @@ full Rust check workflow directly. Quick test execution never provisions these t
 
 ```sh
 make dev-tools-build    # explicitly prepare native workstation tools
-make rust-fmt           # stable rustfmt for both workspaces
+make rust-fmt           # stable rustfmt for application, tooling and packer workspaces
 make rust-fmt-check     # check without editing
 make rust-spacing      # syntax-based check, locations and nonzero exit on gaps
 make rust-spacing-fix  # run rustfmt first, then insert missing blank lines
@@ -203,7 +206,7 @@ opaque snippets; generated declarations must be reviewed at their macro template
 - Changed documentation code examples: verify the affected examples with focused
   doctests or example checks.
 - Rust code, dependencies or build tooling: run appropriate tests, formatting
-  checks and Clippy (`make rust-check` covers both workspaces).
+  checks and Clippy (`make rust-check` covers application, tooling and packer workspaces).
 - Public API code or documentation-lint setup: also run strict rustdoc, as above;
   `make rust-doc` adds `--all-features` to cover the shared runtime and job-writer APIs.
 

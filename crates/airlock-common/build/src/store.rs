@@ -4,11 +4,46 @@
 use crate::{Application, Workspace};
 use rusix::{
     interop::{
-        NixExpression,
+        NixExpression, Package,
         raw::{NixRepresentation, NixValue},
     },
     nix_record, nix_text,
 };
+
+/// Build the format-only tool from an independently locked source root.
+/// Application manifests, lockfile, feature graph and authoring code never enter this derivation.
+pub(crate) fn packer(pkgs: &NixValue, workspace: &Workspace) -> Package {
+    let root = workspace.file("airlock-store-packer");
+    let manifest: toml::Value =
+        toml::from_str(include_str!("../../../airlock-store-packer/Cargo.toml"))
+            .expect("valid standalone packer manifest");
+    let source = pkgs
+        .clone()
+        .select("lib.fileset.toSource")
+        .call(nix_record! {
+            "root": root.clone(),
+            "fileset": pkgs.clone().select("lib.fileset.unions").call(NixValue::list([
+                root.join_relative("Cargo.toml").unwrap().as_expression(),
+                root.join_relative("Cargo.lock").unwrap().as_expression(),
+                root.join_relative("src").unwrap().as_expression(),
+            ])),
+        });
+
+    Package::from_expression(pkgs.clone().select("rustPlatform.buildRustPackage").call(nix_record! {
+        "pname": "airlock-store-packer",
+        "version": manifest["package"]["version"].as_str().unwrap(),
+        "src": source,
+        "cargoLock": nix_record! { "lockFile": root.join_relative("Cargo.lock").unwrap().snapshot() },
+        "cargoBuildFlags": NixValue::list(["--bin".into(), "airlock-store-packer".into()]),
+        "doCheck": false,
+        "meta": nix_record! {
+            "description": "Canonical immutable package fragment packing",
+            "mainProgram": "airlock-store-packer",
+            "license": pkgs.clone().select("lib.licenses.mit"),
+            "platforms": pkgs.clone().select("lib.platforms.linux"),
+        },
+    }))
+}
 
 /// Restore a known realized store root's dependency context without copying or renaming its contents.
 fn store_path(path: NixValue) -> NixValue {
@@ -45,7 +80,7 @@ fn fragment(pkgs: &NixValue, tool: &NixValue, logical: NixValue) -> NixValue {
         })
         .call(nix_text!(
             r#"
-        exec {tool}/bin/airlock-store-cache fragment {logical} {source} "$out"
+        exec {tool}/bin/airlock-store-packer fragment {logical} {source} "$out"
     "#,
             tool = tool.clone(),
             logical = pkgs.clone().select("lib.escapeShellArg").call(logical),
@@ -85,6 +120,9 @@ pub fn image_cache(pkgs: &NixValue, workspace: &Workspace, closures: NixValue) -
     let tool = Application::StoreCache
         .build(pkgs, workspace)
         .as_expression();
+    let packer = Application::StorePacker
+        .build(pkgs, workspace)
+        .as_expression();
     let path_sets = NixValue::builtin("map")
         .call(NixValue::function(|closure| {
             let paths = lib
@@ -113,7 +151,7 @@ pub fn image_cache(pkgs: &NixValue, workspace: &Workspace, closures: NixValue) -
             .clone()
             .select("genAttrs")
             .call(paths)
-            .call(NixValue::function(|path| fragment(pkgs, &tool, path)));
+            .call(NixValue::function(|path| fragment(pkgs, &packer, path)));
 
         fragments.bind(|fragments| {
             let indexes = NixValue::builtin("map")

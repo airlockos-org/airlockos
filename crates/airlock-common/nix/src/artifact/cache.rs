@@ -1,7 +1,7 @@
 //! Nix caches each package's canonical tar bytes separately from VM identities and pool placement.
 //! Index identities describe the concatenated fragments, so changing physical segments cannot invalidate them.
 
-use super::{create_tar_fragment, tree_hash, util::*, validate_store_path};
+use super::util::*;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -15,20 +15,7 @@ use std::{
     process::Command,
 };
 
-/// Cached fragment's content identity, independent of the pool that will receive it.
-#[derive(Clone, Deserialize, Serialize)]
-pub struct Fragment {
-    /// Version of the build-time fragment representation.
-    pub schema: String,
-    /// Exact logical store root whose basename is the archive's only top-level entry.
-    pub path: String,
-    /// Canonical tree identity used by ordinary pool admission.
-    pub tree_hash: String,
-    /// Length of the tar stream without its two terminating zero blocks.
-    pub size: u64,
-    /// SHA-256 of those exact fragment bytes.
-    pub sha256: String,
-}
+pub use airlock_store_packer::{Fragment, fragment, pack};
 
 /// Common EROFS metadata before injecting a VM's private builder identity.
 #[derive(Clone, Deserialize, Serialize)]
@@ -51,52 +38,6 @@ fn digest(value: &str) -> Result<()> {
         "invalid cached digest"
     );
     Ok(())
-}
-
-/// Read a Nix-produced descriptor and reject a mismatched path or malformed byte range.
-/// Payload bytes are checked while appending to the destination pool, avoiding another full read here.
-pub fn fragment(directory: &Path, logical: &str) -> Result<Fragment> {
-    validate_store_path(logical)?;
-    let value: Fragment = serde_json::from_reader(File::open(directory.join("metadata.json"))?)?;
-    ensure!(
-        value.schema == "airlock.store-fragment.v1" && value.path == logical,
-        "cached fragment identity mismatch"
-    );
-    digest(&value.sha256)?;
-    digest(&value.tree_hash)?;
-    let metadata = fs::symlink_metadata(directory.join("object.tar"))?;
-    ensure!(
-        metadata.is_file()
-            && metadata.len() == value.size
-            && value.size > 0
-            && value.size.is_multiple_of(512),
-        "cached fragment length mismatch"
-    );
-    Ok(value)
-}
-
-/// Pack one immutable package into a fresh output using the same representation as qrexec transfer.
-pub fn pack(logical: &str, source: &Path, output: &Path) -> Result<Fragment> {
-    validate_store_path(logical)?;
-    ensure!(
-        source.file_name() == Path::new(logical).file_name(),
-        "cached source basename mismatch"
-    );
-
-    fs::create_dir(output)?;
-    let tree_hash = tree_hash(source)?;
-    let path = output.join("object.tar");
-    create_tar_fragment(source, &path)?;
-
-    let value = Fragment {
-        schema: "airlock.store-fragment.v1".into(),
-        path: logical.into(),
-        tree_hash,
-        size: fs::metadata(&path)?.len(),
-        sha256: hash(&path)?,
-    };
-    fs::write(output.join("metadata.json"), serde_json::to_vec(&value)?)?;
-    Ok(value)
 }
 
 // Preserve the original pool layout digest's sorted JSON and Python-compatible separators.

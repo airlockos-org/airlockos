@@ -150,15 +150,18 @@ airlock-dom0-check: rust-spacing
 AIRLOCK_CARGO_VENDOR ?= /etc/airlock/authoring/vendor
 AUTHORING_CRATES := airlock-machine crates/airlock-config/templates/initial-runtime-config
 RUST_STYLE_MANIFEST := tools/rust-style/Cargo.toml
+STORE_PACKER_MANIFEST := crates/airlock-store-packer/Cargo.toml
 
 rust-fmt:
 	cargo fmt --manifest-path crates/Cargo.toml --all
 	cargo fmt --manifest-path $(RUST_STYLE_MANIFEST) --all
+	cargo fmt --manifest-path $(STORE_PACKER_MANIFEST) --all
 	@for crate in $(AUTHORING_CRATES); do cargo fmt --manifest-path "$$crate/Cargo.toml" --all || exit; done
 
 rust-fmt-check:
 	cargo fmt --manifest-path crates/Cargo.toml --all -- --check
 	cargo fmt --manifest-path $(RUST_STYLE_MANIFEST) --all -- --check
+	cargo fmt --manifest-path $(STORE_PACKER_MANIFEST) --all -- --check
 	@for crate in $(AUTHORING_CRATES); do cargo fmt --manifest-path "$$crate/Cargo.toml" --all -- --check || exit; done
 
 rust-spacing:
@@ -173,11 +176,14 @@ rust-style-test:
 
 rust-doc:
 	RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked --manifest-path crates/Cargo.toml
+	CARGO_TARGET_DIR="$(abspath $(or $(CARGO_TARGET_DIR),crates/target))" RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked --manifest-path $(STORE_PACKER_MANIFEST)
 
 rust-check: rust-fmt-check rust-spacing rust-style-test rust-doc rust-authoring-check native-integration-build
 	cargo clippy --workspace --all-targets --all-features --locked --manifest-path crates/Cargo.toml -- -D warnings
 	cargo clippy --all-targets --locked --manifest-path $(RUST_STYLE_MANIFEST) -- -D warnings
+	CARGO_TARGET_DIR="$(abspath $(or $(CARGO_TARGET_DIR),crates/target))" cargo clippy --all-targets --locked --manifest-path $(STORE_PACKER_MANIFEST) -- -D warnings
 	cargo test --workspace --all-features --locked --manifest-path crates/Cargo.toml
+	CARGO_TARGET_DIR="$(abspath $(or $(CARGO_TARGET_DIR),crates/target))" cargo test --locked --manifest-path $(STORE_PACKER_MANIFEST)
 
 .PHONY: verify verify-prepare
 # Explicit prover preparation is separate from ordinary Cargo and test-quick.

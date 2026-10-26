@@ -149,17 +149,38 @@ fn filtered_sources_preserve_cache_keys_and_compile() -> Result<()> {
         vendor["derivations"]["init"],
         dependency["derivations"]["init"]
     );
+    assert_eq!(
+        vendor["derivations"]["packer"],
+        dependency["derivations"]["packer"]
+    );
+
+    // Workspace resolution metadata must not invalidate independently locked package fragments.
+    for path in [
+        "Cargo.toml",
+        "Cargo.lock",
+        "airlock-dom0/service/Cargo.toml",
+    ] {
+        writeln!(
+            fs::OpenOptions::new()
+                .append(true)
+                .open(workspace.join(path))?,
+            "\n# unrelated application change"
+        )?;
+    }
+    let manifests = inspect(root, &workspace, "source-workspace-lock-change", &cases)?;
+    assert_eq!(
+        dependency["derivations"]["packer"],
+        manifests["derivations"]["packer"]
+    );
+    assert_ne!(
+        dependency["derivations"]["cli"],
+        manifests["derivations"]["cli"]
+    );
 
     change(&workspace.join("airlock-sys-ctrl/gui/examples/diff-context/usr-home.before.rs"))?;
     let asset = inspect(root, &workspace, "source-asset-change", &cases)?;
-    assert_ne!(
-        dependency["derivations"]["gui"],
-        asset["derivations"]["gui"]
-    );
-    assert_eq!(
-        dependency["derivations"]["cli"],
-        asset["derivations"]["cli"]
-    );
+    assert_ne!(manifests["derivations"]["gui"], asset["derivations"]["gui"]);
+    assert_eq!(manifests["derivations"]["cli"], asset["derivations"]["cli"]);
 
     // Embedded binary assets must invalidate the owning package independently of Rust examples.
     let font = workspace.join("airlock-sys-ctrl/gui/assets/fonts/Inter-Regular.ttf");
@@ -169,6 +190,24 @@ fn filtered_sources_preserve_cache_keys_and_compile() -> Result<()> {
     let font = inspect(root, &workspace, "source-font-change", &cases)?;
     assert_ne!(asset["derivations"]["gui"], font["derivations"]["gui"]);
     assert_eq!(asset["derivations"]["cli"], font["derivations"]["cli"]);
+
+    change(&workspace.join("airlock-store-packer/src/lib.rs"))?;
+    let packing = inspect(root, &workspace, "source-packing-change", &cases)?;
+    assert_ne!(
+        font["derivations"]["packer"],
+        packing["derivations"]["packer"]
+    );
+    writeln!(
+        fs::OpenOptions::new()
+            .append(true)
+            .open(workspace.join("airlock-store-packer/Cargo.lock"))?,
+        "\n# independently locked packing dependencies"
+    )?;
+    let packing_lock = inspect(root, &workspace, "source-packing-lock-change", &cases)?;
+    assert_ne!(
+        packing["derivations"]["packer"],
+        packing_lock["derivations"]["packer"]
+    );
 
     let target = PathBuf::from(
         std::env::var_os("AIRLOCK_FILTERED_CARGO_TARGET_DIR")

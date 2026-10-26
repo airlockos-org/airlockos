@@ -41,6 +41,7 @@ pub(super) fn sources(inputs: NixValue, settings: &serde_json::Value) -> Result<
         ("init", airlock_build::Application::VmInit),
         ("cli", airlock_build::Application::Cli),
         ("gui", airlock_build::Application::ControllerGui),
+        ("packer", airlock_build::Application::StorePacker),
     ]
     .map(|(name, application)| {
         (

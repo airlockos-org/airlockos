@@ -13,6 +13,8 @@ mod util;
 
 pub use root::{RootDescriptor, decode as decode_root, encode as encode_root};
 
+pub use airlock_store_packer::{create_tar_fragment, tree_hash, validate_store_path};
+
 use crate::runtime::process::OwnedChild;
 use crate::{admission::AdmissionReceipt, identity::SourceIdentity};
 use anyhow::{Context, Result, ensure};
@@ -71,23 +73,6 @@ pub struct Source {
     pub path_info: Option<Value>,
 }
 
-/// Reject malformed store roots at the cross-VM artifact boundary.
-pub fn validate_store_path(path: &str) -> Result<&str> {
-    let name = entry(path)?;
-    let (hash, name) = name
-        .split_once('-')
-        .context("invalid Nix artifact basename")?;
-    ensure!(
-        hash.len() == 32
-            && hash
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
-            && !name.is_empty(),
-        "invalid Nix store path in artifact"
-    );
-    Ok(path)
-}
-
 /// Reject uncommitted or malformed source provenance before requesting package bytes.
 pub fn validate_provenance(revision: &str, lock: &str) -> Result<()> {
     ensure!(
@@ -127,56 +112,6 @@ pub fn write_message(output: &mut dyn Write, value: &Value) -> Result<()> {
     ensure!(data.len() <= MAX_MESSAGE, "pool message exceeds size limit");
     output.write_all(&data)?;
     output.flush()?;
-    Ok(())
-}
-
-/// Compute the canonical tree identity used by the pool and transfer receiver.
-pub fn tree_hash(path: &Path) -> Result<String> {
-    util::tree_hash(path)
-}
-
-/// Build a deterministic POSIX tar fragment without its two terminating zero blocks.
-pub fn create_tar_fragment(source: &Path, target: &Path) -> Result<()> {
-    let output = Command::new("tar")
-        .args([
-            "--format=posix",
-            "--pax-option=exthdr.name=%d/PaxHeaders/%f,delete=atime,delete=ctime",
-            "--hard-dereference",
-            "--sort=name",
-            "--numeric-owner",
-            "--owner=0",
-            "--group=0",
-            "--mtime=@1",
-            "--blocking-factor=1",
-            "-cf",
-        ])
-        .arg(target)
-        .arg("-C")
-        .arg(source.parent().context("object source has no parent")?)
-        .arg("--")
-        .arg(source.file_name().context("object source has no name")?)
-        .stdin(Stdio::null())
-        .output()?;
-    ensure!(
-        output.status.success(),
-        "tar failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    use std::io::{Seek, SeekFrom};
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(target)?;
-    let size = file.metadata()?.len();
-    ensure!(
-        size >= 1024 && size % 512 == 0,
-        "invalid tar fragment length"
-    );
-    file.seek(SeekFrom::Start(size - 1024))?;
-    let mut trailer = [0; 1024];
-    file.read_exact(&mut trailer)?;
-    ensure!(trailer == [0; 1024], "nonstandard tar EOF");
-    file.set_len(size - 1024)?;
     Ok(())
 }
 

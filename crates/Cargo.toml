@@ -1,5 +1,5 @@
 [workspace]
-exclude = ["vendor/rusix"]
+exclude = ["vendor/rusix", "airlock-store-packer"]
 members = [
     "airlock-config",
     "airlock-tests",

@@ -16,6 +16,8 @@ pub enum Application {
     PrepareBoot,
     /// Independently cacheable package fragments and common store indexes used only during image builds.
     StoreCache,
+    /// Canonical package packing with its own workspace and lockfile, independent of runtime policy.
+    StorePacker,
     /// Read-only host observation with no Qubes control implementation.
     Observation,
     /// Scoped diagnostic evidence endpoint without deployment authority.
@@ -60,6 +62,10 @@ impl Application {
     /// Construct the application with the target's packages, preserving lazy build dependencies.
     /// This describes a derivation; Rust neither invokes Cargo nor realizes its output.
     pub fn build(self, pkgs: &NixValue, workspace: &Workspace) -> Package {
+        if matches!(self, Self::StorePacker) {
+            return crate::store::packer(pkgs, workspace);
+        }
+
         let package_set = if matches!(self, Self::VmInit) {
             pkgs.clone().select("pkgsStatic")
         } else {
@@ -68,6 +74,9 @@ impl Application {
         let pkgs = &package_set;
 
         let (package, name, description, binaries): (&str, &str, &str, &[&str]) = match self {
+            Self::StorePacker => {
+                unreachable!("the independent packer uses its own Cargo workspace")
+            }
             Self::StoreCache => (
                 "airlock-nix-core",
                 "airlock-store-cache",
@@ -348,6 +357,7 @@ impl Application {
             }
             Self::PrepareBoot
             | Self::StoreCache
+            | Self::StorePacker
             | Self::Observation
             | Self::Launcher
             | Self::Cli

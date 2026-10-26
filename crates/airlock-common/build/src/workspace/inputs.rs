@@ -32,6 +32,7 @@ const MANIFESTS: &[(&str, &str)] = manifests![
     "airlock-config",
     "airlock-tests",
     "airlock-common/nix",
+    "airlock-store-packer",
     "airlock-common/machine",
     "airlock-common/deployment",
     "airlock-common/diagnostics",
