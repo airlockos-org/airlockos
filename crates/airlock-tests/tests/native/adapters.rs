@@ -99,6 +99,13 @@ fn qubes_properties_use_native_storage_checks() -> Result<()> {
         adapter(directory, "definition", fields.clone())?["ok"],
         json!({"valid":true,"size":4096,"usage":0})
     );
+    assert!(
+        adapter(directory, "unprepared-block-device", fields.clone())?["ok"]["refused"]
+            .as_str()
+            .unwrap()
+            .contains("start or verify"),
+        "the synchronous accessor must refuse an unprepared mapper instead of attaching it"
+    );
     fields["fields"]["blob_logical_size"] = json!(0);
     assert_eq!(
         adapter(directory, "definition", fields)?["exception"],

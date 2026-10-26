@@ -102,7 +102,33 @@ fn properties(py: Python<'_>, request: &Value) -> Result<Value> {
                     "usage":object.getattr("usage")?.extract::<u64>()?,
                 }))
             }
+            "unprepared-block-device" => {
+                let error = object
+                    .call_method0("block_device")
+                    .expect_err("unprepared mapper exposed");
+                let exception = py.import("qubes.exc")?.getattr("StoragePoolException")?;
+                ensure!(
+                    error.value(py).is_instance(&exception)?,
+                    "wrong native storage exception"
+                );
+                Ok(json!({"refused":error.to_string()}))
+            }
             "callbacks" => {
+                let options = PyDict::new(py);
+                options.set_item("name", "callback-pool")?;
+                options.set_item("root_dir", request["pool"].as_str().context("pool path")?)?;
+                let pool = module.getattr("ClosurePool")?.call((), Some(&options))?;
+                let setup = pool.call_method0("setup")?;
+                ensure!(
+                    runner.call_method1("run", (setup,))?.is(&pool),
+                    "pool callback changed object identity"
+                );
+                object.setattr("pool", &pool)?;
+                // Legacy immutable metadata needs no retained generation or privileged mapper.
+                object.setattr("domain_name", py.None())?;
+                object.setattr("generation", py.None())?;
+                pool.getattr("_volumes")?
+                    .set_item(object.getattr("vid")?, &object)?;
                 let create = object.call_method0("create")?;
                 ensure!(
                     py.import("asyncio")?
@@ -120,6 +146,19 @@ fn properties(py: Python<'_>, request: &Value) -> Result<Value> {
                     runner.call_method1("run", (verify,))?.is_truthy()?,
                     "native verification did not complete"
                 );
+                for name in ["start", "stop"] {
+                    let callback = object.call_method0(name)?;
+                    ensure!(
+                        runner.call_method1("run", (callback,))?.is(&object),
+                        "{name} callback changed object identity"
+                    );
+                }
+                let export = object.call_method0("export")?;
+                let path = runner.call_method1("run", (export,))?;
+                ensure!(
+                    path.eq(object.getattr("path")?)?,
+                    "export did not return the prepared path"
+                );
                 let mutation = object.call_method1("resize", (1,))?;
                 let error = runner
                     .call_method1("run", (mutation,))
@@ -128,6 +167,20 @@ fn properties(py: Python<'_>, request: &Value) -> Result<Value> {
                 ensure!(
                     error.value(py).is_instance(&exception)?,
                     "wrong native storage exception"
+                );
+                let remove = object.call_method0("remove")?;
+                ensure!(
+                    runner.call_method1("run", (remove,))?.is(&object),
+                    "remove changed object identity"
+                );
+                ensure!(
+                    !pool.getattr("_volumes")?.contains(object.getattr("vid")?)?,
+                    "removed volume remains cached"
+                );
+                let destroy = pool.call_method0("destroy")?;
+                ensure!(
+                    runner.call_method1("run", (destroy,))?.is(&pool),
+                    "destroy changed pool identity"
                 );
                 Ok(json!({"same":true, "immutable":error.to_string()}))
             }

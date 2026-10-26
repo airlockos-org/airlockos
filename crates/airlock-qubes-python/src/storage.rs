@@ -16,6 +16,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod operation;
+
 /// Report malformed adapter inputs through upstream's storage exception family.
 fn invalid(py: Python<'_>, message: impl std::fmt::Display) -> PyErr {
     crate::exception(py, "StoragePoolException", message)
@@ -147,14 +149,15 @@ fn metadata_fields<'py>(py: Python<'py>, metadata: &Metadata) -> PyResult<Bound<
     Ok(fields)
 }
 
-/// Execute one typed lifecycle request, keeping mapper and running-reference ordering in Rust.
-fn lifecycle(object: &Bound<'_, PyAny>, action: Action) -> PyResult<()> {
+/// Snapshot one lifecycle request on Qubes' thread; workers receive no upstream objects.
+fn lifecycle_request(object: &Bound<'_, PyAny>, action: Action) -> PyResult<LifecycleRequest> {
     let domain = text(&object.getattr("domain_name")?)?;
     let generation = number(&object.getattr("generation")?)?;
     let identity = domain
         .zip(generation)
         .map(|(domain, generation)| GenerationIdentity { domain, generation });
-    let request = LifecycleRequest {
+
+    Ok(LifecycleRequest {
         action,
         root: PathBuf::from(
             object
@@ -165,9 +168,75 @@ fn lifecycle(object: &Bound<'_, PyAny>, action: Action) -> PyResult<()> {
         identity,
         name: object.getattr("name")?.extract()?,
         definition: definition(object)?,
-    };
-    let result = native(object.py(), || engine::lifecycle(request))?;
-    object.setattr("path", result.as_deref().map(path_text).transpose()?)
+    })
+}
+
+/// Prepare pool creation lazily after any preceding pool operation completes.
+fn prepare_pool(object: &Bound<'_, PyAny>, name: &str) -> PyResult<operation::Work> {
+    let root = PathBuf::from(object.getattr("root_dir")?.extract::<String>()?);
+
+    Ok(operation::Work {
+        label: format!("pool {name}: {root}", root = root.display()),
+        run: if name == "destroy" {
+            Box::new(|| Ok(None))
+        } else {
+            Box::new(move || engine::pool_root(&root, true).map(|_| None))
+        },
+    })
+}
+
+/// Prepare an owned request only after the preceding volume callback has published its path.
+fn prepare_volume(object: &Bound<'_, PyAny>, name: &str) -> PyResult<operation::Work> {
+    let label = format!(
+        "volume {name}: {vid}",
+        vid = object.getattr("vid")?.extract::<String>()?
+    );
+    let run: Box<dyn FnOnce() -> anyhow::Result<Option<PathBuf>> + Send + Sync> =
+        if name == "remove" {
+            Box::new(|| Ok(None))
+        } else if name == "verify_definition" {
+            let view = definition(object)?;
+            Box::new(move || engine::verify(&view).map(|_| None))
+        } else {
+            let action = if matches!(name, "verify" | "export") {
+                Action::Verify
+            } else {
+                Action::parse(name)
+                    .ok_or_else(|| invalid(object.py(), "unsupported volume lifecycle action"))?
+            };
+            let request = lifecycle_request(object, action)?;
+            Box::new(move || engine::lifecycle(request))
+        };
+
+    Ok(operation::Work { label, run })
+}
+
+/// Apply a completed engine result on Qubes' thread and preserve each upstream return contract.
+fn finish(
+    object: &Bound<'_, PyAny>,
+    name: &str,
+    result: Result<Option<PathBuf>, String>,
+) -> PyResult<Py<PyAny>> {
+    let py = object.py();
+    let path = result.map_err(|error| invalid(py, error))?;
+
+    if name == "remove" {
+        let volumes = object.getattr("pool")?.getattr("_volumes")?;
+        let key = object.getattr("vid")?;
+        if volumes.contains(&key)? {
+            volumes.del_item(key)?;
+        }
+    } else if !matches!(name, "setup" | "destroy" | "verify_definition") {
+        object.setattr("path", path.as_deref().map(path_text).transpose()?)?;
+    }
+
+    match name {
+        "verify" | "verify_definition" => {
+            Ok(true.into_pyobject(py)?.to_owned().into_any().unbind())
+        }
+        "export" => Ok(object.getattr("path")?.unbind()),
+        _ => Ok(object.clone().unbind()),
+    }
 }
 
 /// Forward pool callbacks while keeping upstream's own fields and object construction intact.
@@ -226,12 +295,7 @@ fn pool(
             fields.set_item("driver", "airlock-closure")?;
             Ok(fields.into_any().unbind())
         }
-        "setup" => {
-            let root = PathBuf::from(object.getattr("root_dir")?.extract::<String>()?);
-            native(py, || engine::pool_root(&root, true))?;
-            Ok(object.unbind())
-        }
-        "destroy" => Ok(object.unbind()),
+        "setup" | "destroy" => operation::call(object, name, prepare_pool, finish),
         "init_volume" => {
             let vm = argument(args, 1)?;
             let config = argument(args, 2)?.cast_into::<PyDict>()?.copy()?;
@@ -398,49 +462,32 @@ fn volume(
             }
             Ok(fields.into_any().unbind())
         }
-        "lifecycle" => {
-            let action: String = argument(args, 1)?.extract()?;
-            lifecycle(
-                &object,
-                Action::parse(&action)
-                    .ok_or_else(|| invalid(py, "unsupported volume lifecycle action"))?,
-            )?;
-            Ok(object.unbind())
-        }
-        "create" | "start" | "stop" => {
-            let action = Action::parse(name)
-                .ok_or_else(|| invalid(py, "unsupported volume lifecycle action"))?;
-            lifecycle(&object, action)?;
-            Ok(object.unbind())
-        }
-        "remove" => {
-            let volumes = object.getattr("pool")?.getattr("_volumes")?;
-            let key = object.getattr("vid")?;
-            if volumes.contains(&key)? {
-                volumes.del_item(key)?;
-            }
-            Ok(object.unbind())
-        }
-        "verify" | "export" => {
-            lifecycle(&object, Action::Verify)?;
-            if name == "export" {
-                Ok(object.getattr("path")?.unbind())
-            } else {
-                Ok(true.into_pyobject(py)?.to_owned().into_any().unbind())
-            }
+        "create" | "start" | "stop" | "verify" | "export" | "verify_definition" | "remove" => {
+            operation::call(object, name, prepare_volume, finish)
         }
         "import_data" | "import_volume" | "resize" => {
-            lifecycle(&object, Action::Immutable)?;
+            let request = lifecycle_request(&object, Action::Immutable)?;
+            native(py, || engine::lifecycle(request))?;
             Ok(py.None())
-        }
-        "verify_definition" => {
-            let view = definition(&object)?;
-            native(py, || engine::verify(&view))?;
-            Ok(true.into_pyobject(py)?.to_owned().into_any().unbind())
         }
         "is_dirty" | "is_outdated" => Ok(false.into_pyobject(py)?.to_owned().into_any().unbind()),
         "block_device" => {
-            lifecycle(&object, Action::BlockDevice)?;
+            if operation::pending(&object)?.is_some() {
+                return Err(invalid(
+                    py,
+                    "await the pending storage operation before retrieving its block device",
+                ));
+            }
+            // Qubes awaits start/verify before creating its libvirt XML. This synchronous
+            // accessor must never attach a mapper or wait on the engine's admission lock.
+            let view = definition(&object)?;
+            native(py, || engine::verify(&view))?;
+            if object.getattr("path")?.is_none() {
+                return Err(invalid(
+                    py,
+                    "start or verify the volume before retrieving its block device",
+                ));
+            }
             Ok(py
                 .import("qubes.storage")?
                 .getattr("Volume")?
@@ -478,7 +525,7 @@ pub(super) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
         namespace.set_item(name, descriptor::method(py, name, pool, false)?)?;
     }
     for name in ["setup", "destroy"] {
-        namespace.set_item(name, descriptor::method(py, name, pool, true)?)?;
+        namespace.set_item(name, descriptor::method(py, name, pool, false)?)?;
     }
     for name in ["config", "size", "usage"] {
         namespace.set_item(name, descriptor::property(py, name, pool)?)?;
@@ -492,7 +539,6 @@ pub(super) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     for name in [
         "__init__",
         "definition",
-        "lifecycle",
         "is_dirty",
         "is_outdated",
         "block_device",
@@ -503,14 +549,14 @@ pub(super) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
         "create",
         "remove",
         "export",
-        "import_data",
-        "import_volume",
-        "resize",
         "start",
         "stop",
         "verify_definition",
         "verify",
     ] {
+        namespace.set_item(name, descriptor::method(py, name, volume, false)?)?;
+    }
+    for name in ["import_data", "import_volume", "resize"] {
         namespace.set_item(name, descriptor::method(py, name, volume, true)?)?;
     }
     for name in ["config", "revisions", "size", "usage"] {
