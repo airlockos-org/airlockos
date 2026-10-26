@@ -344,7 +344,10 @@ pub(super) fn checked(
             "airlock-build" => vec!["airlock-tests/fixtures/memory_accounting.c".into()],
             "airlock-config" => vec!["verus.json".into()],
             "airlock-desktop" => vec![format!("{directory}/assets")],
-            "airlock-sys-ctrl-gui" => vec![format!("{directory}/examples")],
+            "airlock-sys-ctrl-gui" => vec![
+                format!("{directory}/assets/fonts"),
+                format!("{directory}/examples"),
+            ],
             "airlock-tests" => vec![
                 format!("{directory}/fixtures/memory_accounting.c"),
                 format!("{directory}/fixtures/gui"),

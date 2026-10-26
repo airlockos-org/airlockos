@@ -161,6 +161,15 @@ fn filtered_sources_preserve_cache_keys_and_compile() -> Result<()> {
         asset["derivations"]["cli"]
     );
 
+    // Embedded binary assets must invalidate the owning package independently of Rust examples.
+    let font = workspace.join("airlock-sys-ctrl/gui/assets/fonts/Inter-Regular.ttf");
+    let mut bytes = fs::read(&font)?;
+    *bytes.last_mut().context("nonempty embedded font")? ^= 1;
+    fs::write(font, bytes)?;
+    let font = inspect(root, &workspace, "source-font-change", &cases)?;
+    assert_ne!(asset["derivations"]["gui"], font["derivations"]["gui"]);
+    assert_eq!(asset["derivations"]["cli"], font["derivations"]["cli"]);
+
     let target = PathBuf::from(
         std::env::var_os("AIRLOCK_FILTERED_CARGO_TARGET_DIR")
             .context("explicit Cargo target directory for isolated source checks")?,
