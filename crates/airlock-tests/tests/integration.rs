@@ -5,6 +5,9 @@ mod common;
 #[path = "native/process.rs"]
 mod process;
 
+#[path = "native/smoke.rs"]
+mod smoke;
+
 #[path = "native/launchers.rs"]
 mod launchers;
 

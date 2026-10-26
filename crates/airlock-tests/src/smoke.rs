@@ -1,4 +1,4 @@
-//! Explicit live smoke scenarios; ordinary Cargo tests never invoke these mutating entry points.
+//! Explicit live smoke scenarios; ordinary Cargo tests use isolated command peers.
 
 #[path = "smoke/common.rs"]
 mod common;
