@@ -43,11 +43,7 @@ pub(super) fn native(pkgs: &NixValue, apps: &NixPath) -> Package {
             "pname": EXECUTABLE,
             "version": env!("CARGO_PKG_VERSION"),
             "src": source.source(&lib),
-            // Snapshot only the lockfile, even when apps arrived as a store-backed string.
-            "cargoLock": nix_record! {
-                "lockFile": apps.join_relative("Cargo.lock")
-                    .expect("lockfile path is relative").snapshot(),
-            },
+            "cargoLock": workspace.cargo_lock(),
             "cargoBuildFlags": NixValue::list(flags),
             "doCheck": false,
             "nativeBuildInputs": NixValue::list([pkgs.clone().select("makeWrapper")]),

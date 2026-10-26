@@ -13,7 +13,12 @@ use rusix::{
 
 /// Bind sources once and defer every target-system build to Nix evaluation.
 pub(super) fn configuration(candidate: &Candidate, sources: &Sources) -> NixValue {
-    NixValue::function_attrs(["self", "nixpkgs", "hermit-xen"], |inputs| {
+    let mut arguments = vec!["self", "nixpkgs"];
+    if candidate.has_hermit() {
+        arguments.push("hermit-xen");
+    }
+
+    NixValue::function_attrs(arguments, |inputs| {
         let source = NixPath::from_source_text(sources.machine.clone());
         let workspace = Workspace::new(NixPath::from_source_text(sources.applications.clone()));
         let kernel_name = crate::vm_build::KERNEL_NAME;
@@ -32,7 +37,7 @@ pub(super) fn configuration(candidate: &Candidate, sources: &Sources) -> NixValu
                     "system": system,
                     "airlockSupport": source.clone(),
                     "airlockAppsSource": workspace.root(),
-                    "hermitXen": inputs.clone().select("hermit-xen"),
+                    "hermitXen": inputs.clone().attr_or("hermit-xen", NixValue::null()),
                     "applicationRevision": NixValue::builtin("replaceStrings").call(NixValue::list(["\n".into()])).call(NixValue::list(["".into()])).call(
                         NixValue::builtin("readFile").call(source.join_relative("application-revision").unwrap())
                     ),

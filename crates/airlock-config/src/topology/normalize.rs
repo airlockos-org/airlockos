@@ -117,6 +117,7 @@ fn domain(name: NixValue, value: NixValue) -> NixValue {
                 "AppVM",
             ),
         );
+        let default_class = NixValue::if_else(kind.clone().equals("hermit"), "HermitVM", default_class);
         let class = non_null(value.clone().select("class"), default_class);
         class.bind(|class| {
             let template = value.clone().select("template");
@@ -175,7 +176,7 @@ fn domain(name: NixValue, value: NixValue) -> NixValue {
                     "backend": NixValue::if_else(
                         backend_kind.clone().equals("nix-closure"),
                         closure,
-                        NixValue::if_else(backend_kind.clone().equals("hermit"), backend.clone(), ordinary),
+                        NixValue::if_else(backend_kind.clone().equals("hermit"), hermit_backend(&backend), ordinary),
                     ),
                 };
                 let valid = NixValue::if_else(
@@ -287,6 +288,32 @@ fn closure_backend(name: &NixValue, backend: &NixValue) -> NixValue {
             "volatile": state.attr_or("volatile", NixValue::null()),
         },
     }
+}
+
+/// Project the diskless boot contract and reject unsupported Linux configuration before it disappears.
+fn hermit_backend(backend: &NixValue) -> NixValue {
+    let no_linux = [
+        "template", "kernel", "initrd", "modules", "root", "store", "state",
+    ]
+    .into_iter()
+    .fold(true.into(), |valid: NixValue, field| {
+        valid.and(
+            backend
+                .clone()
+                .attr_or(field, NixValue::null())
+                .equals(NixValue::null()),
+        )
+    });
+    let artifact = backend.clone().select("artifact");
+    require(
+        no_linux.and(artifact.clone().equals(NixValue::null()).equals(false)),
+        "Hermit requires an executable descriptor and cannot use Linux boot or storage fields.",
+        nix_record! {
+            "type": "hermit",
+            "system": required_source(&backend.clone().select("system"), "Hermit requires an immutable system source."),
+            "artifact": artifact,
+        },
+    )
 }
 
 /// Require a concrete or candidate artifact while retaining its original store dependency context.

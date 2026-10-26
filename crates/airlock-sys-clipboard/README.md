@@ -93,8 +93,7 @@ artifacts. Xen lifecycle, peer events and binary hashes remain in
 `hermit-xen/.lab/runs`; two cycles reuse the same outer Xen/dom0 instance.
 
 Airlock's existing package-source inventory includes the new workspace members;
-shared-lock Git hashes are recorded in the Rust application builder. This does not
-add a production Hermit package or VM. For published consumption later, publish
+shared-lock Git hashes are recorded in the Rust application builder. For published consumption later, publish
 the reviewed integration commit and remove the process-local Git redirection, or
 update Cargo's pin/lock and source hash to a subsequently reviewed revision. Use
 that same revision in a Git flake input with `submodules=1` and update the lab
@@ -110,6 +109,10 @@ application and integration revisions, and dependency-lock digest. Local Nix
 input overrides must select the same Git commit; a dirty path override is not a
 replacement for a reviewed revision. Published use requires making the pinned
 commits available upstream, without changing the local dependency contract.
+The reviewed machine Git flake carries these inputs in its dependency lock. The
+older offline runtime-candidate transport does not provision the Hermit toolchain;
+use machine generations for this backend. Linux-only candidates keep their
+existing offline input set.
 
 The machine release retains the executable in its Nix closure. Existing source
 approval, plan fingerprints and execution journals govern its configuration and

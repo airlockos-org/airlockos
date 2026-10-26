@@ -3,7 +3,7 @@
 use rusix::{interop::raw::NixValue, nix_record};
 
 /// Qubes VM classes supported by the existing materialization workflow.
-pub(super) const CLASSES: &[&str] = &["AppVM", "StandaloneVM", "TemplateVM"];
+pub(super) const CLASSES: &[&str] = &["AppVM", "StandaloneVM", "TemplateVM", "HermitVM"];
 
 /// Backend protocols understood by Airlock's Qubes setup and runtime tools.
 pub(super) const BACKENDS: &[&str] = &[
@@ -11,6 +11,7 @@ pub(super) const BACKENDS: &[&str] = &[
     "qubes-template-root",
     "qubes-standalone",
     "nix-closure",
+    "hermit",
 ];
 
 /// Qubes labels accepted by the runtime topology contract.
@@ -298,6 +299,49 @@ impl Schema<'_> {
             .call(NixValue::function(|value| value.equals(expected)))
     }
 
+    /// Require a complete immutable Hermit image identity before lowering to deployment.
+    fn hermit_artifact(&self) -> NixValue {
+        let mut fields = vec![
+            (
+                "schema",
+                self.option(
+                    self.enumeration(&["airlock.hermit-pvh.v1"]),
+                    None,
+                    "Hermit image descriptor version.",
+                ),
+            ),
+            (
+                "authority",
+                self.option(
+                    self.enumeration(&["disconnected"]),
+                    None,
+                    "Production machine images cannot provision laboratory authority.",
+                ),
+            ),
+            (
+                "bytes",
+                self.option(
+                    self.kind("ints.positive"),
+                    None,
+                    "Exact bounded executable length, checked again during admission.",
+                ),
+            ),
+        ];
+        for (name, description) in [
+            ("executable", "Immutable store file loaded by Xen."),
+            ("sha256", "SHA-256 of the complete executable."),
+            ("source_revision", "Reviewed application Git revision."),
+            (
+                "integration_revision",
+                "Pinned external Hermit/Xen Git revision.",
+            ),
+            ("build_lock", "SHA-256 of the integration dependency lock."),
+        ] {
+            fields.push((name, self.option(self.kind("str"), None, description)));
+        }
+        self.record(NixValue::record(fields))
+    }
+
     /// Define the full set of backend fields before normalization chooses the selected protocol.
     fn backend(&self) -> NixValue {
         let root = self.record(self.source_fields().merge_attrs(nix_record! {
@@ -327,7 +371,8 @@ impl Schema<'_> {
                 self.vm_name(),
                 "Template identity for a template-backed VM.",
             ),
-            "system": self.optional(self.record(self.source_fields()), "NixOS system closure."),
+            "system": self.optional(self.record(self.source_fields()), "Immutable guest system object."),
+            "artifact": self.optional(self.hermit_artifact(), "Authenticated Hermit PVH executable."),
             "kernel": self.optional(
                 self.boot_component(),
                 "Required kernel name or artifact for closure-backed VMs.",

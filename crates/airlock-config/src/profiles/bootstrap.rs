@@ -1,9 +1,9 @@
 //! Define the nested QEMU bootstrap machine used for lifecycle and network validation.
 //! The physical USB machine has its own hardware and resource configuration.
 
-use crate::model::{AuthoringError, GiB, Machine, MachineSnapshot, Vm};
+use crate::model::{AuthoringError, GiB, HermitApplication, Machine, MachineSnapshot, MiB, Vm};
 
-/// Declare the seven bootstrap VMs with typed network and host relationships.
+/// Declare the bootstrap VMs with typed network and host relationships.
 pub fn machine() -> Result<MachineSnapshot, AuthoringError> {
     let mut machine = Machine::default();
 
@@ -27,6 +27,10 @@ pub fn machine() -> Result<MachineSnapshot, AuthoringError> {
 
     let command = Vm::command("usr-cmd", &firewall, GiB(8))?;
     machine.add(&command)?;
+
+    let clipboard = Vm::hermit("sys-clipboard", MiB(32), HermitApplication::Clipboard)?;
+    clipboard.set_autostart(true);
+    machine.add(&clipboard)?;
 
     machine.set_host(&gui, &firewall, &controller);
     machine.finish()

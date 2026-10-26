@@ -224,18 +224,27 @@ impl Candidate {
 
     /// Describe the static flake input boundary and Rust-authored candidate outputs.
     fn configuration(&self, sources: &Sources) -> rusix::Config {
+        let mut inputs = vec![(
+            "nixpkgs",
+            nix_record! {
+                "url": format!("path:{path}", path = sources.nixpkgs),
+            },
+        )];
+        if self.has_hermit() {
+            inputs.push(("hermit-xen", crate::hermit_build::input()));
+        }
+
         rusix::Config::new()
             .set_dynamic("description", "Airlock runtime configuration candidate")
-            .set_dynamic(
-                "inputs",
-                nix_record! {
-                    "hermit-xen": crate::hermit_build::input(),
-                    "nixpkgs": nix_record! {
-                        "url": format!("path:{path}", path = sources.nixpkgs),
-                    },
-                },
-            )
+            .set_dynamic("inputs", rusix::interop::raw::NixValue::record(inputs))
             .set_dynamic("outputs", outputs::configuration(self, sources))
+    }
+
+    /// Keep existing offline Linux candidates independent of the optional guest toolchain.
+    fn has_hermit(&self) -> bool {
+        self.machine
+            .vms()
+            .any(|vm| matches!(vm.backend, crate::model::GuestBackend::Hermit { .. }))
     }
 
     /// Resolve activation mode without pretending arbitrary modules are safe to switch live.

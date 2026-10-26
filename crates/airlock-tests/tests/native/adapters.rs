@@ -10,6 +10,68 @@ use std::{
     process::Command,
 };
 
+/// Exercise diskless XML generation with explicitly prepared upstream Qubes packages.
+#[test]
+#[ignore = "requires AIRLOCK_QUBES_PYTHON and AIRLOCK_HERMIT_DOMAIN from a real Nix build"]
+fn hermit_uses_upstream_qubes_objects() -> Result<()> {
+    let python = std::env::var("AIRLOCK_QUBES_PYTHON")?;
+    let domain: Value =
+        serde_json::from_slice(&fs::read(std::env::var("AIRLOCK_HERMIT_DOMAIN")?)?)?;
+    let nonce = "01234567-89ab-cdef-0123-456789abcdef";
+    let mut request = json!({
+        "module": common::binary("AIRLOCK_QUBES_MODULE", "libairlock_qubes_native.so"),
+        "domain": domain,
+        "nonce": nonce,
+    });
+    let observe = |request: &Value| -> Result<Value> {
+        let mut command = if let Some(store) = std::env::var_os("AIRLOCK_QUBES_STORE") {
+            let mut command = Command::new("bwrap");
+            command
+                .args(["--ro-bind", "/", "/", "--ro-bind"])
+                .arg(store)
+                .args([
+                    "/nix/store",
+                    "--dev-bind",
+                    "/dev",
+                    "/dev",
+                    "--proc",
+                    "/proc",
+                    "--tmpfs",
+                    "/tmp",
+                    "--unshare-net",
+                    "--die-with-parent",
+                ])
+                .arg(&python);
+            command
+        } else {
+            Command::new(&python)
+        };
+        command.arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/hermit_qubes.py"));
+        common::json(&mut command, Some(serde_json::to_vec(request)?))
+    };
+
+    let result = observe(&request)?;
+    assert_eq!(result["class"], "HermitVM");
+    assert_eq!(result["volumes"], json!([]));
+    let xml = result["xml"].as_str().expect("upstream domain XML");
+    assert!(xml.contains(&format!("airlock.boot={nonce}")));
+    assert!(
+        xml.contains(
+            request["domain"]["backend"]["artifact"]["executable"]
+                .as_str()
+                .unwrap()
+        )
+    );
+    assert!(!xml.contains("<disk"));
+
+    request["domain"]["prefs"]["vcpus"] = json!(2);
+    assert!(observe(&request)?["error"].is_string());
+    request["domain"]["prefs"]["vcpus"] = json!(1);
+    request["nonce"] = json!("invalid challenge");
+    assert!(observe(&request)?["error"].is_string());
+    Ok(())
+}
+
 /// Inspect native plugin properties against upstream-shaped Python objects.
 fn adapter(directory: &Path, operation: &str, overrides: Value) -> Result<Value> {
     let modules = directory.join("python");

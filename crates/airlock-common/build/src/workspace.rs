@@ -90,7 +90,9 @@ impl Workspace {
         nix_record! {
             "lockFile": self.file("Cargo.lock").snapshot(),
             "outputHashes": nix_record! {
-                "hermit-0.13.2": "sha256-uY3bYdTgGjRRbg3MPPgfff3N+6AYEtTmJtjUTcSR+kk=",
+                // importCargoLock's Git fetch includes the upstream kernel submodule.
+                // The Hermit executable builder separately selects our patched kernel.
+                "hermit-0.13.2": "sha256-Doox+f2DRDn/J+PBLoiNAMoB9XgW3U3gqysw+mk61lw=",
                 "xen-transport-0.1.0": "sha256-zf3Mt1fv5dcNntCbEXsabZ3R5kJFmiEUK6B3pdAjoXs=",
             },
         }

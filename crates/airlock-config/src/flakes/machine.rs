@@ -226,6 +226,7 @@ pub(super) fn outputs() -> NixValue {
             "nixpkgs-libvirt_10_5",
             "nixos-qubes",
             "airlock-apps",
+            "hermit-xen",
         ],
         |inputs| {
             let source = NixPath::from_source_text(

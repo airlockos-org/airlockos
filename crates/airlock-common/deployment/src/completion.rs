@@ -152,7 +152,7 @@ pub open spec fn observed(d: Definition, saved: RecordedResolution, running: Seq
             && (running_system.is_some() ==> running_system.unwrap()@ == system@)
             && (owned_member(running, d.name@) ==> running_system.is_some()),
         Observation::NonNative(name) => d.native.is_none() && d.executable.is_none() && name@ == d.name@ && !owned_member(running, d.name@),
-        Observation::Native(n) => staging::agrees(d, n.selection)
+        Observation::Native(n) => d.executable.is_none() && staging::agrees(d, n.selection)
             && n.feature_system@ == n.selection.system@ && n.feature_generation == n.selection.generation
             && n.pool_selected
             && (n.running_system.is_some() ==> n.running_system.unwrap()@ == n.selection.system@)
@@ -175,7 +175,7 @@ fn observation_matches(d: &Definition, saved: &RecordedResolution, running: &[St
         },
         Observation::NonNative(name) => d.native.is_none() && d.executable.is_none() && name.as_str() == d.name.as_str() && !owned_contains(running, d.name.as_str()),
         Observation::Native(n) => {
-            if !staging::selection_matches(d, &n.selection) || n.feature_system != n.selection.system
+            if d.executable.is_some() || !staging::selection_matches(d, &n.selection) || n.feature_system != n.selection.system
                 || n.feature_generation != n.selection.generation || !n.pool_selected { return false; }
             if n.running_system.is_some() && n.running_system.as_ref().unwrap().as_str() != n.selection.system.as_str() { return false; }
             if owned_contains(running, d.name.as_str()) && n.running_system.is_none() { return false; }
