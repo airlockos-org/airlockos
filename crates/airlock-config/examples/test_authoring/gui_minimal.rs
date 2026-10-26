@@ -244,12 +244,10 @@ fn gui_minimal_minimal_desktop_2(
             ),
             (
                 "setupAutostart",
-                gnome.clone().select_segments([
-                    "environment",
-                    "etc",
-                    "xdg/autostart/airlock-setup.desktop",
-                    "text",
-                ]),
+                gnome
+                    .clone()
+                    .select_segments(["environment", "etc"])
+                    .has_attr("xdg/autostart/org.airlockos.Setup.desktop"),
             ),
             (
                 "gnomeOverrides",

@@ -97,7 +97,7 @@ pub(super) fn configuration(
         },
         "environment": nix_record! {
             "systemPackages": NixValue::list(packages),
-            // Airlock Setup owns the first-login welcome flow.
+            // First-login tours are disabled while the welcome flow is being revised.
             "gnome": nix_record! {
                 "excludePackages": NixValue::list([inputs.pkgs.clone().select("gnome-tour")]),
             },

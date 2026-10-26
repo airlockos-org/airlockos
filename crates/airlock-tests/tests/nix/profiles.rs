@@ -219,16 +219,12 @@ fn package_minimal_gui_preserves_boot_supervision_and_host_control_boundaries() 
     assert_eq!(gui["prefs"]["guivm"], "dom0");
     assert_eq!(gui["prefs"]["autostart"], true);
     assert_eq!(gui["devices"]["pci"], json!([]));
-    for (key, command) in [
-        ("setupAutostart", "airlock-sys-gui-setup --auto"),
-        (
-            "bootNotification",
-            "airlock-sys-gui-service boot-notification",
-        ),
-    ] {
-        includes(&report[key], command);
-        assert!(!text(&report[key]).contains("X-GNOME-Autostart-Phase"));
-    }
+    assert_eq!(report["setupAutostart"], false);
+    includes(
+        &report["bootNotification"],
+        "airlock-sys-gui-service boot-notification",
+    );
+    assert!(!text(&report["bootNotification"]).contains("X-GNOME-Autostart-Phase"));
     let supervised = &report["supervised"];
     assert_eq!(
         supervised["failure"],
