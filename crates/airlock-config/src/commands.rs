@@ -326,6 +326,8 @@ pub(crate) fn contract<const N: usize>(
                 "@xserver@/bin/Xephyr",
                 "--preload",
                 "@daemon@/lib/qubes-gui-daemon/shmoverride.so",
+                "--group-id",
+                "@groupId@",
                 "--",
             ],
             true,
