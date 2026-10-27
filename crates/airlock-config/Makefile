@@ -23,7 +23,7 @@ prepare generate generate-packages generate-desktop generate-machine generate-fl
 
 check:
 	@mkdir -p "$(LOG_DIR)"
-	cargo fmt -p airlock-config -- --check 2>&1 | tee "$(LOG_DIR)/fmt.log"
+	$(MAKE) -C "$(ROOT)" rust-fmt-check 2>&1 | tee "$(LOG_DIR)/fmt.log"
 	cargo clippy -p airlock-config --all-targets --locked --target-dir "$(TARGET_DIR)" -- -D warnings 2>&1 | tee "$(LOG_DIR)/clippy.log"
 
 # Evaluation consumes explicitly prepared sources, authoring tools and Cargo receipts.

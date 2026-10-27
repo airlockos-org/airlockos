@@ -125,62 +125,53 @@ CTRL_PREVIEW_ARGS ?= --demo
 ctrl-preview:
 	$(AIRLOCK_NIX) run ./crates\#airlock-sys-ctrl-gui --no-write-lock-file -- $(CTRL_PREVIEW_ARGS)
 
-ctrl-check: rust-spacing
-	cargo fmt --manifest-path crates/Cargo.toml --all -- --check
+ctrl-check:
+	rustup run $(RUSTFMT_TOOLCHAIN) cargo fmt --manifest-path crates/Cargo.toml --all -- --check
 	cargo clippy --locked --manifest-path crates/Cargo.toml -p airlock-sys-ctrl-gui -- -D warnings
 
 .PHONY: airlock-nix-build airlock-nix-check
 airlock-nix-build:
 	cargo build --locked --release --manifest-path crates/Cargo.toml -p airlock-nix-core -p airlock-cli -p airlock-sys-ctrl-service
 
-airlock-nix-check: rust-spacing
-	cargo fmt --manifest-path crates/Cargo.toml -p airlock-nix-core -p airlock-cli -p airlock-sys-ctrl-service -- --check
+airlock-nix-check:
+	rustup run $(RUSTFMT_TOOLCHAIN) cargo fmt --manifest-path crates/Cargo.toml -p airlock-nix-core -p airlock-cli -p airlock-sys-ctrl-service -- --check
 	cargo clippy --locked --manifest-path crates/Cargo.toml -p airlock-nix-core -p airlock-cli -p airlock-sys-ctrl-service --all-targets -- -D warnings
 
 .PHONY: airlock-dom0-build airlock-dom0-check
 airlock-dom0-build:
 	cargo build --locked --release --manifest-path crates/Cargo.toml -p airlock-dom0-service
 
-airlock-dom0-check: rust-spacing
-	cargo fmt --manifest-path crates/Cargo.toml -p airlock-dom0-service -- --check
+airlock-dom0-check:
+	rustup run $(RUSTFMT_TOOLCHAIN) cargo fmt --manifest-path crates/Cargo.toml -p airlock-dom0-service -- --check
 	cargo clippy --locked --manifest-path crates/Cargo.toml -p airlock-dom0-service --all-targets -- -D warnings
 
-.PHONY: rust-fmt rust-fmt-check rust-spacing rust-spacing-fix rust-style-test rust-doc rust-check
+.PHONY: rust-fmt-prepare rust-fmt rust-fmt-check rust-doc rust-check
 # Independent source-owned authoring crates use explicitly prepared offline dependencies.
 AIRLOCK_CARGO_VENDOR ?= /etc/airlock/authoring/vendor
 AUTHORING_CRATES := airlock-machine crates/airlock-config/templates/initial-runtime-config
-RUST_STYLE_MANIFEST := tools/rust-style/Cargo.toml
+# Pin formatting separately from stable application builds; match Hermit's dated nightly.
+RUSTFMT_TOOLCHAIN := nightly-2026-08-01
 STORE_PACKER_MANIFEST := crates/airlock-store-packer/Cargo.toml
 
+rust-fmt-prepare:
+	rustup toolchain install $(RUSTFMT_TOOLCHAIN) --profile minimal --component rustfmt
+
 rust-fmt:
-	cargo fmt --manifest-path crates/Cargo.toml --all
-	cargo fmt --manifest-path $(RUST_STYLE_MANIFEST) --all
-	cargo fmt --manifest-path $(STORE_PACKER_MANIFEST) --all
-	@for crate in $(AUTHORING_CRATES); do cargo fmt --manifest-path "$$crate/Cargo.toml" --all || exit; done
+	rustup run $(RUSTFMT_TOOLCHAIN) cargo fmt --manifest-path crates/Cargo.toml --all
+	rustup run $(RUSTFMT_TOOLCHAIN) cargo fmt --manifest-path $(STORE_PACKER_MANIFEST) --all
+	@for crate in $(AUTHORING_CRATES); do rustup run $(RUSTFMT_TOOLCHAIN) cargo fmt --manifest-path "$$crate/Cargo.toml" --all || exit; done
 
 rust-fmt-check:
-	cargo fmt --manifest-path crates/Cargo.toml --all -- --check
-	cargo fmt --manifest-path $(RUST_STYLE_MANIFEST) --all -- --check
-	cargo fmt --manifest-path $(STORE_PACKER_MANIFEST) --all -- --check
-	@for crate in $(AUTHORING_CRATES); do cargo fmt --manifest-path "$$crate/Cargo.toml" --all -- --check || exit; done
-
-rust-spacing:
-	cargo run --locked --quiet --manifest-path $(RUST_STYLE_MANIFEST) --bin check-rust-spacing
-
-# The checker also runs rustfmt before inserting blank lines, including with --root.
-rust-spacing-fix: rust-fmt
-	cargo run --locked --quiet --manifest-path $(RUST_STYLE_MANIFEST) --bin check-rust-spacing -- --fix
-
-rust-style-test:
-	cargo test --locked --manifest-path $(RUST_STYLE_MANIFEST)
+	rustup run $(RUSTFMT_TOOLCHAIN) cargo fmt --manifest-path crates/Cargo.toml --all -- --check
+	rustup run $(RUSTFMT_TOOLCHAIN) cargo fmt --manifest-path $(STORE_PACKER_MANIFEST) --all -- --check
+	@for crate in $(AUTHORING_CRATES); do rustup run $(RUSTFMT_TOOLCHAIN) cargo fmt --manifest-path "$$crate/Cargo.toml" --all -- --check || exit; done
 
 rust-doc:
 	RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked --manifest-path crates/Cargo.toml
 	CARGO_TARGET_DIR="$(abspath $(or $(CARGO_TARGET_DIR),crates/target))" RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked --manifest-path $(STORE_PACKER_MANIFEST)
 
-rust-check: rust-fmt-check rust-spacing rust-style-test rust-doc rust-authoring-check native-integration-build
+rust-check: rust-fmt-check rust-doc rust-authoring-check native-integration-build
 	cargo clippy --workspace --all-targets --all-features --locked --manifest-path crates/Cargo.toml -- -D warnings
-	cargo clippy --all-targets --locked --manifest-path $(RUST_STYLE_MANIFEST) -- -D warnings
 	CARGO_TARGET_DIR="$(abspath $(or $(CARGO_TARGET_DIR),crates/target))" cargo clippy --all-targets --locked --manifest-path $(STORE_PACKER_MANIFEST) -- -D warnings
 	cargo test --workspace --all-features --locked --manifest-path crates/Cargo.toml
 	CARGO_TARGET_DIR="$(abspath $(or $(CARGO_TARGET_DIR),crates/target))" cargo test --locked --manifest-path $(STORE_PACKER_MANIFEST)
@@ -516,9 +507,11 @@ clean-cache:
 	$(AIRLOCK_DEV) clean cache
 
 .PHONY: rust-authoring-check
+# Reuse the pinned formatter through each independent crate's stable Cargo checks.
 rust-authoring-check:
-	@for crate in $(AUTHORING_CRATES); do \
-	  $(MAKE) -C "$$crate" rust-check AIRLOCK_APPS="$(CURDIR)/crates" AIRLOCK_CARGO_VENDOR="$(AIRLOCK_CARGO_VENDOR)" || exit; \
+	@formatter="$$(rustup which --toolchain $(RUSTFMT_TOOLCHAIN) rustfmt)" || exit; \
+	for crate in $(AUTHORING_CRATES); do \
+	  RUSTFMT="$$formatter" $(MAKE) -C "$$crate" rust-check AIRLOCK_APPS="$(CURDIR)/crates" AIRLOCK_CARGO_VENDOR="$(AIRLOCK_CARGO_VENDOR)" || exit; \
 	done
 
 # Emit a complete Rust-authored Nix source tree under target/nix before evaluation.

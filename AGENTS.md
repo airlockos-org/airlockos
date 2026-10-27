@@ -85,10 +85,10 @@
 
 These are the authoritative standards for first-party Rust in this repository,
 including development tools and examples. `crates/Cargo.toml` is the application
-workspace; `tools/rust-style/Cargo.toml` is a separate development workspace.
-`crates/airlock-store-packer/Cargo.toml` has its own workspace and lockfile so
-unrelated application changes cannot invalidate every image fragment. Its format
-implementation is shared with runtime artifact transfer and follows these standards.
+workspace. `crates/airlock-store-packer/Cargo.toml` has its own workspace and
+lockfile so unrelated application changes cannot invalidate every image fragment.
+Its format implementation is shared with runtime artifact transfer and follows
+these standards.
 `airlock-machine/` is an independent repository with its own instructions;
 vendored, generated and build output is outside this policy's editing scope.
 There are currently no nested first-party Rust `AGENTS.md` files to reconcile.
@@ -129,11 +129,13 @@ Future nested instructions must link here rather than duplicate these standards.
   blocks rather than strings packed with `\n` escapes. For Rusix text with deferred
   values, use `nix_text!` with an indented raw multiline template and named placeholders.
   Preserve intentional whitespace and trailing newlines in the generated content.
-- Stable rustfmt is canonical. Separate distinct sibling Rust item declarations
-  with a blank line, including inside modules, impls, traits, extern blocks and
-  function-local item lists. Keep comments, docs and attributes attached to their
-  item. Consecutive plain `use` declarations can form one compact group; separate
-  that group from other items.
+- Rustfmt is the sole automated formatter. Its checked-in `rustfmt.toml` and the
+  dated formatter toolchain selected by the root Makefile are canonical; do not
+  add custom formatting checkers. As review guidance, separate distinct sibling
+  Rust item declarations with a blank line, including inside modules, impls,
+  traits, extern blocks and function-local item lists. Keep comments, docs and
+  attributes attached to their item. Consecutive plain `use` declarations can
+  form one compact group; separate that group from other items.
 - Review spacing between conceptual blocks inside function and method bodies,
   including closures, examples and macro templates. Use a blank line when moving
   from validation to the main operation, setup to processing, building a value to
@@ -143,36 +145,39 @@ Future nested instructions must link here rather than duplicate these standards.
   cohesive operation may need no internal blank lines. Do not mechanically
   separate every statement, split expressions into artificial sections, or add
   section comments merely to explain spacing.
-- Function-body spacing requires semantic review. Stable rustfmt and the
-  declaration-spacing checker enforce neither conceptual boundaries nor the
-  grouping of related statements; passing those checks does not replace this
-  review. Declaration spacing remains a separate automated rule.
+- Declaration and function-body spacing beyond rustfmt's behavior are review
+  conventions. Rustfmt preserves section gaps but does not identify conceptual
+  boundaries or enforce our preferred declaration separators. Keep its minimum
+  blank-line setting at the default so it does not separate every statement.
 
 ### Automated checks and commands
 
-Run from the repository root with stable Cargo/rustfmt/Clippy. The GTK welcome
-window also needs GTK4/libadwaita development files and pkg-config. The dom0
-service also needs libudev development files. On NixOS, enter the
-explicitly prepared environment with `nix develop "$(make --silent prepare)/crates#desktop"` before running
-workspace Cargo checks; `nix develop "$(make --silent prepare)/crates#desktop" -c make rust-check` runs the
-full Rust check workflow directly. Quick test execution never provisions these tools:
+Run from the repository root with stable Cargo/Clippy and the separately pinned
+rustfmt toolchain. The GTK welcome window also needs GTK4/libadwaita development
+files and pkg-config. The dom0 service also needs libudev development files.
+On NixOS, enter the explicitly prepared environment with
+`nix develop "$(make --silent prepare)/crates#desktop"` before running workspace
+Cargo checks; `nix develop "$(make --silent prepare)/crates#desktop" -c make rust-check`
+runs the full Rust check workflow directly. Quick test execution never provisions
+these tools:
 
 ```sh
 make dev-tools-build    # explicitly prepare native workstation tools
-make rust-fmt           # stable rustfmt for application, tooling and packer workspaces
+make rust-fmt-prepare   # explicitly install the pinned formatter toolchain
+make rust-fmt           # format application, packer and source-owned authoring crates
 make rust-fmt-check     # check without editing
-make rust-spacing      # syntax-based check, locations and nonzero exit on gaps
-make rust-spacing-fix  # run rustfmt first, then insert missing blank lines
-make rust-style-test   # Cargo integration tests for the syntax checker
-make rust-doc          # strict rustdoc, including feature-gated public APIs
-make rust-check        # read-only style/docs checks, checker tests, Clippy and Cargo tests
+make rust-doc           # strict rustdoc, including feature-gated public APIs
+make rust-check         # read-only formatting/docs checks, Clippy and Cargo tests
 ```
 
-The checker can also be invoked directly:
+`RUSTFMT_TOOLCHAIN` in the root Makefile pins formatting for local development
+and CI without changing the application compiler. Formatting and check targets
+require that toolchain to be installed; only `make rust-fmt-prepare` provisions it.
+Configure editor formatting to use that same rustfmt executable.
+
+Public documentation can also be checked directly:
 
 ```sh
-cargo run --locked --manifest-path tools/rust-style/Cargo.toml --bin check-rust-spacing
-cargo run --locked --manifest-path tools/rust-style/Cargo.toml --bin check-rust-spacing -- --fix
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --manifest-path crates/Cargo.toml
 ```
 
@@ -181,21 +186,16 @@ shows lock and snapshot use without touching deployed state. Verify it directly
 with `cargo run --locked --manifest-path crates/Cargo.toml -p airlock-nix-core --example update_record`;
 run library doctests with `cargo test --locked --manifest-path crates/Cargo.toml -p airlock-nix-core --doc`.
 
-`--fix` itself runs rustfmt before inserting separators. `--root DIRECTORY`
-selects a fixture tree; otherwise the root is found from the tool's manifest,
-independently of the caller's working directory. The checker parses Rust syntax,
-does not follow symlinks or nested repositories, and excludes build/vendor/
-generated directories, hidden output trees and files marked generated at the top.
-Its parser dependencies belong only to the tooling workspace. `make rust-check`
-runs in CI separately from `test-quick`; test execution never automatically builds tools.
+`make rust-check` runs in CI separately from `test-quick`; test execution never
+automatically builds tools.
 
 ### Review and verification scope
 
-Automation checks rustfmt, declaration spacing and public documentation presence
-through strict rustdoc. **Review still checks meaning**, private/tuple field
-comments, conceptual function blocks, examples, opaque macro bodies and Rust
-snippets inside strings or documentation. Syntax parsing cannot inspect those
-opaque snippets; generated declarations must be reviewed at their macro template.
+Automation checks rustfmt, Clippy and public documentation presence through strict
+rustdoc. **Review still checks meaning**, private/tuple field comments, declaration
+and conceptual function spacing, examples, opaque macro bodies and Rust snippets
+inside strings or documentation. Generated declarations must be reviewed at their
+macro template.
 
 - Blank-line-only Rust edits: run `make rust-fmt` and `git diff --check`, and review
   the diff to confirm only spacing changed. Do not run tests, Clippy or rustdoc
@@ -206,7 +206,8 @@ opaque snippets; generated declarations must be reviewed at their macro template
 - Changed documentation code examples: verify the affected examples with focused
   doctests or example checks.
 - Rust code, dependencies or build tooling: run appropriate tests, formatting
-  checks and Clippy (`make rust-check` covers application, tooling and packer workspaces).
+  checks and Clippy (`make rust-check` covers application and packer workspaces,
+  including development tools, plus source-owned authoring crates).
 - Public API code or documentation-lint setup: also run strict rustdoc, as above;
   `make rust-doc` adds `--all-features` to cover the shared runtime and job-writer APIs.
 

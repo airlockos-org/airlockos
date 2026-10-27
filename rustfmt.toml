@@ -1,0 +1,3 @@
+# Use the same style for Cargo targets and editor formatting. Keep rustfmt's
+# default blank-line bounds so related statements can remain together.
+style_edition = "2024"
