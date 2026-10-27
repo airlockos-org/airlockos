@@ -207,7 +207,9 @@ impl Instance {
         let mut record = if reuse {
             existing.context("no image is recorded; start once without --reuse")?
         } else {
-            let (machine, _) = crate::repository::local(&self.context.root)?;
+            let source = airlock_nix_core::runtime::protocol::identity(&self.context.root)?;
+            crate::repository::check_image_source(&self.context.root)?;
+            let (machine, machine_revision) = crate::repository::local(&self.context.root)?;
             let seed = self.directory.join("machine-source.tar.gz");
             crate::source::seed(&machine, &seed, true)?;
             let candidate_root = self.directory.join("result-links/candidate-image");
@@ -222,12 +224,20 @@ impl Instance {
                 "--print-build-logs",
             ])?;
             build.env("AIRLOCK_MACHINE_SEED_ARCHIVE", seed);
-            let output = PathBuf::from(
-                support::text(&mut build)?
-                    .lines()
-                    .last()
-                    .context("image output")?,
+            let log = self.context.logs.join("image-build.log");
+            let result = build.stderr(File::create(&log)?).output()?;
+            ensure!(
+                result.status.success(),
+                "image build failed ({status}); see {log}",
+                status = result.status,
+                log = log.display()
             );
+            ensure!(
+                airlock_nix_core::runtime::protocol::identity(&self.context.root)? == source,
+                "source changed during image build; retry from a stable commit"
+            );
+            let output = String::from_utf8(result.stdout)?;
+            let output = PathBuf::from(output.lines().last().context("image output")?);
             let logical = output.clone();
             let selected = super::run::disk(&environment::physical(&output))?;
             let backing = logical.join(selected.file_name().context("image filename")?);
@@ -244,8 +254,10 @@ impl Instance {
                 "image":IMAGE,
                 "image_output":output,
                 "backing_image":backing,
-                "source_revision":support::git(&self.context.root, &["rev-parse","HEAD"] )?,
-                "source_dirty":!support::git(&self.context.root, &["status","--porcelain"] )?.is_empty(),
+                "source_revision":source.revision,
+                "source_lock_hash":source.lock_hash,
+                "source_dirty":false,
+                "machine_revision":machine_revision,
             })
         };
         record["display"] = json!(if headless { "none" } else { "gtk" });
@@ -345,6 +357,17 @@ pub(crate) fn execute(root: &Path, args: Args) -> Result<u8> {
         .create(true)
         .truncate(false)
         .open(instance.directory.join("operation.lock"))?;
+    if matches!(&args.command, Action::Status) {
+        let busy = match flock(&lock, FlockOperation::NonBlockingLockShared) {
+            Ok(()) => false,
+            Err(rustix::io::Errno::WOULDBLOCK) => true,
+            Err(error) => return Err(error.into()),
+        };
+        let mut status = instance.status()?;
+        status["operation_active"] = json!(busy);
+        println!("{status}", status = serde_json::to_string_pretty(&status)?);
+        return Ok(0);
+    }
     flock(&lock, FlockOperation::NonBlockingLockExclusive)
         .context("another lab operation is running")?;
     match args.command {

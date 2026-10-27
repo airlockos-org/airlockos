@@ -249,12 +249,14 @@ pub(super) fn execute(context: &Context) -> Result<u8> {
             "user,id=sysnet0",
         ]);
     }
+    if !managed {
+        command.arg("-no-reboot");
+    }
     command.args([
         "-device",
         "virtio-rng-pci",
         "-monitor",
         &format!("unix:{path},server=on,wait=off", path = monitor.display()),
-        "-no-reboot",
         "-display",
         match display.as_str() {
             "gtk" => "gtk,gl=off",
