@@ -69,7 +69,7 @@ fn immutable_configuration_in<T: DeserializeOwned>(
     owner: u32,
 ) -> Result<T> {
     let resolved = fs::canonicalize(path)
-        .with_context(|| format!("resolve configuration {}", path.display()))?;
+        .with_context(|| format!("resolve configuration {path}", path = path.display()))?;
     ensure!(
         resolved.starts_with(store) && resolved != store,
         "configuration must resolve inside the Nix store"
@@ -80,8 +80,8 @@ fn immutable_configuration_in<T: DeserializeOwned>(
             !metadata.file_type().is_symlink()
                 && metadata.uid() == owner
                 && metadata.mode() & 0o222 == 0,
-            "configuration store content is not immutable: {}",
-            entry.display()
+            "configuration store content is not immutable: {entry}",
+            entry = entry.display()
         );
     }
 
