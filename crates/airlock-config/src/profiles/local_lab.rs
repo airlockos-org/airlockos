@@ -23,12 +23,12 @@ pub fn machine() -> Result<MachineSnapshot, AuthoringError> {
 
     let home = Vm::personal("usr-home", &firewall, GiB(4))?;
     home.set_memory(Memory::Fixed(MiB(1536)));
-    home.add_module(application_scale());
+    home.add_module(application_session());
     machine.add(&home)?;
 
     let work = Vm::personal("usr-work", &firewall, GiB(4))?;
     work.set_memory(Memory::Fixed(MiB(1536)));
-    work.add_module(application_scale());
+    work.add_module(application_session());
     machine.add(&work)?;
 
     let gui = Vm::gui("sys-gui", &home)?;
@@ -38,7 +38,7 @@ pub fn machine() -> Result<MachineSnapshot, AuthoringError> {
     let controller = Vm::controller("sys-ctrl", &firewall, GiB(16))?;
     // Whole-machine Nix evaluation needs room for every VM system; the controller starts on demand.
     controller.set_memory(Memory::Fixed(MiB(16384)));
-    controller.add_module(application_scale());
+    controller.add_module(application_session());
     controller.add_module(NixosModule::with_arguments([] as [&str; 0], |_| {
         ModuleBody::new(nix_record! {
             "environment": nix_record! {
@@ -54,7 +54,7 @@ pub fn machine() -> Result<MachineSnapshot, AuthoringError> {
 
     let assistant = Vm::assistant("usr-assistant", &firewall, GiB(16))?;
     assistant.set_memory(Memory::Fixed(MiB(2048)));
-    assistant.add_module(application_scale());
+    assistant.add_module(application_session());
     machine.add(&assistant)?;
 
     let clipboard = Vm::hermit("sys-clipboard", MiB(128), HermitApplication::Clipboard)?;
@@ -66,10 +66,13 @@ pub fn machine() -> Result<MachineSnapshot, AuthoringError> {
     machine.finish()
 }
 
-/// Match application rendering to the virtual display rather than the laptop's HiDPI panel.
-fn application_scale() -> NixosModule {
-    NixosModule::with_arguments([] as [&str; 0], |_| {
+/// Match the virtual display and include the standard X11 clipboard client for local inspection.
+fn application_session() -> NixosModule {
+    NixosModule::with_arguments([] as [&str; 0], |context| {
         ModuleBody::new(nix_record! {
+            "environment": nix_record! {
+                "systemPackages": rusix::interop::raw::NixValue::list([context.pkgs.select("xclip")]),
+            },
             "airlock": nix_record! {
                 "appGui": nix_record! {
                     "scale": 1_i64,
