@@ -5,11 +5,11 @@
   </picture>
 </p>
 
-AirlockOS runs [NixOS](https://nixos.org/) in every virtual machine (VM) using the [Qubes](https://www.qubes-os.org/) architecture.
-Nix defines the machine configuration. Xen runs all VMs, including dom0, the
-privileged control VM.
+AirlockOS uses the [Qubes](https://www.qubes-os.org/) architecture, with machine
+configuration written in Rust and built through Nix. Xen runs all virtual
+machines (VMs), including dom0, the privileged control VM.
 
-- NixOS configuration for every VM, including dom0.
+- [NixOS](https://nixos.org/) for dom0, the desktop, networking, and user applications.
 - Whole-machine updates and system generation rollback.
 - Shared global Nix store with read-only per-VM closure views.
 - Persistent private VM data across updates and rollback.
