@@ -205,6 +205,7 @@ pub(crate) fn run(root: &Path, args: Args) -> Result<u8> {
         .stdin(Stdio::null())
         // Native tools must not be replaced by Cargo work in the active checkout.
         .env("CARGO_TARGET_DIR", run.path().join("target"))
+        .env("AIRLOCK_CARGO_VENDOR", &source.vendor)
         .env("GIT_TERMINAL_PROMPT", "0")
         // This Rust recipe is not a Make jobserver participant. Caller settings
         // remain in exported variables, but its closed jobserver FDs must not leak.

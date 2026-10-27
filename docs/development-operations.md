@@ -11,9 +11,10 @@ dom0 password before the image build, then provisions that serial automatically
 after success. Run it as the normal user and keep the selected USB connected.
 The build stays unprivileged; the waiting provisioning helper retains only a
 password hash. sys-gui keeps its existing development password. Both committed
-repository revisions are captured in a private checkout before credentials are
-collected. The build and installed source use that checkout, so development and
-commits can continue in the original checkout. A failed build or changes to the
+repository revisions and the prepared offline authoring dependencies are copied
+into private storage before credentials are collected. The build and installed
+source use that checkout, so development and commits can continue in the
+original checkout. A failed build or changes to the
 isolated source cancel provisioning. This combined operation uses
 its own temporary result link, so another build cannot replace its image through
 the shared `usb-dev-image` link. A successful build also updates that shared link

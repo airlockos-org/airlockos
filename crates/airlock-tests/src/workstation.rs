@@ -187,7 +187,22 @@ pub(crate) fn execute(root: &Path, name: &str, args: &[String]) -> Result<()> {
                     repo.join("crates/application.rs"),
                     "active uncommitted edit",
                 )?;
+                let vendor = Path::new(
+                    config["usb_flow"]["vendor_source"]
+                        .as_str()
+                        .context("active vendor path")?,
+                );
+                fs::write(vendor.join("source.txt"), "changed active cache")?;
             }
+            let vendor = std::env::var_os("AIRLOCK_CARGO_VENDOR")
+                .context("captured authoring dependencies")?;
+            let vendor = Path::new(&vendor);
+            ensure!(
+                Some(vendor) != config["usb_flow"]["vendor_source"].as_str().map(Path::new)
+                    && fs::read_to_string(vendor.join("source.txt"))?
+                        == "prepared authoring source",
+                "build did not retain independent prepared authoring dependencies"
+            );
             let source: Value = serde_json::from_slice(&fs::read(root.join("usb-source.json"))?)?;
             let checkout = Path::new(source["path"].as_str().context("captured source path")?);
             ensure!(

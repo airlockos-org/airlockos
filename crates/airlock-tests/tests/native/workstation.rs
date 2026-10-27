@@ -27,6 +27,7 @@ fn combined_usb_build_prepares_once_and_provisions_only_its_successful_image() -
     for outcome in [
         "success",
         "prepare_fail",
+        "vendor_missing",
         "build_fail",
         "missing_result",
         "source_change",
@@ -50,11 +51,21 @@ fn combined_usb_build_prepares_once_and_provisions_only_its_successful_image() -
             &fixture.root.join("airlock-machine"),
             &["rev-parse", "HEAD"],
         )?;
+        let vendor = if outcome == "source_change" {
+            fixture.path("authoring input with spaces")
+        } else {
+            fixture.root.join(".airlock-cache/authoring-vendor")
+        };
+        if outcome != "vendor_missing" {
+            fs::create_dir_all(&vendor)?;
+            fs::write(vendor.join("source.txt"), "prepared authoring source")?;
+        }
 
         let mut flow = json!({});
         if outcome != "success" {
             flow[outcome] = json!(true);
         }
+        flow["vendor_source"] = json!(vendor);
         fixture.configure(json!({"usb_flow":flow}))?;
         airlock_tests::process::peer_link(&fixture.path("tools"), "make")?;
         let usb = airlock_tests::process::peer_link(&fixture.path("tools"), "airlock-usb")?;
@@ -67,24 +78,34 @@ fn combined_usb_build_prepares_once_and_provisions_only_its_successful_image() -
             results.join("usb-dev-image"),
         )?;
 
-        let output = run(
-            &mut fixture.command(&[
-                "usb-build-provision",
-                "--usb-bin",
-                usb.to_str().unwrap(),
-                "--serial",
-                "fixture-serial",
-                "--public-key",
-                public.to_str().unwrap(),
-                "--nix-root",
-                fixture.path("store").to_str().unwrap(),
-                "--result-link-dir",
-                results.to_str().unwrap(),
-                "--resize-backup-dir",
-                fixture.path("backups").to_str().unwrap(),
-            ]),
-            None,
-        )?;
+        let mut command = fixture.command(&[
+            "usb-build-provision",
+            "--usb-bin",
+            usb.to_str().unwrap(),
+            "--serial",
+            "fixture-serial",
+            "--public-key",
+            public.to_str().unwrap(),
+            "--nix-root",
+            fixture.path("store").to_str().unwrap(),
+            "--result-link-dir",
+            results.to_str().unwrap(),
+            "--resize-backup-dir",
+            fixture.path("backups").to_str().unwrap(),
+        ]);
+        command.env_remove("AIRLOCK_CARGO_VENDOR");
+        if outcome == "source_change" {
+            command.env("AIRLOCK_CARGO_VENDOR", &vendor);
+        }
+        let output = run(&mut command, None)?;
+        if outcome == "vendor_missing" {
+            assert!(!output.status.success());
+            assert!(String::from_utf8_lossy(&output.stderr).contains("make prepare-dependencies"));
+            assert!(fixture.calls("sudo")?.is_empty());
+            assert!(fixture.calls("make")?.is_empty());
+            assert_eq!(fs::read_dir(&results)?.count(), 1);
+            continue;
+        }
 
         let succeeds = matches!(outcome, "success" | "source_change");
         assert_eq!(
@@ -131,6 +152,10 @@ fn combined_usb_build_prepares_once_and_provisions_only_its_successful_image() -
             assert_eq!(
                 fs::read_to_string(fixture.root.join("crates/application.rs"))?,
                 "active uncommitted edit"
+            );
+            assert_eq!(
+                fs::read_to_string(vendor.join("source.txt"))?,
+                "changed active cache"
             );
         }
         let published = ["success", "source_change", "provision_fail"].contains(&outcome);
