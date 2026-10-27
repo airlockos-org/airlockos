@@ -231,8 +231,7 @@ pub fn endpoint(config: &Path) -> Result<airlock_machine_core::services::Clipboa
     use airlock_machine_core::services::{ClipboardConnection, ClipboardEndpoint};
     use std::io::{Seek, SeekFrom};
 
-    crate::state::trusted(config)?;
-    let connections: Vec<ClipboardConnection> = crate::state::read(config)?;
+    let connections: Vec<ClipboardConnection> = crate::state::immutable_configuration(config)?;
     let caller = std::env::var("QREXEC_REMOTE_DOMAIN")?;
     let matches: Vec<_> = connections
         .iter()

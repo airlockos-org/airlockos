@@ -56,6 +56,38 @@ pub(crate) fn configuration<T: DeserializeOwned>(path: &Path) -> Result<T> {
     read_json(&resolved, LIMIT).with_context(|| format!("read configuration {}", path.display()))
 }
 
+/// Read NixOS configuration only after resolving it to root-owned, read-only store content.
+/// The store directory itself may be group-writable for Nix builders; its objects may not.
+pub(crate) fn immutable_configuration<T: DeserializeOwned>(path: &Path) -> Result<T> {
+    immutable_configuration_in(path, Path::new("/nix/store"), 0)
+}
+
+/// Check the store's ownership boundary independently of its platform-specific root and owner.
+fn immutable_configuration_in<T: DeserializeOwned>(
+    path: &Path,
+    store: &Path,
+    owner: u32,
+) -> Result<T> {
+    let resolved = fs::canonicalize(path)
+        .with_context(|| format!("resolve configuration {}", path.display()))?;
+    ensure!(
+        resolved.starts_with(store) && resolved != store,
+        "configuration must resolve inside the Nix store"
+    );
+    for entry in resolved.ancestors().take_while(|entry| *entry != store) {
+        let metadata = fs::symlink_metadata(entry)?;
+        ensure!(
+            !metadata.file_type().is_symlink()
+                && metadata.uid() == owner
+                && metadata.mode() & 0o222 == 0,
+            "configuration store content is not immutable: {}",
+            entry.display()
+        );
+    }
+
+    configuration(&resolved)
+}
+
 /// Treat only an absent configuration entry as disabled; broken generation links remain errors.
 pub(crate) fn optional_configuration<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
     match fs::symlink_metadata(path) {
@@ -85,10 +117,34 @@ mod configuration_tests {
 
         let decoded: Value = configuration(&configured)?;
         assert_eq!(decoded["schema"], "airlock.qubes-topology.v1");
-        assert_eq!(optional_configuration::<Value>(&configured)?, Some(decoded));
+        assert_eq!(
+            optional_configuration::<Value>(&configured)?,
+            Some(decoded.clone())
+        );
         assert!(optional_configuration::<Value>(&root.join("absent.json"))?.is_none());
         assert!(read::<Value>(&configured).is_err());
         assert!(optional::<Value>(&configured).is_err());
+
+        // The clipboard additionally requires immutable, root-owned store content.
+        // A local store and its owner exercise that boundary without changing the host store.
+        let owner = fs::metadata(&data)?.uid();
+        assert!(immutable_configuration_in::<Value>(&configured, root, owner).is_err());
+        fs::set_permissions(&data, Permissions::from_mode(0o444))?;
+        assert!(immutable_configuration_in::<Value>(&configured, root, owner).is_err());
+        fs::set_permissions(root.join("generation"), Permissions::from_mode(0o555))?;
+        assert_eq!(
+            immutable_configuration_in::<Value>(&configured, root, owner)?,
+            decoded
+        );
+        assert!(
+            immutable_configuration_in::<Value>(&configured, root, owner.wrapping_add(1)).is_err()
+        );
+        assert!(
+            immutable_configuration_in::<Value>(&configured, &root.join("etc"), owner).is_err()
+        );
+        assert!(read::<Value>(&configured).is_err());
+        fs::set_permissions(root.join("generation"), Permissions::from_mode(0o755))?;
+        fs::set_permissions(&data, Permissions::from_mode(0o644))?;
 
         let duplicate = br#"{"schema":"one","schema":"two"}"#;
         fs::write(&data, duplicate)?;
