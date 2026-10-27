@@ -29,9 +29,9 @@ pub(crate) struct Args {
     /// Exact hardware identity whose contents this operation will replace.
     #[arg(long)]
     serial: String,
-    /// Public SSH key installed during offline personalization.
+    /// Optional public SSH key; omission installs no SSH credentials.
     #[arg(long)]
-    public_key: PathBuf,
+    public_key: Option<PathBuf>,
     /// Physical root of the private Nix store, omitted when using the host store explicitly.
     #[arg(long)]
     nix_root: Option<PathBuf>,
@@ -137,7 +137,12 @@ pub(crate) fn run(root: &Path, args: Args) -> Result<u8> {
         "Supply --nix-root for the private Airlock store."
     );
     let usb = fs::canonicalize(&args.usb_bin).context("prepare image tools before provisioning")?;
-    let public_key = fs::canonicalize(&args.public_key).context("SSH public key is missing")?;
+    let public_key = args
+        .public_key
+        .as_ref()
+        .map(fs::canonicalize)
+        .transpose()
+        .context("SSH public key is missing")?;
     fs::create_dir_all(&args.result_link_dir)?;
     let result_directory = fs::canonicalize(&args.result_link_dir)?;
     let run = tempfile::Builder::new()
@@ -171,11 +176,12 @@ pub(crate) fn run(root: &Path, args: Args) -> Result<u8> {
         .arg(source.revision.as_str())
         .arg("--machine-revision")
         .arg(source.machine_revision.as_str())
-        .arg("--public-key")
-        .arg(public_key)
         .arg("--resize-backup-dir")
         .arg(&args.resize_backup_dir)
         .current_dir(&source.root);
+    if let Some(public_key) = public_key {
+        command.arg("--public-key").arg(public_key);
+    }
     if let Some(nix_root) = &args.nix_root {
         command.arg("--nix-root").arg(nix_root);
     }

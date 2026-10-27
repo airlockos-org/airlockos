@@ -13,12 +13,13 @@ make usb-dev-install USB_SERIAL=YOUR_USB_SERIAL
 ```
 
 Provisioning erases the selected USB disk. Verify its serial; the provisioner
-unmounts its partitions before writing. `USB_PUBLIC_KEY` selects the SSH public key.
+unmounts its partitions before writing. `USB_PUBLIC_KEY` optionally selects an SSH
+public key; omitting it installs no SSH credentials.
 Run the combined command as your normal user; it collects sudo authentication and
 the dom0 password before building, then provisions that build's exact result.
 The provisioner writes the image, grows its root filesystem, and installs the
-committed source and key. It leaves internal disks alone. If it reports stale
-partition information, unplug/replug and restart the combined command; unchanged
+committed source and any supplied key. It leaves internal disks alone. If it
+reports stale partition information, unplug/replug and restart the combined command; unchanged
 build outputs can be reused from cache. Do not
 improvise partition changes or resume a partial write.
 

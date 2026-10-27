@@ -26,6 +26,8 @@ fn report(command: &mut Command) -> Result<Value> {
 fn combined_usb_build_prepares_once_and_provisions_only_its_successful_image() -> Result<()> {
     for outcome in [
         "success",
+        "success_with_key",
+        "missing_key",
         "prepare_fail",
         "vendor_missing",
         "build_fail",
@@ -62,15 +64,17 @@ fn combined_usb_build_prepares_once_and_provisions_only_its_successful_image() -
         }
 
         let mut flow = json!({});
-        if outcome != "success" {
+        if !matches!(outcome, "success" | "success_with_key") {
             flow[outcome] = json!(true);
         }
         flow["vendor_source"] = json!(vendor);
         fixture.configure(json!({"usb_flow":flow}))?;
         airlock_tests::process::peer_link(&fixture.path("tools"), "make")?;
         let usb = airlock_tests::process::peer_link(&fixture.path("tools"), "airlock-usb")?;
-        let public = fixture.path("public-key");
-        fs::write(&public, "public key fixture")?;
+        let public = fixture.path("public key with spaces");
+        if outcome == "success_with_key" {
+            fs::write(&public, "public key fixture")?;
+        }
         let results = fixture.path("results");
         fs::create_dir(&results)?;
         symlink(
@@ -84,8 +88,6 @@ fn combined_usb_build_prepares_once_and_provisions_only_its_successful_image() -
             usb.to_str().unwrap(),
             "--serial",
             "fixture-serial",
-            "--public-key",
-            public.to_str().unwrap(),
             "--nix-root",
             fixture.path("store").to_str().unwrap(),
             "--result-link-dir",
@@ -93,21 +95,29 @@ fn combined_usb_build_prepares_once_and_provisions_only_its_successful_image() -
             "--resize-backup-dir",
             fixture.path("backups").to_str().unwrap(),
         ]);
+        if matches!(outcome, "success_with_key" | "missing_key") {
+            command.arg("--public-key").arg(&public);
+        }
         command.env_remove("AIRLOCK_CARGO_VENDOR");
         if outcome == "source_change" {
             command.env("AIRLOCK_CARGO_VENDOR", &vendor);
         }
         let output = run(&mut command, None)?;
-        if outcome == "vendor_missing" {
+        if matches!(outcome, "vendor_missing" | "missing_key") {
             assert!(!output.status.success());
-            assert!(String::from_utf8_lossy(&output.stderr).contains("make prepare-dependencies"));
+            let expected = if outcome == "missing_key" {
+                "SSH public key is missing"
+            } else {
+                "make prepare-dependencies"
+            };
+            assert!(String::from_utf8_lossy(&output.stderr).contains(expected));
             assert!(fixture.calls("sudo")?.is_empty());
             assert!(fixture.calls("make")?.is_empty());
             assert_eq!(fs::read_dir(&results)?.count(), 1);
             continue;
         }
 
-        let succeeds = matches!(outcome, "success" | "source_change");
+        let succeeds = matches!(outcome, "success" | "success_with_key" | "source_change");
         assert_eq!(
             output.status.success(),
             succeeds,
@@ -116,7 +126,18 @@ fn combined_usb_build_prepares_once_and_provisions_only_its_successful_image() -
         );
         assert_eq!(fixture.path("usb-provisioned").exists(), succeeds);
         assert_eq!(fixture.calls("sudo")?.len(), 1);
-        assert_eq!(fixture.calls("airlock-usb")?.len(), 1);
+        let helper_calls = fixture.calls("airlock-usb")?;
+        assert_eq!(helper_calls.len(), 1);
+        let helper_args = helper_calls[0].as_array().context("helper arguments")?;
+        let key_argument = helper_args.iter().position(|arg| arg == "--public-key");
+        if outcome == "success_with_key" {
+            assert_eq!(
+                helper_args[key_argument.context("key was not forwarded")? + 1],
+                public.to_str().unwrap()
+            );
+        } else {
+            assert!(key_argument.is_none());
+        }
         assert_eq!(
             fixture.calls("make")?.len(),
             usize::from(outcome != "prepare_fail")
@@ -158,7 +179,13 @@ fn combined_usb_build_prepares_once_and_provisions_only_its_successful_image() -
                 "changed active cache"
             );
         }
-        let published = ["success", "source_change", "provision_fail"].contains(&outcome);
+        let published = [
+            "success",
+            "success_with_key",
+            "source_change",
+            "provision_fail",
+        ]
+        .contains(&outcome);
         assert_eq!(
             fs::read_link(results.join("usb-dev-image"))?,
             std::path::PathBuf::from(if published {

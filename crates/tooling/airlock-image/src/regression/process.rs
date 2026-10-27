@@ -391,7 +391,7 @@ fn external_tool_password_prompt_validates_empty_and_confirmation() -> Result<()
     Ok(())
 }
 
-/// Invalid keys, missing commits and invalid firmware fail before a password prompt or source copy can begin.
+/// Explicit keys remain validated; omitting a key still requires committed source before collecting credentials.
 #[test]
 #[ignore = "requires explicitly prepared ssh-keygen and git"]
 fn external_tool_personalization_validates_inputs_before_credentials_or_disk_access() -> Result<()>
@@ -411,6 +411,7 @@ fn external_tool_personalization_validates_inputs_before_credentials_or_disk_acc
         "multiple-keys",
         "private-key",
         "missing-commit",
+        "missing-commit-without-key",
         "firmware",
     ] {
         let temporary = tempfile::tempdir()?;
@@ -446,9 +447,12 @@ fn external_tool_personalization_validates_inputs_before_credentials_or_disk_acc
             "prepare".to_owned(),
             "--repo".into(),
             repository.to_str().unwrap().into(),
-            "--public-key".into(),
-            public.to_str().unwrap().into(),
         ];
+        if damage != "missing-commit-without-key" {
+            arguments.extend(["--public-key".into(), public.to_str().unwrap().into()]);
+        } else {
+            fs::remove_file(&public)?;
+        }
         if damage == "firmware" {
             let firmware = root.join("invalid.vfct");
             fs::write(&firmware, b"invalid")?;
@@ -461,7 +465,7 @@ fn external_tool_personalization_validates_inputs_before_credentials_or_disk_acc
         );
         assert!(!error.to_lowercase().contains("password"));
         assert!(!error.contains("airlock-usb-source"));
-        if damage == "missing-commit" {
+        if matches!(damage, "missing-commit" | "missing-commit-without-key") {
             assert!(error.contains("requires a committed source HEAD"));
         } else {
             assert!(error.to_lowercase().contains("key") || error.contains("VFCT"));

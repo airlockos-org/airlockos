@@ -19,9 +19,9 @@ pub(crate) struct Settings {
     /// Source repository: copy HEAD, ignoring staged, unstaged and untracked changes.
     #[arg(long)]
     repo: PathBuf,
-    // Exactly one public SSH key; private keys are rejected.
+    /// Optional SSH public key for remote access; private keys are rejected.
     #[arg(long)]
-    public_key: PathBuf,
+    public_key: Option<PathBuf>,
     // Optional machine-local AMD firmware table validated before copying.
     #[arg(long)]
     amd_vfct: Option<PathBuf>,
@@ -33,8 +33,8 @@ pub(crate) struct Settings {
 pub(crate) struct Prepared {
     // Committed source captured before any destructive operation.
     source: CommittedSource,
-    // Validated public key bytes; the input file is never reopened during install.
-    key: Vec<u8>,
+    // Optional validated public key bytes; the input file is never reopened during install.
+    key: Option<Vec<u8>>,
     // Optional validated firmware bytes, independent of their original filesystem.
     firmware: Option<Vec<u8>>,
     // Only the password hash is retained for installation.
@@ -130,30 +130,7 @@ impl CommittedSource {
 impl Settings {
     pub(crate) fn prepare(&self) -> Result<Prepared> {
         let firmware = self.amd_vfct.as_deref().map(vfct).transpose()?;
-        let mut key = read(&self.public_key, 64 * 1024)?;
-        ensure!(
-            !key.windows(b"PRIVATE KEY".len())
-                .any(|w| w == b"PRIVATE KEY")
-                && key
-                    .split(|b| *b == b'\n')
-                    .filter(|line| !line.is_empty())
-                    .count()
-                    == 1,
-            "Supply exactly one SSH public key, never a private key."
-        );
-
-        if !key.ends_with(b"\n") {
-            key.push(b'\n');
-        }
-        let validated = captured(
-            Command::new("ssh-keygen").args(["-l", "-f", "/dev/stdin"]),
-            Some(key.clone()),
-        )?;
-        ensure!(
-            validated.status.success(),
-            "Invalid SSH public key: {}",
-            String::from_utf8_lossy(&validated.stderr)
-        );
+        let key = self.public_key.as_deref().map(public_key).transpose()?;
 
         let source = CommittedSource::capture(&self.repo, Path::new("/run"))?;
         println!(
@@ -190,6 +167,36 @@ impl Settings {
             password_hash: format!("{hash}\n").into_bytes(),
         })
     }
+}
+
+/// Validate an explicitly supplied public key before any credentials are collected or disk is changed.
+fn public_key(path: &Path) -> Result<Vec<u8>> {
+    let mut key = read(path, 64 * 1024)?;
+    ensure!(
+        !key.windows(b"PRIVATE KEY".len())
+            .any(|w| w == b"PRIVATE KEY")
+            && key
+                .split(|b| *b == b'\n')
+                .filter(|line| !line.is_empty())
+                .count()
+                == 1,
+        "Supply exactly one SSH public key, never a private key."
+    );
+
+    if !key.ends_with(b"\n") {
+        key.push(b'\n');
+    }
+    let validated = captured(
+        Command::new("ssh-keygen").args(["-l", "-f", "/dev/stdin"]),
+        Some(key.clone()),
+    )?;
+    ensure!(
+        validated.status.success(),
+        "Invalid SSH public key: {}",
+        String::from_utf8_lossy(&validated.stderr)
+    );
+
+    Ok(key)
 }
 
 pub(crate) fn beneath(root: &Path, relative: &Path) -> Result<PathBuf> {
@@ -321,14 +328,18 @@ impl Prepared {
             .mode(0o700)
             .create(password_file.parent().context("password parent")?)?;
         fs::create_dir_all(repo_target.parent().context("repo parent")?)?;
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(key_target.parent().context("key parent")?)?;
+        if self.key.is_some() {
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(key_target.parent().context("key parent")?)?;
+        }
 
         self.source.checkout(&repo_target)?;
 
-        private_file(&key_target, &self.key, 1000, 100, false)?;
+        if let Some(key) = &self.key {
+            private_file(&key_target, key, 1000, 100, false)?;
+        }
         private_file(&password_file, &self.password_hash, 0, 0, false)?;
         if let Some(data) = &self.firmware {
             fs::create_dir_all(vfct_target.parent().context("firmware parent")?)?;
@@ -339,10 +350,12 @@ impl Prepared {
         }
 
         chown_tree(&root.join("home/user"))?;
-        fs::set_permissions(
-            key_target.parent().context("key parent")?,
-            fs::Permissions::from_mode(0o700),
-        )?;
+        if self.key.is_some() {
+            fs::set_permissions(
+                key_target.parent().context("key parent")?,
+                fs::Permissions::from_mode(0o700),
+            )?;
+        }
         println!(
             "Personalized USB; writable repo at /home/user/dev/airlock ({commit}).",
             commit = self.source.commit

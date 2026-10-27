@@ -266,7 +266,8 @@ image-tools-build:
 	@mkdir -p "$(dir $(IMAGE_BUILD_ARTIFACTS))"
 	cargo build --locked --profile $(NATIVE_BUILD_PROFILE) --manifest-path crates/Cargo.toml -p airlock-image --message-format=json-render-diagnostics > "$(IMAGE_BUILD_ARTIFACTS)"
 
-USB_PUBLIC_KEY ?= $(HOME)/.ssh/id_ed25519.pub
+USB_PUBLIC_KEY ?=
+USB_PUBLIC_KEY_ARGS = $(if $(strip $(USB_PUBLIC_KEY)),--public-key "$(USB_PUBLIC_KEY)",)
 USB_INSECURE_DEV_PASSWORD ?= 0
 USB_DEV_PASSWORD_ARGS = $(if $(filter 1,$(USB_INSECURE_DEV_PASSWORD)),--insecure-dev-password,)
 
@@ -275,7 +276,7 @@ USB_DEV_PASSWORD_ARGS = $(if $(filter 1,$(USB_INSECURE_DEV_PASSWORD)),--insecure
 # The Rust wrapper must run before prerequisites, including native tool compilation.
 ifeq ($(AIRLOCK_IMAGE_BUILD_LIMITED),1)
 usb-dev-install: image-tools-build
-	@$(AIRLOCK_DEV) usb-build-provision --usb-bin "$(IMAGE_TOOLS_DIR)/airlock-usb" --serial "$(USB_SERIAL)" --public-key "$(USB_PUBLIC_KEY)" --result-link-dir "$(or $(AIRLOCK_RESULT_LINK_DIR),$(CURDIR)/.airlock)" $(if $(AIRLOCK_NIX_ROOT),--nix-root "$(AIRLOCK_NIX_ROOT)",) --resize-backup-dir "$(or $(AIRLOCK_LOG_DIR),/var/log/airlock)/usb-root-expansion" $(USB_DEV_PASSWORD_ARGS)
+	@$(AIRLOCK_DEV) usb-build-provision --usb-bin "$(IMAGE_TOOLS_DIR)/airlock-usb" --serial "$(USB_SERIAL)" $(USB_PUBLIC_KEY_ARGS) --result-link-dir "$(or $(AIRLOCK_RESULT_LINK_DIR),$(CURDIR)/.airlock)" $(if $(AIRLOCK_NIX_ROOT),--nix-root "$(AIRLOCK_NIX_ROOT)",) --resize-backup-dir "$(or $(AIRLOCK_LOG_DIR),/var/log/airlock)/usb-root-expansion" $(USB_DEV_PASSWORD_ARGS)
 
 usb-dom0-console-image: ensure-generated-dirs
 	$(AIRLOCK_NIX) build .#airlock-usb-dom0-console-image --out-link "$(or $(AIRLOCK_RESULT_LINK_DIR),$(CURDIR)/.airlock)/usb-dom0-console-image" --print-build-logs
