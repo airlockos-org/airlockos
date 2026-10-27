@@ -75,6 +75,9 @@ enum Action {
         /// Immutable typed clipboard contracts installed with the host generation.
         #[arg(long)]
         config: PathBuf,
+        /// Authenticated GUI name forwarded by the installed, narrowly authorized sudo wrapper.
+        #[arg(long)]
+        caller: Option<GuestName>,
     },
     /// Enforce the installed admission RPC and privileged receiver contracts.
     AdmissionAdapter(admission_adapter::Request),
@@ -284,7 +287,10 @@ fn run(args: Args) -> Result<Value> {
 
     let c = Coordinator::new(args.state);
     Ok(match args.command {
-        Action::ClipboardEndpoint { config } => serde_json::to_value(hermit::endpoint(&config)?)?,
+        Action::ClipboardEndpoint { config, caller } => serde_json::to_value(match caller {
+            Some(caller) => hermit::endpoint_for(&config, &caller)?,
+            None => hermit::endpoint(&config)?,
+        })?,
         Action::AdmissionAdapter(request) => {
             admission_adapter::execute(request)?;
             Value::Null

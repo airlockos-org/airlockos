@@ -242,17 +242,46 @@ pub(crate) fn host_module(connections: &[ClipboardConnection], workspace: Worksp
     let connections = connections.to_vec();
     ContextualModule::new(move |inputs| {
         let service = Application::Dom0.build(&inputs.pkgs, &workspace).as_expression();
+        let command = nix_text!(
+            "{service}/bin/airlock-dom0-service clipboard-endpoint --config /etc/airlock/clipboards.json",
+            service = service,
+        );
         let endpoint = inputs.pkgs.clone().select("writeShellScript")
             .call("airlock-clipboard-endpoint")
             .call(nix_text!(r#"
-                exec {service}/bin/airlock-dom0-service clipboard-endpoint --config /etc/airlock/clipboards.json
-            "#, service = service));
+                set -eu
+                [ -n "${{QREXEC_REMOTE_DOMAIN:-}}" ] || exit 1
+                [ -z "${{QREXEC_SERVICE_ARGUMENT:-}}" ] || exit 1
+                exec /run/wrappers/bin/sudo -n {command} --caller "$QREXEC_REMOTE_DOMAIN"
+            "#, command = command.clone()));
+
+        // Sudo receives a literal caller argument, so no qrexec environment or
+        // general-purpose environment overrides cross this privilege boundary.
+        let commands = connections.iter().map(|connection| &connection.gui)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter().map(|gui| nix_record! {
+                "command": nix_text!("{command} --caller {gui}", command = command.clone(), gui = gui.as_str()),
+                "options": NixValue::list(["NOPASSWD".into()]),
+            }).collect::<Vec<_>>();
+        let sudo_rules = if commands.is_empty() {
+            Vec::new()
+        } else {
+            vec![nix_record! {
+                "users": NixValue::list([inputs.config.clone().select("airlock.dom0.user")]),
+                "commands": NixValue::list(commands),
+            }]
+        };
 
         // Upstream joins the complete policy directory from its Qubes packages.
         let policy = inputs.pkgs.clone().select("writeTextDir")
             .call("etc/qubes/policy.d/44-airlock-clipboard.policy")
             .call(policy(&connections));
         ModuleBody::new(nix_record! {
+            "security": nix_record! {
+                "sudo": nix_record! {
+                    "extraRules": NixValue::list(sudo_rules),
+                },
+            },
             "virtualisation": nix_record! {
                 "qubes": nix_record! {
                     "packages": NixValue::list([policy]),

@@ -228,14 +228,26 @@ fn console_line(line: &str) -> &str {
 /// Read a boot-bound control offer for the authenticated configured GUI caller.
 /// This observer returns transport coordinates only; it never sees clipboard data.
 pub fn endpoint(config: &Path) -> Result<airlock_machine_core::services::ClipboardEndpoint> {
+    let caller = std::env::var("QREXEC_REMOTE_DOMAIN")?.parse()?;
+    endpoint_for(config, &caller)
+}
+
+/// Read private execution evidence for the caller bound by the installed RPC and exact sudo rule.
+pub(crate) fn endpoint_for(
+    config: &Path,
+    caller: &airlock_nix_core::identity::GuestName,
+) -> Result<airlock_machine_core::services::ClipboardEndpoint> {
     use airlock_machine_core::services::{ClipboardConnection, ClipboardEndpoint};
     use std::io::{Seek, SeekFrom};
 
+    ensure!(
+        rustix::process::geteuid().is_root(),
+        "clipboard endpoint requires root to read execution evidence"
+    );
     let connections: Vec<ClipboardConnection> = crate::state::immutable_configuration(config)?;
-    let caller = std::env::var("QREXEC_REMOTE_DOMAIN")?;
     let matches: Vec<_> = connections
         .iter()
-        .filter(|connection| connection.gui.as_str() == caller)
+        .filter(|connection| &connection.gui == caller)
         .collect();
     let [connection] = matches.as_slice() else {
         anyhow::bail!("caller has no unique clipboard authority");
