@@ -197,6 +197,29 @@ fn artifacts(context: &ModuleContext, build: &Build, topology: NixValue) -> NixV
         .call("\n")
         .call(hermit_links);
 
+    let hermit_images = context
+        .lib
+        .clone()
+        .select("mapAttrsToList")
+        .call(NixValue::function(|_| {
+            NixValue::function(|domain| domain.select("backend.system.source"))
+        }))
+        .call(
+            context
+                .lib
+                .clone()
+                .select("filterAttrs")
+                .call(NixValue::function(|_| {
+                    NixValue::function(|domain| domain.select("backend.type").equals("hermit"))
+                }))
+                .call(
+                    context
+                        .config
+                        .clone()
+                        .select("airlock.qubes.topology.domains"),
+                ),
+        );
+
     manifest(context, build).bind(|manifest| {
         let release_manifest = json("airlock-machine-release.json", manifest.clone());
         let transport_manifest = json(
@@ -279,12 +302,14 @@ fn artifacts(context: &ModuleContext, build: &Build, topology: NixValue) -> NixV
                             "airlockMachineRelease": release,
                             "airlockMachineTransport": transport,
                         },
-                        "extraDependencies": NixValue::builtin("map")
-                            .call(NixValue::function(|kernel| kernel.select("source")))
-                            .call(
-                                NixValue::builtin("attrValues")
-                                    .call(context.config.clone().select("airlock.qubes.kernels")),
-                            ),
+                        // Diskless guests have no pool seed to retain their boot executable.
+                        "extraDependencies": NixValue::concat_lists([
+                            NixValue::builtin("map")
+                                .call(NixValue::function(|kernel| kernel.select("source")))
+                                .call(NixValue::builtin("attrValues")
+                                    .call(context.config.clone().select("airlock.qubes.kernels"))),
+                            hermit_images,
+                        ]),
                     },
                     "environment": nix_record! {
                         "etc": nix_record! {
