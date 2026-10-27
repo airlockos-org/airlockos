@@ -1,30 +1,31 @@
 {
   "nodes": {
     "airlock-apps": {
+      "flake": false,
       "locked": {
         "dir": "crates",
-        "lastModified": 1793096049,
-        "narHash": "sha256-bCNrd72P/HF2RP6LINWVk5sdcYo2NJjFFEOnSq5S7v0=",
+        "lastModified": 1793100835,
+        "narHash": "sha256-m6Msbsmrh463rQ4eozHJMfr6uBVCjFHGlH/TSGgm+jQ=",
         "ref": "refs/heads/main",
-        "rev": "0bec2a9c6e7b2f73ce28cda93cb86efac09e8206",
-        "submodules": false,
+        "rev": "b8c75b4afbcb1d92b4b3f1b83b0fa63f5a6ea6cd",
+        "revCount": 233,
         "type": "git",
         "url": "https://github.com/airlockos-org/airlockos.git"
       },
       "original": {
         "dir": "crates",
-        "rev": "0bec2a9c6e7b2f73ce28cda93cb86efac09e8206",
+        "ref": "main",
+        "rev": "b8c75b4afbcb1d92b4b3f1b83b0fa63f5a6ea6cd",
         "type": "git",
-        "url": "https://github.com/airlockos-org/airlockos.git",
-        "ref": "main"
-      },
-      "flake": false
+        "url": "https://github.com/airlockos-org/airlockos.git"
+      }
     },
     "airlock-machine": {
       "inputs": {
         "airlock-apps": "airlock-apps",
+        "hermit-xen": "hermit-xen",
         "nixos-qubes": "nixos-qubes",
-        "nixpkgs": "nixpkgs",
+        "nixpkgs": "nixpkgs_2",
         "nixpkgs-libvirt_10_5": "nixpkgs-libvirt_10_5"
       },
       "locked": {
@@ -74,35 +75,35 @@
       },
       "locked": {
         "dir": "crates/vendor/nixos-qubes",
-        "lastModified": 1793096049,
-        "narHash": "sha256-bCNrd72P/HF2RP6LINWVk5sdcYo2NJjFFEOnSq5S7v0=",
+        "lastModified": 1793100835,
+        "narHash": "sha256-m6Msbsmrh463rQ4eozHJMfr6uBVCjFHGlH/TSGgm+jQ=",
         "ref": "refs/heads/main",
-        "rev": "0bec2a9c6e7b2f73ce28cda93cb86efac09e8206",
-        "submodules": false,
+        "rev": "b8c75b4afbcb1d92b4b3f1b83b0fa63f5a6ea6cd",
+        "revCount": 233,
         "type": "git",
         "url": "https://github.com/airlockos-org/airlockos.git"
       },
       "original": {
         "dir": "crates/vendor/nixos-qubes",
-        "rev": "0bec2a9c6e7b2f73ce28cda93cb86efac09e8206",
+        "ref": "main",
+        "rev": "b8c75b4afbcb1d92b4b3f1b83b0fa63f5a6ea6cd",
         "type": "git",
-        "url": "https://github.com/airlockos-org/airlockos.git",
-        "ref": "main"
+        "url": "https://github.com/airlockos-org/airlockos.git"
       }
     },
     "nixpkgs": {
       "locked": {
-        "lastModified": 1788531059,
-        "narHash": "sha256-hLD4l3QOGBQhkVp3mQ2lJ/YbEi99qUgKapb40KovZ88=",
+        "lastModified": 1788187754,
+        "narHash": "sha256-bu1QxmXKmPuvBLN7bHP355OV9Qo13x9WCiRDH62CqRM=",
         "owner": "NixOS",
         "repo": "nixpkgs",
-        "rev": "801bef6abd86b91e51083066b83fb354a11fc640",
+        "rev": "5dfba6236110080a54247d6460bc2ff5dda939cc",
         "type": "github"
       },
       "original": {
         "owner": "NixOS",
-        "ref": "nixos-unstable",
         "repo": "nixpkgs",
+        "rev": "5dfba6236110080a54247d6460bc2ff5dda939cc",
         "type": "github"
       }
     },
@@ -167,6 +168,83 @@
       "original": {
         "owner": "numtide",
         "repo": "treefmt-nix",
+        "type": "github"
+      }
+    },
+    "hermit-rs": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1792315002,
+        "narHash": "sha256-uY3bYdTgGjRRbg3MPPgfff3N+6AYEtTmJtjUTcSR+kk=",
+        "owner": "hermit-os",
+        "repo": "hermit-rs",
+        "rev": "e9dc6784ad1a2dc6d18c6819ee51198cab9fb78a",
+        "type": "github"
+      },
+      "original": {
+        "owner": "hermit-os",
+        "repo": "hermit-rs",
+        "rev": "e9dc6784ad1a2dc6d18c6819ee51198cab9fb78a",
+        "type": "github"
+      }
+    },
+    "hermit-xen": {
+      "inputs": {
+        "hermit-rs": "hermit-rs",
+        "nixpkgs": "nixpkgs",
+        "rust-overlay": "rust-overlay"
+      },
+      "locked": {
+        "lastModified": 1793033204,
+        "narHash": "sha256-zf3Mt1fv5dcNntCbEXsabZ3R5kJFmiEUK6B3pdAjoXs=",
+        "rev": "70f6f77034a2b1e077f91950e71033a2afd696e0",
+        "revCount": 4,
+        "submodules": true,
+        "type": "git",
+        "url": "https://github.com/airlockos-org/hermit-xen"
+      },
+      "original": {
+        "rev": "70f6f77034a2b1e077f91950e71033a2afd696e0",
+        "submodules": true,
+        "type": "git",
+        "url": "https://github.com/airlockos-org/hermit-xen"
+      }
+    },
+    "nixpkgs_2": {
+      "locked": {
+        "lastModified": 1788531059,
+        "narHash": "sha256-hLD4l3QOGBQhkVp3mQ2lJ/YbEi99qUgKapb40KovZ88=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "801bef6abd86b91e51083066b83fb354a11fc640",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "rust-overlay": {
+      "inputs": {
+        "nixpkgs": [
+          "airlock-machine",
+          "hermit-xen",
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1793000331,
+        "narHash": "sha256-6sLQgHX/V/yF8VrhmsJroujeRua1GY3nDTEpnY7tHF4=",
+        "owner": "oxalica",
+        "repo": "rust-overlay",
+        "rev": "0d0575988e4bb9ebc4cf1afb1cec1ceac0b5914e",
+        "type": "github"
+      },
+      "original": {
+        "owner": "oxalica",
+        "repo": "rust-overlay",
         "type": "github"
       }
     }
