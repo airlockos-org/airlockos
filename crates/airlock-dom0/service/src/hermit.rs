@@ -8,28 +8,52 @@ use std::{fs, io::Read, os::unix::fs::MetadataExt, path::Path};
 /// Validate a store-resident regular executable without following artifact symlinks.
 /// Reading is bounded by the descriptor, including one byte to detect concurrent growth.
 pub fn verify(artifact: &Descriptor, memory_mib: u64) -> Result<Image> {
+    verify_owned(artifact, memory_mib, 0)
+}
+
+/// Authenticate build outputs owned by root or the current unprivileged Nix builder.
+/// This image check supplies no runtime admission or permission to start a VM.
+pub(crate) fn verify_image(artifact: &Descriptor, memory_mib: u64) -> Result<Image> {
+    verify_owned(artifact, memory_mib, rustix::process::geteuid().as_raw())
+}
+
+/// Keep descriptor, digest and loader checks identical across build and runtime verification.
+fn verify_owned(artifact: &Descriptor, memory_mib: u64, owner: u32) -> Result<Image> {
     artifact.validate(false)?;
     ensure!(
         (16..=256).contains(&memory_mib),
         "invalid Hermit memory allocation"
     );
-    let path = Path::new(artifact.executable.as_str());
+
+    let file = open_executable(
+        Path::new(artifact.executable.as_str()),
+        artifact.bytes,
+        owner,
+    )?;
+    let mut bytes = Vec::with_capacity(artifact.bytes as usize);
+    file.take(artifact.bytes + 1).read_to_end(&mut bytes)?;
+
+    Ok(artifact.verify(&bytes, memory_mib * 1024 * 1024, false)?)
+}
+
+/// Open an exact regular read-only file owned by root or the explicitly selected builder.
+fn open_executable(path: &Path, bytes: u64, owner: u32) -> Result<fs::File> {
     ensure!(
         fs::canonicalize(path)? == path,
         "Hermit executable must not be a symlink"
     );
+
     let file = fs::File::open(path)?;
     let metadata = file.metadata()?;
     ensure!(
         metadata.is_file()
-            && metadata.len() == artifact.bytes
-            && metadata.uid() == 0
+            && metadata.len() == bytes
+            && (metadata.uid() == 0 || metadata.uid() == owner)
             && metadata.mode() & 0o222 == 0,
         "Hermit executable is not an immutable admitted file"
     );
-    let mut bytes = Vec::with_capacity(artifact.bytes as usize);
-    file.take(artifact.bytes + 1).read_to_end(&mut bytes)?;
-    Ok(artifact.verify(&bytes, memory_mib * 1024 * 1024, false)?)
+
+    Ok(file)
 }
 
 /// Current-boot console boundary captured before the guest is spawned.
@@ -351,6 +375,29 @@ pub fn boot_xml(xml: &str, artifact: &Descriptor, memory: u64, nonce: &str) -> R
 mod tests {
     use super::*;
 
+    /// Image verification admits the builder's sealed output while runtime keeps root ownership.
+    #[test]
+    fn image_ownership_does_not_grant_runtime_admission() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("kernel.elf");
+        fs::write(&path, b"build output")?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o555))?;
+        let owner = rustix::process::geteuid().as_raw();
+        assert!(open_executable(&path, 12, owner).is_ok());
+        assert_eq!(open_executable(&path, 12, 0).is_ok(), owner == 0);
+
+        // Build ownership never permits writable, substituted or incorrectly sized files.
+        assert!(open_executable(&path, 13, owner).is_err());
+        let link = directory.path().join("linked.elf");
+        std::os::unix::fs::symlink(&path, &link)?;
+        assert!(open_executable(&link, 12, owner).is_err());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+        assert!(open_executable(&path, 12, owner).is_err());
+        Ok(())
+    }
+
     /// Real Xen console decoration must preserve exact challenge matching.
     #[test]
     fn xen_timestamps_do_not_hide_application_execution() {
@@ -395,11 +442,13 @@ mod tests {
     fn built_executable_passes_admission() {
         let path = std::env::var_os("AIRLOCK_HERMIT_ARTIFACT").expect("artifact.json path");
         let descriptor: Descriptor = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
-        let image = verify(&descriptor, 32).unwrap();
+        let image = verify_image(&descriptor, 32).unwrap();
         assert!(image.entry > 0 && image.memory_end <= 32 * 1024 * 1024);
+        let root_owned = fs::metadata(descriptor.executable.as_str()).unwrap().uid() == 0;
+        assert_eq!(verify(&descriptor, 32).is_ok(), root_owned);
         let mut substituted = descriptor;
         substituted.sha256 = "0".repeat(64).parse().unwrap();
-        assert!(verify(&substituted, 32).is_err());
+        assert!(verify_image(&substituted, 32).is_err());
     }
 
     #[test]

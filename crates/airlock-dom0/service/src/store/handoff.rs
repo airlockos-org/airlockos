@@ -137,7 +137,7 @@ pub(super) fn image(topology: Value, physical: &Path, logical: &Path) -> Result<
     for (name, domain) in &inputs.topology().domains {
         let backend = &domain.backend;
         if let Some(artifact) = backend.hermit() {
-            crate::hermit::verify(
+            crate::hermit::verify_image(
                 artifact,
                 domain
                     .prefs
