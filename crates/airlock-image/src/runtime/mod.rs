@@ -131,7 +131,7 @@ pub(crate) fn main() -> Result<()> {
         if vm.class == "HermitVM" {
             ensure!(
                 observed["snapshot"]["volumes"]
-                    .as_object()
+                    .as_array()
                     .is_some_and(|volumes| volumes.is_empty()),
                 "Hermit acquired Linux storage"
             );

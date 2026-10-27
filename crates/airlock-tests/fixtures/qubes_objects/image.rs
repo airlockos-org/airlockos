@@ -190,7 +190,7 @@ fn vm(
                 damage("property")?;
             }
 
-            if key == "guivm" {
+            if key == "guivm" && object.getattr("klass")?.extract::<String>()? != "HermitVM" {
                 let directory = object.getattr("dir_path")?.extract::<PathBuf>()?;
                 let features = object.getattr("features")?;
                 features.set_item(
@@ -466,6 +466,11 @@ fn app(
             ))?;
             vm.getattr("features")?
                 .set_item("fixture-class", argument(args, 1)?)?;
+            vm.setattr("klass", argument(args, 1)?)?;
+            if argument(args, 1)?.extract::<String>()? == "HermitVM" {
+                vm.getattr("volume_config")?.call_method0("clear")?;
+            }
+
             object
                 .getattr("domains")?
                 .set_item(vm.getattr("name")?, &vm)?;

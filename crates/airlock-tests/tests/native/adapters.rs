@@ -353,7 +353,7 @@ fn qubes_installation_guard_uses_native_fresh_state() -> Result<()> {
     Ok(())
 }
 
-/// Offline image setup preserves Qubes identities and rejects adapter or snapshot failures.
+/// Offline image setup preserves disk-backed and diskless identities and rejects adapter failures.
 #[test]
 fn image_plan_and_reloaded_snapshot_are_checked() -> Result<()> {
     for scenario in [
@@ -447,6 +447,25 @@ fn image_plan_and_reloaded_snapshot_are_checked() -> Result<()> {
                 .unwrap()
                 .remove("guivm");
         }
+        if scenario.is_empty() {
+            topology["domains"]["sys-clipboard"] = json!({
+                "class":"HermitVM", "label":"green", "netvm":null, "template":null,
+                "prefs":{"memory":32,"maxmem":32,"vcpus":1,"guivm":null,"audiovm":null,"kernel":"","virt_mode":"pvh"},
+                "features":{"airlock-backend":"hermit","qrexec":"","gui":""}, "services":{},
+                "backend":{
+                    "type":"hermit",
+                    "system":{"source":"/nix/store/dddddddddddddddddddddddddddddddd-hermit"},
+                    "artifact":{
+                        "schema":"airlock.hermit-pvh.v1",
+                        "executable":"/nix/store/dddddddddddddddddddddddddddddddd-hermit/kernel.elf",
+                        "sha256":"0".repeat(64), "bytes":1024,
+                        "source_revision":"a".repeat(40), "integration_revision":"b".repeat(40),
+                        "build_lock":"c".repeat(64), "authority":"disconnected"
+                    }
+                }
+            });
+        }
+
         let config = directory.join("topology.json");
         fs::write(&config, serde_json::to_vec(&topology)?)?;
         let output = directory.join("output");
@@ -554,7 +573,18 @@ fn image_plan_and_reloaded_snapshot_are_checked() -> Result<()> {
                 .count(),
             2
         );
-        let domain = &plan["domains"][0];
+        let domains = plan["domains"].as_array().unwrap();
+        if scenario.is_empty() {
+            let hermit = domains
+                .iter()
+                .find(|vm| vm["name"] == "sys-clipboard")
+                .unwrap();
+            assert!(hermit["volumes"].as_array().unwrap().is_empty());
+            assert!(hermit["features"].get("airlock-root-source").is_none());
+            assert_eq!(hermit["features"]["fixture-class"], "HermitVM");
+            assert!(!output.join("qubes/appvms/sys-clipboard/root.img").exists());
+        }
+        let domain = domains.iter().find(|vm| vm["name"] == "usr-home").unwrap();
         assert_eq!(domain["uuid"], "738a6af9-8e51-590d-afe4-790b26fbca79");
         assert_eq!(domain["features"]["qrexec"], "1");
         assert_eq!(domain["features"]["service.example"], "");

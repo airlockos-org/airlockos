@@ -286,12 +286,26 @@ impl<'py> Session<'py> {
         for plan in plans {
             let vm = self.vm(&plan.name)?;
             let label = vm.getattr("label")?;
-            observations.insert(plan.name.clone(), json!({
-                "label": label.getattr("name")?.extract::<String>()?,
-                "color": label.getattr("color")?.extract::<String>()?,
-                "root_source": vm.getattr("features")?.get_item("airlock-root-source")?.extract::<String>()?,
-                "snapshot": snapshot::read(self.app()?, &vm)?,
-            }));
+            // Diskless VMs have no Linux root identity; disk-backed VMs must retain theirs.
+            let root_source = if plan.root_image.is_some() {
+                Some(
+                    vm.getattr("features")?
+                        .get_item("airlock-root-source")?
+                        .extract::<String>()?,
+                )
+            } else {
+                None
+            };
+
+            observations.insert(
+                plan.name.clone(),
+                json!({
+                    "label": label.getattr("name")?.extract::<String>()?,
+                    "color": label.getattr("color")?.extract::<String>()?,
+                    "root_source": root_source,
+                    "snapshot": snapshot::read(self.app()?, &vm)?,
+                }),
+            );
         }
 
         Ok(Value::Object(observations))
