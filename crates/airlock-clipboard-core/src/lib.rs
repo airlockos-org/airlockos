@@ -7,6 +7,10 @@
 #![no_std]
 #![warn(missing_docs)]
 
+extern crate alloc;
+
+pub mod shared;
+
 /// Maximum retained clipboard content, including an incomplete transfer.
 pub const MAX_CONTENT: usize = 65_536;
 

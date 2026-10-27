@@ -313,7 +313,7 @@ impl Schema<'_> {
             (
                 "authority",
                 self.option(
-                    self.enumeration(&["disconnected"]),
+                    self.enumeration(&["disconnected", "normal"]),
                     None,
                     "Production machine images cannot provision laboratory authority.",
                 ),

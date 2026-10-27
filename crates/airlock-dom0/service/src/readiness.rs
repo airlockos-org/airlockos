@@ -265,7 +265,10 @@ fn wait(
                     return supervise(
                         GuestState::Ready,
                         &domain.parse()?,
-                        &format!("{domain} executes {expected}; clipboard IPC isolated"),
+                        &format!(
+                            "{domain} executes {expected}; clipboard authority {authority:?}",
+                            authority = artifact.authority
+                        ),
                     );
                 }
                 Err(error) => writeln!(log, "Hermit execution pending: {error}")?,

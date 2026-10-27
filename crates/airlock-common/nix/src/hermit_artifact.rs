@@ -20,6 +20,8 @@ pub const MAX_EXECUTABLE_BYTES: u64 = 64 * 1024 * 1024;
 pub enum AuthorityMode {
     /// No peer grants or clipboard authorization; safe for isolated deployment.
     Disconnected,
+    /// Normal shared clipboard with a boot-bound GUI provisioner and direct data peers.
+    Normal,
     /// Controlled test peer only; inadmissible to a production machine.
     Laboratory,
 }
@@ -79,7 +81,7 @@ impl Descriptor {
             "file size",
         )?;
         require(
-            laboratory || self.authority == AuthorityMode::Disconnected,
+            laboratory || self.authority != AuthorityMode::Laboratory,
             "laboratory authority",
         )
     }

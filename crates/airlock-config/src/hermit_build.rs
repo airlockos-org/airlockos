@@ -8,7 +8,7 @@ use rusix::{
 };
 
 /// Portable integration pin; development overrides must select this exact local commit.
-pub(crate) const INTEGRATION_REVISION: &str = "70f6f77034a2b1e077f91950e71033a2afd696e0";
+pub(crate) const INTEGRATION_REVISION: &str = "03bd87fad25d094f0a19c9ef936994683bc2e7e1";
 
 /// Portable flake input; local development overrides must retain the pinned Git identity.
 pub(crate) fn input() -> NixValue {
@@ -99,22 +99,32 @@ pub(crate) fn constructor(
     integration: NixValue,
     revision: NixValue,
 ) -> NixValue {
-    NixValue::function_attrs(["name", "memory", "vcpus", "autostart"], |request| {
-        let image = integration
-            .clone()
-            .select("lib.x86_64-linux.buildHermitApplication")
-            .call(nix_record! {
-                "src": source(pkgs, workspace, &integration),
-                "bin": "sys-clipboard",
-                "pname": "airlock-sys-clipboard",
-            })
-            .select("overrideAttrs")
-            .call(NixValue::function(|_| {
-                nix_record! {
-                    "AIRLOCK_SOURCE_REVISION": revision.clone(),
-                }
-            }));
-        let image = image.bind(|image| {
+    NixValue::function_attrs(
+        ["name", "memory", "vcpus", "autostart", "clipboardAuthority"],
+        |request| {
+            let image = integration
+                .clone()
+                .select("lib.x86_64-linux.buildHermitApplication")
+                .call(nix_record! {
+                    "src": source(pkgs, workspace, &integration),
+                    "bin": "sys-clipboard",
+                    "pname": "airlock-sys-clipboard",
+                })
+                .select("overrideAttrs")
+                .call(NixValue::function(|_| {
+                    nix_record! {
+                        "AIRLOCK_SOURCE_REVISION": revision.clone(),
+                    }
+                }));
+            let authority = NixValue::if_else(
+                request
+                    .clone()
+                    .select("clipboardAuthority")
+                    .equals(NixValue::null()),
+                "disconnected",
+                "normal",
+            );
+            let image = image.bind(|image| {
             pkgs.clone().select("runCommand").call("airlock-hermit-clipboard").call(nix_record! {
                 // Build paths in DWARF and panic strings must not import a compiler into dom0.
                 "allowedReferences": NixValue::list(["out".into()]),
@@ -130,17 +140,18 @@ pub(crate) fn constructor(
                 digest=$(sha256sum "$out/kernel.elf" | cut -d' ' -f1)
                 bytes=$(stat -c %s "$out/kernel.elf")
                 {jq}/bin/jq -n --arg executable "$out/kernel.elf" --arg digest "$digest" --argjson bytes "$bytes" \
-                  --arg revision {revision} --arg integration {integration_revision} --arg lock {lock} \
+                  --arg revision {revision} --arg integration {integration_revision} --arg lock {lock} --arg authority {authority} \
                   '{{schema:"airlock.hermit-pvh.v1",executable:$executable,sha256:$digest,bytes:$bytes,
-                    source_revision:$revision,integration_revision:$integration,build_lock:$lock,authority:"disconnected"}}' > "$out/artifact.json"
+                    source_revision:$revision,integration_revision:$integration,build_lock:$lock,authority:$authority}}' > "$out/artifact.json"
             "#, image = image, jq = pkgs.clone().select("jq"),
                 binutils = pkgs.clone().select("binutils"),
                 nuke_references = pkgs.clone().select("nukeReferences"),
                 revision = pkgs.clone().select("lib.escapeShellArg").call(revision.clone()),
                 integration_revision = INTEGRATION_REVISION,
+                authority = authority,
                 lock = NixValue::builtin("hashFile").call("sha256").call(nix_text!("{integration}/flake.lock", integration = integration.clone()))))
         });
-        let output = image.bind(|image| {
+            let output = image.bind(|image| {
             // Nix JSON decoding requires context-free text; restore the executable's
             // dependency context explicitly so serialization retains the image closure.
             let artifact = NixValue::builtin("fromJSON").call(NixValue::builtin("unsafeDiscardStringContext").call(
@@ -157,7 +168,7 @@ pub(crate) fn constructor(
                         "guivm": NixValue::null(), "audiovm": NixValue::null(),
                         "autostart": request.clone().select("autostart"), "include_in_backups": false,
                     },
-                    "features": nix_record! { "airlock-managed": "1", "airlock-backend": "hermit", "airlock-role": "service", "qrexec": "", "gui": "" },
+                    "features": nix_record! { "airlock-managed": "1", "airlock-backend": "hermit", "airlock-role": "service", "qrexec": "", "gui": "" }.merge_attrs(NixValue::if_else(request.clone().select("clipboardAuthority").equals(NixValue::null()), nix_record! {}, nix_record! { "airlock-clipboard-authority": request.clone().select("clipboardAuthority") })),
                     "services": nix_record! {}, "devices": nix_record! {},
                     "backend": nix_record! {
                         "type": "hermit", "system": nix_record! { "source": image.to_text() }, "artifact": artifact,
@@ -165,19 +176,24 @@ pub(crate) fn constructor(
                 },
             }
         });
-        let pinned = integration
-            .clone()
-            .attr_or("rev", "")
-            .equals(INTEGRATION_REVISION)
-            .and(NixValue::builtin("isString").call(revision.clone()));
-        (
-            vec![("autostart", false.into())],
-            NixValue::if_else(
-                pinned,
-                output,
-                NixValue::builtin("throw")
-                    .call("Hermit requires the pinned Git integration and an application revision"),
-            ),
-        )
-    })
+            let pinned = integration
+                .clone()
+                .attr_or("rev", "")
+                .equals(INTEGRATION_REVISION)
+                .and(NixValue::builtin("isString").call(revision.clone()));
+            (
+                vec![
+                    ("autostart", false.into()),
+                    ("clipboardAuthority", NixValue::null()),
+                ],
+                NixValue::if_else(
+                    pinned,
+                    output,
+                    NixValue::builtin("throw").call(
+                        "Hermit requires the pinned Git integration and an application revision",
+                    ),
+                ),
+            )
+        },
+    )
 }

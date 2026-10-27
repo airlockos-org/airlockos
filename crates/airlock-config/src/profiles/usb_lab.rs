@@ -32,10 +32,10 @@ pub fn machine(firewall_diagnostics: bool) -> Result<MachineSnapshot, AuthoringE
     let assistant = Vm::assistant("usr-assistant", &firewall, GiB(16))?;
     machine.add(&assistant)?;
 
-    // No peer grants or real clipboard traffic until GUI authorization is integrated.
-    let clipboard = Vm::hermit("sys-clipboard", MiB(32), HermitApplication::Clipboard)?;
+    let clipboard = Vm::hermit("sys-clipboard", MiB(128), HermitApplication::Clipboard)?;
     clipboard.set_autostart(true);
     machine.add(&clipboard)?;
+    crate::components::clipboard::connect(&gui, &clipboard);
 
     machine.set_host(&gui, &firewall, &controller);
     crate::components::diagnostics::enable(&mut machine, &assistant);

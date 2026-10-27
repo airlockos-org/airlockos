@@ -21,6 +21,8 @@ pub struct VmRelationships {
     pub prefs: BTreeMap<String, Value>,
     /// Qubes device assignments whose backend VMs supply startup dependencies.
     pub devices: Value,
+    /// Explicit component service providers interpreted with the same checked reference rules.
+    pub service_providers: Vec<Value>,
 }
 
 impl From<&Domain> for VmRelationships {
@@ -31,6 +33,10 @@ impl From<&Domain> for VmRelationships {
             template: domain.template.clone(),
             prefs: domain.prefs.clone(),
             devices: domain.devices.clone(),
+            service_providers: ["airlock-clipboard-authority", "airlock-clipboard-service"]
+                .iter()
+                .filter_map(|key| domain.features.get(*key).cloned())
+                .collect(),
         }
     }
 }
@@ -131,6 +137,13 @@ impl Relationships {
                     }
                 }
 
+                // The verified reference interpreter handles explicit providers without
+                // inheritance. These service edges are not Qubes device assignments.
+                devices.extend(
+                    d.service_providers
+                        .iter()
+                        .map(|value| raw_reference(Some(value))),
+                );
                 Declaration {
                     name: name.to_string(),
                     netvm: typed_reference(&d.netvm),

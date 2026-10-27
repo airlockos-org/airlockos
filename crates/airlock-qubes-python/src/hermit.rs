@@ -2,7 +2,7 @@
 //! The feature holding the executable is installed by the checked configuration plan.
 
 use crate::argument;
-use airlock_nix_core::hermit_artifact::Descriptor;
+use airlock_nix_core::hermit_artifact::{AuthorityMode, Descriptor};
 use airlock_qubes::descriptor;
 use pyo3::{
     prelude::*,
@@ -16,6 +16,36 @@ fn artifact(vm: &Bound<'_, PyAny>) -> PyResult<Descriptor> {
         .get_item("airlock-hermit-artifact")?
         .extract::<String>()?;
     serde_json::from_str(&value).map_err(|error| crate::exception(vm.py(), "QubesException", error))
+}
+
+/// Resolve the admitted GUI reference through live upstream Qubes objects.
+fn authority(vm: &Bound<'_, PyAny>, image: &Descriptor) -> PyResult<Option<u16>> {
+    if image.authority != AuthorityMode::Normal {
+        return Ok(None);
+    }
+    let name = vm
+        .getattr("features")?
+        .get_item("airlock-clipboard-authority")?
+        .extract::<String>()?;
+    name.parse::<airlock_nix_core::identity::GuestName>()
+        .map_err(|e| crate::exception(vm.py(), "QubesException", e))?;
+    let gui = vm.getattr("app")?.getattr("domains")?.get_item(&name)?;
+    if !gui.call_method0("is_running")?.is_truthy()? {
+        return Err(crate::exception(
+            vm.py(),
+            "QubesException",
+            "clipboard GUI authority must be running",
+        ));
+    }
+    let domain = gui.getattr("xid")?.extract::<u16>()?;
+    if domain == 0 || domain >= 0x7ff0 {
+        return Err(crate::exception(
+            vm.py(),
+            "QubesException",
+            "invalid clipboard GUI domain",
+        ));
+    }
+    Ok(Some(domain))
 }
 
 /// Implement only the guest ABI differences; upstream Qubes owns lifecycle execution.
@@ -76,10 +106,19 @@ fn invoke(
                 .getattr("features")?
                 .get_item("airlock-hermit-generation")?
                 .extract::<String>()?;
+            let authority = authority(&vm, &image)?;
             let nonce = py
-                .detach(|| airlock_dom0_service::hermit::preparing(&name, &image, &generation))
+                .detach(|| {
+                    airlock_dom0_service::hermit::preparing_with_authority(
+                        &name,
+                        &image,
+                        &generation,
+                        authority,
+                    )
+                })
                 .map_err(|error| crate::exception(py, "QubesException", error))?;
             vm.setattr("_airlock_hermit_nonce", nonce)?;
+            vm.setattr("_airlock_hermit_authority", authority)?;
             vm.getattr("log")?.call_method1(
                 "info",
                 (
@@ -100,8 +139,23 @@ fn invoke(
             let image = artifact(&vm)?;
             let memory = vm.getattr("memory")?.extract::<u64>()?;
             let nonce = vm.getattr("_airlock_hermit_nonce")?.extract::<String>()?;
-            let xml = airlock_dom0_service::hermit::boot_xml(&xml, &image, memory, &nonce)
-                .map_err(|error| crate::exception(py, "QubesException", error))?;
+            let authority = authority(&vm, &image)?;
+            if image.authority == AuthorityMode::Normal
+                && authority
+                    != vm
+                        .getattr("_airlock_hermit_authority")?
+                        .extract::<Option<u16>>()?
+            {
+                return Err(crate::exception(
+                    py,
+                    "QubesException",
+                    "clipboard authority restarted during boot",
+                ));
+            }
+            let xml = airlock_dom0_service::hermit::boot_xml_with_authority(
+                &xml, &image, memory, &nonce, authority,
+            )
+            .map_err(|error| crate::exception(py, "QubesException", error))?;
             return Ok(xml.into_pyobject(py)?.into_any().unbind());
         }
         "on_started" => {

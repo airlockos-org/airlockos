@@ -385,9 +385,11 @@ dependencies = [
 name = "airlock-vm-service"
 version = "0.1.0"
 dependencies = [
+ "airlock-clipboard-core",
  "airlock-machine-core",
  "airlock-machine-planning",
  "airlock-nix-core",
+ "airlock-sys-clipboard",
  "anyhow",
  "clap",
  "flate2",
@@ -401,6 +403,8 @@ dependencies = [
  "signal-hook",
  "tar",
  "tempfile",
+ "x11rb",
+ "xen-transport",
 ]
 
 [[package]]
@@ -4654,7 +4658,7 @@ checksum = "213b7324336b53d2414b2db8537e56544d981803139155afa84f76eeebb7a546"
 [[package]]
 name = "xen-transport"
 version = "0.1.0"
-source = "git+https://github.com/airlockos-org/hermit-xen?rev=70f6f77034a2b1e077f91950e71033a2afd696e0#70f6f77034a2b1e077f91950e71033a2afd696e0"
+source = "git+https://github.com/airlockos-org/hermit-xen?rev=03bd87fad25d094f0a19c9ef936994683bc2e7e1#03bd87fad25d094f0a19c9ef936994683bc2e7e1"
 dependencies = [
  "libc",
 ]

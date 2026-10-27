@@ -10,6 +10,55 @@ pub use airlock_machine_planning::ipc_policy::directory as policy_directory;
 /// Exact topology-owned policy filename, separate from immutable bootstrap permissions.
 pub use airlock_machine_planning::ipc_policy::filename as policy_filename;
 
+/// One GUI session's Hermit clipboard and its exact admitted Linux participants.
+/// The same immutable contract drives endpoint configuration and Qubes permissions.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClipboardConnection {
+    /// GUI VM trusted to provision participant connections, without relaying payloads.
+    pub gui: GuestName,
+    /// Diskless Hermit VM holding the shared clipboard.
+    pub service: GuestName,
+    /// Stable, sorted membership; positions plus one are protocol principal IDs.
+    pub participants: Vec<GuestName>,
+}
+
+impl ClipboardConnection {
+    /// Resolve an authenticated Qubes caller to its nonzero machine-local principal.
+    pub fn principal(&self, caller: &str) -> Option<u64> {
+        self.participants
+            .iter()
+            .position(|name| name.as_str() == caller)
+            .map(|index| index as u64 + 1)
+    }
+
+    /// Reject inconsistent contracts before opening transport or granting permissions.
+    pub fn validate(&self) -> bool {
+        self.gui != self.service
+            && !self.participants.is_empty()
+            && self.participants.len() <= 32
+            && self.participants.windows(2).all(|pair| pair[0] < pair[1])
+            && self.participants.contains(&self.gui)
+            && !self.participants.contains(&self.service)
+    }
+}
+
+/// Authenticated Xen endpoint coordinates returned only through the provisioning RPC.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClipboardEndpoint {
+    /// Currently running Hermit domain; verified by dom0 against its execution record.
+    pub domain: u16,
+    /// Event port restricted to the authorized Linux peer.
+    pub port: u32,
+    /// Shared transmit-page grant restricted to that same peer.
+    pub grant: u32,
+    /// Fresh channel epoch used for handshake and clipboard ownership.
+    pub epoch: u64,
+    /// Admitted participant ID; zero identifies the GUI control connection only.
+    pub principal: u64,
+}
+
 /// Selects the personal VM receiving completed screen captures from a GUI VM.
 /// Authoring serializes this record into NixOS configuration; the sender validates
 /// the same record before using capture RPCs. The target excludes dom0.

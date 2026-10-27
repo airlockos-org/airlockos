@@ -108,6 +108,7 @@ pub(crate) fn builders(machine: &MachineSnapshot) -> PackageFunction {
                                 "memory": i64::from(vm.settings.memory.bounds().0.0),
                                 "vcpus": i64::from(vm.settings.vcpus),
                                 "autostart": vm.settings.autostart.unwrap_or(false),
+                                "clipboardAuthority": vm.features.get("airlock-clipboard-authority").map_or_else(NixValue::null, |name| name.as_str().into()),
                             })
                         }
                     })

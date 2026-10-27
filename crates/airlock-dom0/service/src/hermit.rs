@@ -1,8 +1,8 @@
 //! Authenticate a Hermit executable at admission and immediately before Xen loads it.
 //! These checks supply evidence; only the existing deployment plan grants start authority.
 
-use airlock_nix_core::hermit_artifact::{Descriptor, Image};
-use anyhow::{Result, ensure};
+use airlock_nix_core::hermit_artifact::{AuthorityMode, Descriptor, Image};
+use anyhow::{Context, Result, ensure};
 use std::{fs, io::Read, os::unix::fs::MetadataExt, path::Path};
 
 /// Validate a store-resident regular executable without following artifact symlinks.
@@ -21,7 +21,8 @@ pub(crate) fn verify_image(artifact: &Descriptor, memory_mib: u64) -> Result<Ima
 fn verify_owned(artifact: &Descriptor, memory_mib: u64, owner: u32) -> Result<Image> {
     artifact.validate(false)?;
     ensure!(
-        (16..=256).contains(&memory_mib),
+        (16..=256).contains(&memory_mib)
+            && (artifact.authority != AuthorityMode::Normal || memory_mib >= 128),
         "invalid Hermit memory allocation"
     );
 
@@ -74,6 +75,9 @@ struct Execution {
     inode: Option<u64>,
     /// Byte boundary separating retained historical output from this boot.
     offset: u64,
+    /// Current GUI domain allowed to receive the production control offer.
+    #[serde(default)]
+    authority: Option<u16>,
 }
 
 /// Fixed protected runtime record, addressed only with a validated VM name.
@@ -88,6 +92,20 @@ fn console(name: &airlock_nix_core::identity::GuestName) -> std::path::PathBuf {
 
 /// Capture a console boundary before Xen starts an already authenticated executable.
 pub fn preparing(name: &str, artifact: &Descriptor, generation: &str) -> Result<String> {
+    preparing_with_authority(name, artifact, generation, None)
+}
+
+/// Capture execution identity together with the already resolved GUI authority domain.
+pub fn preparing_with_authority(
+    name: &str,
+    artifact: &Descriptor,
+    generation: &str,
+    authority: Option<u16>,
+) -> Result<String> {
+    ensure!(
+        (artifact.authority == AuthorityMode::Normal) == authority.is_some(),
+        "Hermit authority does not match artifact"
+    );
     let name = name.parse()?;
     let metadata = match fs::symlink_metadata(console(&name)) {
         Ok(metadata) => {
@@ -113,6 +131,7 @@ pub fn preparing(name: &str, artifact: &Descriptor, generation: &str) -> Result<
             xid: None,
             inode: metadata.as_ref().map(MetadataExt::ino),
             offset: metadata.as_ref().map_or(0, fs::Metadata::len),
+            authority,
         },
     )?;
     Ok(nonce)
@@ -170,10 +189,18 @@ pub fn ready(name: &str, artifact: &Descriptor, xid: u32) -> Result<()> {
     file.seek(SeekFrom::Start(execution.offset))?;
     let mut output = String::new();
     file.take(256 * 1024).read_to_string(&mut output)?;
+    let mode = match artifact.authority {
+        AuthorityMode::Disconnected => "authority=disconnected readiness=isolated",
+        AuthorityMode::Normal => "authority=normal readiness=connected",
+        AuthorityMode::Laboratory => anyhow::bail!("laboratory artifact is not production-ready"),
+    };
     ensure!(
         output.lines().any(|line| console_line(line).trim_end()
-            == format!("AIRLOCK_CLIPBOARD_EXECUTING authority=disconnected readiness=isolated boot={nonce}", nonce = execution.nonce)),
-        "Hermit application has not reported isolated readiness"
+            == format!(
+                "AIRLOCK_CLIPBOARD_EXECUTING {mode} boot={nonce}",
+                nonce = execution.nonce
+            )),
+        "Hermit application has not reported current-boot readiness"
     );
     Ok(())
 }
@@ -198,9 +225,119 @@ fn console_line(line: &str) -> &str {
     }
 }
 
+/// Read a boot-bound control offer for the authenticated configured GUI caller.
+/// This observer returns transport coordinates only; it never sees clipboard data.
+pub fn endpoint(config: &Path) -> Result<airlock_machine_core::services::ClipboardEndpoint> {
+    use airlock_machine_core::services::{ClipboardConnection, ClipboardEndpoint};
+    use std::io::{Seek, SeekFrom};
+
+    crate::state::trusted(config)?;
+    let connections: Vec<ClipboardConnection> = crate::state::read(config)?;
+    let caller = std::env::var("QREXEC_REMOTE_DOMAIN")?;
+    let matches: Vec<_> = connections
+        .iter()
+        .filter(|connection| connection.gui.as_str() == caller)
+        .collect();
+    let [connection] = matches.as_slice() else {
+        anyhow::bail!("caller has no unique clipboard authority");
+    };
+    ensure!(connection.validate(), "invalid clipboard contract");
+    let path = record(&connection.service);
+    crate::state::trusted(&path)?;
+    let execution: Execution = crate::state::read(&path)?;
+    ensure!(
+        execution.boot_id == crate::state::boot_id()?.to_string()
+            && execution.artifact.authority == AuthorityMode::Normal,
+        "stale clipboard execution"
+    );
+    let xid = execution.xid.context("clipboard has not started")?;
+    let authority = execution
+        .authority
+        .context("clipboard has no GUI authority")?;
+    for (name, expected) in [
+        (connection.service.as_str(), xid),
+        (connection.gui.as_str(), u32::from(authority)),
+    ] {
+        let output = std::process::Command::new("qvm-prefs")
+            .args(["--", name, "xid"])
+            .output()?;
+        ensure!(
+            output.status.success()
+                && std::str::from_utf8(&output.stdout)?.trim().parse::<u32>()? == expected,
+            "clipboard endpoint domain changed"
+        );
+    }
+    let path = console(&connection.service);
+    crate::state::trusted(&path)?;
+    let mut file = fs::File::open(path)?;
+    let metadata = file.metadata()?;
+    ensure!(
+        metadata.is_file()
+            && metadata.len() >= execution.offset
+            && execution.inode.is_none_or(|inode| inode == metadata.ino()),
+        "clipboard console identity changed"
+    );
+    file.seek(SeekFrom::Start(execution.offset))?;
+    let mut output = String::new();
+    file.take(256 * 1024).read_to_string(&mut output)?;
+    let prefix = format!(
+        "AIRLOCK_CLIPBOARD_OFFER boot={nonce} authority={authority} ",
+        nonce = execution.nonce
+    );
+    let offers: Vec<_> = output
+        .lines()
+        .filter_map(|line| console_line(line).strip_prefix(&prefix))
+        .collect();
+    let [offer] = offers.as_slice() else {
+        anyhow::bail!("clipboard control offer is unavailable or ambiguous");
+    };
+    let fields: Vec<_> = offer.split_whitespace().collect();
+    ensure!(fields.len() == 3, "malformed clipboard control offer");
+    let port = fields[0]
+        .strip_prefix("port=")
+        .context("missing event port")?
+        .parse()?;
+    let grant = fields[1]
+        .strip_prefix("grant=")
+        .context("missing grant")?
+        .parse()?;
+    let epoch = fields[2]
+        .strip_prefix("session=")
+        .context("missing epoch")?
+        .parse()?;
+    Ok(ClipboardEndpoint {
+        domain: u16::try_from(xid)?,
+        port,
+        grant,
+        epoch,
+        principal: 0,
+    })
+}
+
 /// Bind the upstream XML to the authenticated executable and a fresh execution challenge.
 /// Reuse Qubes' full domain configuration while refusing devices or loader substitutions.
 pub fn boot_xml(xml: &str, artifact: &Descriptor, memory: u64, nonce: &str) -> Result<String> {
+    boot_xml_with_authority(xml, artifact, memory, nonce, None)
+}
+
+/// Supply only the GUI domain resolved by Qubes, never a peer's claimed identity.
+pub fn boot_xml_with_authority(
+    xml: &str,
+    artifact: &Descriptor,
+    memory: u64,
+    nonce: &str,
+    authority: Option<u16>,
+) -> Result<String> {
+    ensure!(
+        (artifact.authority == AuthorityMode::Normal) == authority.is_some(),
+        "Hermit authority does not match artifact"
+    );
+    ensure!(
+        authority.is_none_or(|domain| domain > 0 && domain < 0x7ff0),
+        "invalid GUI authority domain"
+    );
+    let authority_argument =
+        authority.map_or_else(String::new, |domain| format!(" airlock.authority={domain}"));
     use quick_xml::{
         Reader, Writer,
         events::{BytesEnd, BytesStart, BytesText, Event},
@@ -342,7 +479,7 @@ pub fn boot_xml(xml: &str, artifact: &Descriptor, memory: u64, nonce: &str) -> R
                     ensure!(path == ["domain", "os"], "unexpected Hermit OS node");
                     writer.write_event(Event::Start(BytesStart::new("cmdline")))?;
                     writer.write_event(Event::Text(BytesText::new(&format!(
-                        "-- airlock.boot={nonce}"
+                        "-- airlock.boot={nonce}{authority_argument}"
                     ))))?;
                     writer.write_event(Event::End(BytesEnd::new("cmdline")))?;
                     command += 1;
@@ -458,6 +595,17 @@ mod tests {
         assert!(output.contains(&format!("<cmdline>-- airlock.boot={nonce}</cmdline>")));
         assert!(output.contains(r#"<console type="pty">"#));
         assert!(boot_xml(&output, &artifact(), 32, nonce).is_err());
+        assert!(boot_xml_with_authority(&xml(), &artifact(), 32, nonce, Some(7)).is_err());
+        let mut normal = artifact();
+        normal.authority = AuthorityMode::Normal;
+        let xml = xml().replace(">32<", ">128<");
+        assert!(boot_xml(&xml, &normal, 128, nonce).is_err());
+        assert!(boot_xml_with_authority(&xml, &normal, 128, nonce, Some(0)).is_err());
+        assert!(
+            boot_xml_with_authority(&xml, &normal, 128, nonce, Some(7))
+                .unwrap()
+                .contains("airlock.authority=7")
+        );
     }
 
     #[test]

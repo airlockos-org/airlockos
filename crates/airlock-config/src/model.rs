@@ -5,7 +5,7 @@
 use airlock_machine_core::{
     model::VmReference as ReferenceSetting,
     relationships::{Relationships, VmRelationships},
-    services::CaptureConnection,
+    services::{CaptureConnection, ClipboardConnection},
 };
 use airlock_nix_core::identity::GuestName as VmName;
 use rusix::{IntoRusixValue, nixos::NixosModule};
@@ -75,6 +75,8 @@ impl<R, B> VmHandle<R, B> {
                 "airlock-backend",
                 "airlock-network-provider",
                 "airlock-managed",
+                "airlock-clipboard-authority",
+                "airlock-clipboard-service",
                 "gui",
                 "servicevm",
             ]
@@ -171,7 +173,7 @@ pub enum GuestBackend {
 /// Reviewed Hermit application selection; arbitrary build features cannot grant authority.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HermitApplication {
-    /// Clipboard implementation with all peer grants and authorization disabled.
+    /// Clipboard implementation, connected only through a typed GUI relationship.
     Clipboard,
 }
 
@@ -222,6 +224,11 @@ struct CaptureTarget {
 }
 
 impl VmHandle<Gui> {
+    /// Connect this GUI session to one Hermit clipboard; finalization checks ownership.
+    pub(crate) fn clipboard_service(&self, service: &VmHandle<Service, Hermit>) {
+        *self.reference.definition.clipboard.borrow_mut() = Some(service.reference.clone());
+    }
+
     /// Selects the personal VM receiving captures; finalization configures both endpoints.
     /// Reassignment replaces the previous connection for subsequent snapshots.
     pub(crate) fn capture_to(&self, target: &VmHandle<Personal>) {
@@ -300,6 +307,8 @@ struct VmDefinition {
     gui: RefCell<Option<GuiReference>>,
     /// Optional capture destination resolved together with the machine configuration.
     capture: RefCell<Option<CaptureTarget>>,
+    /// Hermit service selected by the GUI clipboard component.
+    clipboard: RefCell<Option<VmReference>>,
     /// Evidence declarations supplied beside component configuration.
     diagnostic_sources: RefCell<Vec<airlock_diagnostics::Source>>,
 }
@@ -717,6 +726,7 @@ impl Vm {
             modules: RefCell::new(Vec::new()),
             gui: RefCell::new(None),
             capture: RefCell::new(None),
+            clipboard: RefCell::new(None),
             diagnostic_sources: RefCell::new(Vec::new()),
         });
 
@@ -965,11 +975,18 @@ pub struct MachineSnapshot {
     host: Option<HostSnapshot>,
     /// Immutable capture relationships used by endpoint lowering and host policy.
     captures: Vec<CaptureConnection>,
+    /// Frozen clipboard membership shared by installed endpoints and policy.
+    clipboards: Vec<ClipboardConnection>,
     /// Validated diagnostic client and the exact installed endpoint inventory.
     diagnostics: Option<crate::components::diagnostics::Access>,
 }
 
 impl MachineSnapshot {
+    /// Borrow configured GUI clipboards with their exact admitted participants.
+    pub fn clipboard_connections(&self) -> &[ClipboardConnection] {
+        &self.clipboards
+    }
+
     /// Borrow the frozen diagnostic relationship used by endpoint installation and Qubes policy.
     pub fn diagnostic_access(&self) -> Option<&crate::components::diagnostics::Access> {
         self.diagnostics.as_ref()
@@ -1017,6 +1034,17 @@ impl MachineSnapshot {
                         netvm,
                         template: ReferenceSetting::Disabled,
                         prefs,
+                        service_providers: [
+                            "airlock-clipboard-authority",
+                            "airlock-clipboard-service",
+                        ]
+                        .iter()
+                        .filter_map(|key| {
+                            vm.features
+                                .get(*key)
+                                .map(|value| serde_json::Value::String(value.clone()))
+                        })
+                        .collect(),
                         ..VmRelationships::default()
                     },
                 )
@@ -1173,6 +1201,7 @@ impl Machine {
             .transpose()?;
         let mut vms = Vec::with_capacity(self.vms.len());
         let mut captures = Vec::new();
+        let mut clipboards = Vec::new();
 
         for vm in &self.vms {
             let definition = &vm.definition;
@@ -1238,11 +1267,27 @@ impl Machine {
                 });
             }
 
+            if let Some(service) = definition.clipboard.borrow().as_ref() {
+                self.check_reference(vm.name(), "clipboard service", &service.definition)?;
+                if clipboards.iter().any(|connection: &ClipboardConnection| {
+                    connection.service == service.definition.name
+                }) {
+                    return Err(AuthoringError::InvalidClipboard {
+                        reason: "a clipboard service must belong to exactly one GUI session".into(),
+                    });
+                }
+                clipboards.push(ClipboardConnection {
+                    gui: definition.name.clone(),
+                    service: service.definition.name.clone(),
+                    participants: Vec::new(),
+                });
+            }
             let guivm = self.resolve_gui(vm, host.as_ref())?;
             vms.push(vm.snapshot(guivm));
         }
 
         crate::components::screen_capture::configure(&mut vms, &captures);
+        crate::components::clipboard::configure(&mut vms, &mut clipboards, host.as_ref())?;
         if let Some(observer) = &self.diagnostic_observer {
             self.check_reference("diagnostics", "observer", &observer.definition)?;
         }
@@ -1257,6 +1302,7 @@ impl Machine {
             vms,
             host,
             captures,
+            clipboards,
             diagnostics,
         };
         snapshot.relationships().ordered().map_err(|error| {

@@ -6,5 +6,10 @@
 
 pub mod protocol;
 
+pub mod shared;
+
+#[cfg(target_os = "hermit")]
+pub mod service;
+
 #[cfg(feature = "lab-authority")]
 pub mod laboratory;

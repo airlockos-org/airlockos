@@ -151,7 +151,11 @@ pub(crate) fn module(
             },
         };
 
-        let mut body = ModuleBody::empty();
+        let mut body = ModuleBody::empty().import_value(crate::components::clipboard::host_module(
+            machine.clipboard_connections(),
+            build.workspace.clone(),
+            true,
+        ));
         if let Some(access) = machine.diagnostic_access() {
             body = body.import_value(crate::components::diagnostics::host_module(
                 access,

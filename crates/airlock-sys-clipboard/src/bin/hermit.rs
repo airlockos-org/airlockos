@@ -1,11 +1,9 @@
-//! Hermit PVH entry point. Deployment stays disconnected from clipboard traffic
-//! until a production GUI authorization path is provisioned.
+//! Hermit PVH entry point; the admitted boot contract selects GUI-bound or isolated operation.
 
 #[cfg(target_os = "hermit")]
 use hermit as _;
 
-/// Report execution without granting a peer access or accepting clipboard requests.
-/// Parking uses Hermit's scheduler; no polling loop or dom0 runtime broker is needed.
+/// Start the admitted GUI connection, or park an explicitly disconnected service.
 #[cfg(all(target_os = "hermit", not(feature = "lab-authority")))]
 fn main() {
     // The immutable builder supplies this identity; it is diagnostic evidence,
@@ -21,6 +19,18 @@ fn main() {
                     .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
         })
         .expect("deployment must provide a boot challenge");
+    if let Some(authority) = std::env::args().find_map(|argument| {
+        argument
+            .strip_prefix("airlock.authority=")
+            .map(str::to_owned)
+    }) {
+        let authority = authority
+            .parse::<u16>()
+            .expect("invalid clipboard authority");
+        airlock_sys_clipboard::service::run(authority, &nonce)
+            .expect("clipboard authority disconnected");
+        return;
+    }
     println!("AIRLOCK_CLIPBOARD_EXECUTING authority=disconnected readiness=isolated boot={nonce}");
     loop {
         std::thread::park();

@@ -5,6 +5,8 @@ mod catalog;
 
 mod desktop;
 
+mod clipboard;
+
 mod diagnostics;
 
 mod input;
@@ -36,6 +38,8 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Action {
+    /// Share desktop clipboard representations through the configured Hermit service.
+    Clipboard(clipboard::Args),
     /// Observe boot-critical graphical or worker services without starting them.
     BootHealth(boot_health::Request),
     /// Collect best-effort evidence after a local VM service failure.
@@ -110,6 +114,7 @@ fn authorize_capture(path: Option<&std::path::Path>) -> Result<()> {
 
 fn run(args: Args) -> Result<()> {
     match args.command {
+        Action::Clipboard(args) => clipboard::run(args)?,
         Action::BootHealth(request) => boot_health::execute(request)?,
         Action::Diagnostics(request) => diagnostics::execute(request),
         Action::Desktop(request) => desktop::execute(request)?,

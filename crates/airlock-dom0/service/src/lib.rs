@@ -70,6 +70,12 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Action {
+    /// Return the current Hermit control offer only to its configured GUI provisioner.
+    ClipboardEndpoint {
+        /// Immutable typed clipboard contracts installed with the host generation.
+        #[arg(long)]
+        config: PathBuf,
+    },
     /// Enforce the installed admission RPC and privileged receiver contracts.
     AdmissionAdapter(admission_adapter::Request),
     /// Run configuration transport and administrative compatibility operations.
@@ -278,6 +284,7 @@ fn run(args: Args) -> Result<Value> {
 
     let c = Coordinator::new(args.state);
     Ok(match args.command {
+        Action::ClipboardEndpoint { config } => serde_json::to_value(hermit::endpoint(&config)?)?,
         Action::AdmissionAdapter(request) => {
             admission_adapter::execute(request)?;
             Value::Null

@@ -528,6 +528,7 @@ fn common_dependencies_cover_defaults_devices_and_resets() {
             ]
             .into(),
             devices: json!({"usb": [{"backend": "sys-usb"}]}),
+            service_providers: Vec::new(),
         },
     );
     let dependencies = graph.dependencies(false).unwrap();
@@ -859,4 +860,68 @@ fn hermit_rejects_linux_capabilities_and_unsupported_resources() {
     hermit.set_memory(Memory::Fixed(MiB(32)));
     hermit.set_feature("qrexec", "1").unwrap();
     assert!(machine.finish().is_err());
+}
+
+/// Typed clipboard connections derive membership, policy and lifecycle edges together.
+#[test]
+fn clipboard_follows_display_membership_and_checks_service_ownership() {
+    use airlock_config::components::clipboard;
+    let mut f = fixture();
+    let service = Vm::hermit(
+        "sys-clipboard",
+        MiB(128),
+        model::HermitApplication::Clipboard,
+    )
+    .unwrap();
+    clipboard::connect(&f.gui, &service);
+    assert!(matches!(
+        f.machine.finish(),
+        Err(Error::MissingDependency { .. })
+    ));
+    f.machine.add(&service).unwrap();
+    let frozen = f.machine.finish().unwrap();
+    let connection = &frozen.clipboard_connections()[0];
+    assert!(connection.participants.contains(&f.home.name().clone()));
+    assert!(connection.participants.contains(&f.gui.name().clone()));
+    assert!(!connection.participants.contains(&service.name().clone()));
+    assert!(connection.principal("dom0").is_none());
+    let policy = clipboard::policy(frozen.clipboard_connections());
+    assert!(policy.contains("airlock.ClipboardConnect + usr-home sys-gui allow user=root"));
+    assert!(policy.contains("airlock.ClipboardConnect * @anyvm @anyvm deny"));
+    let graph = frozen.relationships();
+    let order = graph.ordered().unwrap();
+    let position = |name: &str| order.iter().position(|vm| vm.as_str() == name).unwrap();
+    assert!(position("sys-gui") < position("sys-clipboard"));
+    assert!(position("sys-clipboard") < position("usr-home"));
+    // Service references must survive the planner's optional removal of display edges.
+    let dependencies = graph.dependencies(true).unwrap();
+    assert!(dependencies[service.name()].contains(f.gui.name()));
+    assert!(dependencies[f.home.name()].contains(service.name()));
+    airlock_config::generate(&frozen).unwrap();
+
+    service.set_memory(Memory::Fixed(MiB(32)));
+    assert!(matches!(
+        f.machine.finish(),
+        Err(Error::InvalidClipboard { .. })
+    ));
+    service.set_memory(Memory::Fixed(MiB(128)));
+    let second = Vm::gui("sys-other-gui", &f.home).unwrap();
+    f.machine.add(&second).unwrap();
+    f.home.set_gui(&second);
+    let updated = f.machine.finish().unwrap();
+    assert!(
+        !updated.clipboard_connections()[0]
+            .participants
+            .contains(f.home.name())
+    );
+    assert!(
+        frozen.clipboard_connections()[0]
+            .participants
+            .contains(f.home.name())
+    );
+    clipboard::connect(&second, &service);
+    assert!(matches!(
+        f.machine.finish(),
+        Err(Error::InvalidClipboard { .. })
+    ));
 }

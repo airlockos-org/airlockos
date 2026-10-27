@@ -2,6 +2,8 @@
 
 pub mod desktop;
 
+pub mod clipboard;
+
 #[path = "machine-source.rs"]
 mod machine_source;
 

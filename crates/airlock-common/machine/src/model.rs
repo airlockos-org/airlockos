@@ -2,7 +2,7 @@
 //! These records let dom0 compare releases, record activation and verify what runs.
 
 use airlock_nix_core::identity::{GitRevision, GuestName, LockHash, VmName};
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -330,6 +330,32 @@ impl Topology {
                         && d.prefs.get("maxmem").and_then(Value::as_u64) == Some(memory),
                     "{name}: invalid Hermit memory"
                 );
+                if artifact.authority == airlock_nix_core::hermit_artifact::AuthorityMode::Normal {
+                    ensure!(
+                        memory >= 128,
+                        "{name}: normal clipboard requires at least 128 MiB"
+                    );
+                    let gui = d
+                        .features
+                        .get("airlock-clipboard-authority")
+                        .and_then(Value::as_str)
+                        .context("normal clipboard has no GUI authority")?;
+                    let authority = self
+                        .domains
+                        .get(&gui.parse::<GuestName>()?)
+                        .context("clipboard authority is outside this topology")?;
+                    ensure!(
+                        gui != name.as_str()
+                            && authority.backend.hermit().is_none()
+                            && authority.services.get("guivm") == Some(&Value::Bool(true)),
+                        "{name}: clipboard authority must be a Linux GUI VM"
+                    );
+                } else {
+                    ensure!(
+                        !d.features.contains_key("airlock-clipboard-authority"),
+                        "{name}: disconnected Hermit has a clipboard authority"
+                    );
+                }
                 ensure!(
                     d.features.get("qrexec") == Some(&Value::from(""))
                         && d.features.get("gui") == Some(&Value::from(""))

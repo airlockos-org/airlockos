@@ -5,6 +5,11 @@ use std::fmt;
 /// An authoring failure with enough context to identify the VM and relationship.
 #[derive(Debug, PartialEq, Eq)]
 pub enum AuthoringError {
+    /// Clipboard endpoints or membership cannot form a valid service connection.
+    InvalidClipboard {
+        /// Explanation of the inconsistent relationship or missing capability.
+        reason: String,
+    },
     /// A diagnostic source or frozen endpoint contract is inconsistent.
     InvalidDiagnostics {
         /// Explanation naming the invalid source or contract.
@@ -93,6 +98,7 @@ impl fmt::Display for AuthoringError {
     /// Renders a contextual diagnostic without discarding its structured category.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidClipboard { reason } => write!(formatter, "invalid clipboard: {reason}"),
             Self::InvalidDiagnostics { reason } => {
                 write!(formatter, "invalid diagnostics: {reason}")
             }
