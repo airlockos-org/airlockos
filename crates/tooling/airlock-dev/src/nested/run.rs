@@ -109,7 +109,12 @@ pub(super) fn execute(context: &Context) -> Result<u8> {
     fs::create_dir_all(&links)?;
     let output_link = directory.join(format!("{attribute}-result"));
     let (logical, physical) = if skip {
-        let source = fs::canonicalize(&output_link)
+        let target = match fs::read_link(&output_link) {
+            Ok(target) if target.is_absolute() => environment::physical(&target),
+            Ok(target) => directory.join(target),
+            Err(_) => output_link.clone(),
+        };
+        let source = fs::canonicalize(target)
             .context("skip-base-build requested but result link is missing")?;
         (source.clone(), source)
     } else {
