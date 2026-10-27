@@ -2,7 +2,7 @@
 
 use airlock_nix_core::{
     admission::AdmissionReceipt,
-    identity::{GuestName, SourceIdentity},
+    identity::{GitRevision, GuestName, SourceIdentity},
     runtime::process,
 };
 use anyhow::{Context, Result, ensure};
@@ -277,13 +277,51 @@ fn import(request: &Request, revision: &str, lock: &str) -> Result<Value> {
     );
     let staged = temporary.path().join("repo");
     let bundle = temporary.path().join("repo.bundle");
+    let shallow: Vec<GitRevision> = manifest
+        .get("shallow")
+        .map(|value| serde_json::from_value(value.clone()))
+        .transpose()
+        .context("invalid shallow source boundaries")?
+        .unwrap_or_default();
+    ensure!(
+        shallow.iter().collect::<BTreeSet<_>>().len() == shallow.len(),
+        "duplicate shallow source boundary"
+    );
+    text(Command::new("git").args(["init", "--quiet"]).arg(&staged))?;
+
+    // A bundle omits Git's shallow metadata. Install validated object IDs before
+    // fetching so Git checks the supplied graph against its declared boundary.
+    // Only the private staging repository receives untrusted boundary metadata.
+    if !shallow.is_empty() {
+        let mut contents = shallow
+            .iter()
+            .map(GitRevision::as_str)
+            .collect::<Vec<_>>()
+            .join("\n");
+        contents.push('\n');
+        fs::write(staged.join(".git/shallow"), contents)?;
+    }
     text(
         Command::new("git")
-            .args(["clone", "--no-checkout"])
+            .arg("-C")
+            .arg(&staged)
+            .args(["fetch", "--no-tags"])
             .arg(&bundle)
-            .arg(&staged),
+            .arg(revision),
     )?;
     git(&staged, &["checkout", "--detach", revision])?;
+    for boundary in &shallow {
+        ensure!(
+            git(&staged, &["cat-file", "-t", boundary.as_str()])? == "commit",
+            "shallow source boundary is not a commit"
+        );
+        git(
+            &staged,
+            &["merge-base", "--is-ancestor", boundary.as_str(), revision],
+        )
+        .context("shallow source boundary is not reachable from requested revision")?;
+    }
+    git(&staged, &["fsck", "--strict", "--no-reflogs"])?;
     ensure!(
         hash(&staged.join("flake.lock"))? == lock,
         "checked-out flake.lock differs from requested lock hash"
@@ -294,8 +332,8 @@ fn import(request: &Request, revision: &str, lock: &str) -> Result<Value> {
             Command::new("git")
                 .arg("-C")
                 .arg(&request.repo)
-                .arg("fetch")
-                .arg(bundle)
+                .args(["fetch", "--no-tags", "--update-shallow"])
+                .arg(&staged)
                 .arg(revision),
         )?;
         git(&request.repo, &["checkout", "--detach", revision])?;
