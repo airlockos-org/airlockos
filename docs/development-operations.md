@@ -73,7 +73,8 @@ software and configuration; it does not reverse private application data.
 Commit source changes and align the machine/application pins before building.
 The outer guest defaults to 32 GiB so the controller can evaluate whole-machine
 updates; the controller VM starts on demand. Its Rust definition is in [local_lab.rs](../crates/airlock-config/src/profiles/local_lab.rs);
-it uses the existing X11 display relay and normal VM services. `make lab-resume`
+it uses the existing X11 display relay and normal VM services. Log in to the
+nested desktop as `user` with the development password `airlock`. `make lab-resume`
 keeps the selected image and writable disk without rebuilding. `make lab-status`
 reports QEMU state and source identity; `make lab-ssh` opens the dom0 development
 endpoint. `make lab-stop` requests a clean shutdown. `make lab-reset` discards only
