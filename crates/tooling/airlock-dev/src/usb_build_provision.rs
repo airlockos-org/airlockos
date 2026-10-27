@@ -1,6 +1,6 @@
 //! Keep image builds unprivileged while a separately authenticated USB helper waits on a private pipe.
 
-use crate::{repository, support};
+use crate::support;
 use airlock_image::provisioning::{BuildOutcome, BuildRun, CompletedBuild, READY};
 use airlock_nix_core::runtime::process::OwnedChild;
 use airlock_nix_core::store_path::StorePath;
@@ -15,6 +15,10 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+
+mod snapshot;
+
+use snapshot::Snapshot;
 
 /// Workstation paths are supplied by Make; credentials are collected only by the USB helper.
 #[derive(ClapArgs)]
@@ -127,14 +131,11 @@ pub(crate) fn run(root: &Path, args: Args) -> Result<u8> {
         !args.serial.trim().is_empty(),
         "Supply USB_SERIAL before building."
     );
-    repository::check_image_source(root)?;
     ensure!(
         args.nix_root.is_some()
             || std::env::var("AIRLOCK_USE_HOST_NIX_STORE").as_deref() == Ok("1"),
         "Supply --nix-root for the private Airlock store."
     );
-    let (machine, machine_revision) = repository::local(root)?;
-    let revision = support::git(root, &["rev-parse", "HEAD"])?;
     let usb = fs::canonicalize(&args.usb_bin).context("prepare image tools before provisioning")?;
     let public_key = fs::canonicalize(&args.public_key).context("SSH public key is missing")?;
     fs::create_dir_all(&args.result_link_dir)?;
@@ -144,10 +145,16 @@ pub(crate) fn run(root: &Path, args: Args) -> Result<u8> {
         .permissions(fs::Permissions::from_mode(0o700))
         .tempdir_in(&result_directory)?;
     let result_link = run.path().join("usb-dev-image");
+    let source = Snapshot::capture(root, &run.path().join("source"))?;
+    eprintln!(
+        "USB build source captured: repository {revision}, machine {machine_revision}.",
+        revision = source.revision,
+        machine_revision = source.machine_revision,
+    );
     let build_run = BuildRun::new(
         result_link.clone(),
-        revision.parse()?,
-        machine_revision.parse()?,
+        source.revision.clone(),
+        source.machine_revision.clone(),
     )?;
     let mut command = Command::new("sudo");
     command
@@ -159,16 +166,16 @@ pub(crate) fn run(root: &Path, args: Args) -> Result<u8> {
         .arg("--result-link")
         .arg(&result_link)
         .arg("--repo")
-        .arg(root)
+        .arg(&source.root)
         .arg("--application-revision")
-        .arg(&revision)
+        .arg(source.revision.as_str())
         .arg("--machine-revision")
-        .arg(&machine_revision)
+        .arg(source.machine_revision.as_str())
         .arg("--public-key")
         .arg(public_key)
         .arg("--resize-backup-dir")
         .arg(&args.resize_backup_dir)
-        .current_dir(root);
+        .current_dir(&source.root);
     if let Some(nix_root) = &args.nix_root {
         command.arg("--nix-root").arg(nix_root);
     }
@@ -184,22 +191,20 @@ pub(crate) fn run(root: &Path, args: Args) -> Result<u8> {
     );
     let mut helper = Helper::start(&mut command)?;
     helper.prepared()?;
-    ensure!(
-        support::git(root, &["rev-parse", "HEAD"])? == revision
-            && support::git(&machine, &["rev-parse", "HEAD"])? == machine_revision,
-        "Committed source changed during USB preparation; USB was not written."
-    );
+    source.check()?;
     eprintln!(
         "Credentials collected. Building the USB image as the current user; provisioning follows automatically on success."
     );
     let status = Command::new("make")
-        .current_dir(root)
+        .current_dir(&source.root)
         .args(["--no-print-directory", "usb-dev-image"])
         .arg(format!(
             "AIRLOCK_RESULT_LINK_DIR={path}",
             path = run.path().display()
         ))
         .stdin(Stdio::null())
+        // Native tools must not be replaced by Cargo work in the active checkout.
+        .env("CARGO_TARGET_DIR", run.path().join("target"))
         .env("GIT_TERMINAL_PROMPT", "0")
         // This Rust recipe is not a Make jobserver participant. Caller settings
         // remain in exported variables, but its closed jobserver FDs must not leak.
@@ -211,11 +216,7 @@ pub(crate) fn run(root: &Path, args: Args) -> Result<u8> {
         eprintln!("Image build failed; USB was not written.");
         return Ok(status.code().unwrap_or(1).try_into().unwrap_or(1));
     }
-    ensure!(
-        support::git(root, &["rev-parse", "HEAD"])? == revision
-            && support::git(&machine, &["rev-parse", "HEAD"])? == machine_revision,
-        "Committed source changed during the image build; USB was not written."
-    );
+    source.check()?;
     ensure!(
         fs::symlink_metadata(&result_link).is_ok(),
         "Build succeeded without publishing this run's image; USB was not written."
@@ -243,6 +244,7 @@ pub(crate) fn run(root: &Path, args: Args) -> Result<u8> {
     );
 
     eprintln!("Image build succeeded. Provisioning the USB with the collected credentials.");
+    let (revision, machine_revision) = source.check()?;
     let completed = CompletedBuild::check(
         &build_run,
         if status.success() {
@@ -250,8 +252,8 @@ pub(crate) fn run(root: &Path, args: Args) -> Result<u8> {
         } else {
             BuildOutcome::Failed
         },
-        &support::git(root, &["rev-parse", "HEAD"])?.parse()?,
-        &support::git(&machine, &["rev-parse", "HEAD"])?.parse()?,
+        &revision,
+        &machine_revision,
         &result_link,
         Some(image),
     )?;

@@ -30,6 +30,7 @@ fn combined_usb_build_prepares_once_and_provisions_only_its_successful_image() -
         "build_fail",
         "missing_result",
         "source_change",
+        "snapshot_change",
         "publish_fail",
         "provision_fail",
     ] {
@@ -44,6 +45,11 @@ fn combined_usb_build_prepares_once_and_provisions_only_its_successful_image() -
             serde_json::to_vec(&json!({"nodes":{"airlock-apps":{"locked":{"rev":revision}}}}))?,
         )?;
         git(&fixture.root, &["commit", "-qam", "Application pin"])?;
+        let captured_revision = git(&fixture.root, &["rev-parse", "HEAD"])?;
+        let captured_machine = git(
+            &fixture.root.join("airlock-machine"),
+            &["rev-parse", "HEAD"],
+        )?;
 
         let mut flow = json!({});
         if outcome != "success" {
@@ -80,16 +86,14 @@ fn combined_usb_build_prepares_once_and_provisions_only_its_successful_image() -
             None,
         )?;
 
+        let succeeds = matches!(outcome, "success" | "source_change");
         assert_eq!(
             output.status.success(),
-            outcome == "success",
+            succeeds,
             "{outcome}: {errors}",
             errors = String::from_utf8_lossy(&output.stderr)
         );
-        assert_eq!(
-            fixture.path("usb-provisioned").exists(),
-            outcome == "success"
-        );
+        assert_eq!(fixture.path("usb-provisioned").exists(), succeeds);
         assert_eq!(fixture.calls("sudo")?.len(), 1);
         assert_eq!(fixture.calls("airlock-usb")?.len(), 1);
         assert_eq!(
@@ -99,7 +103,7 @@ fn combined_usb_build_prepares_once_and_provisions_only_its_successful_image() -
         if [
             "build_fail",
             "missing_result",
-            "source_change",
+            "snapshot_change",
             "publish_fail",
         ]
         .contains(&outcome)
@@ -109,7 +113,27 @@ fn combined_usb_build_prepares_once_and_provisions_only_its_successful_image() -
         if outcome == "build_fail" {
             assert_eq!(output.status.code(), Some(42));
         }
-        let published = ["success", "provision_fail"].contains(&outcome);
+        let source: Value = serde_json::from_slice(&fs::read(fixture.path("usb-source.json"))?)?;
+        assert_eq!(source["revision"], captured_revision);
+        assert_eq!(source["machine_revision"], captured_machine);
+        if outcome == "source_change" {
+            assert_ne!(
+                git(&fixture.root, &["rev-parse", "HEAD"])?,
+                captured_revision
+            );
+            assert_ne!(
+                git(
+                    &fixture.root.join("airlock-machine"),
+                    &["rev-parse", "HEAD"]
+                )?,
+                captured_machine
+            );
+            assert_eq!(
+                fs::read_to_string(fixture.root.join("crates/application.rs"))?,
+                "active uncommitted edit"
+            );
+        }
+        let published = ["success", "source_change", "provision_fail"].contains(&outcome);
         assert_eq!(
             fs::read_link(results.join("usb-dev-image"))?,
             std::path::PathBuf::from(if published {
@@ -384,16 +408,19 @@ fn image_build_bootstrap_limits_compilation_before_native_policy_is_available() 
         &std::env::var_os("PATH").context("PATH")?,
     ));
     let record = fixture.path().join("bootstrap.json");
-    for action in ["build-budget", "check-image-source"] {
+    for target in ["usb-dev-image", "usb-dev-install"] {
         let result = run(
-            Command::new(common::tool("bash")?)
-                .arg(common::root().join("crates/tooling/airlock-dev/scripts/airlock-dev.sh"))
-                .arg(action)
+            Command::new("make")
+                .arg("--no-print-directory")
+                .arg("-C")
+                .arg(common::root())
+                .arg(target)
+                .arg("AIRLOCK_DEV_BIN=")
                 .env("PATH", std::env::join_paths(&paths)?)
                 .env("AIRLOCK_TEST_CPU_BOOTSTRAP_RECORD", &record),
             None,
         )?;
-        assert_eq!(result.status.code(), Some(37));
+        assert!(!result.status.success());
         let record: Value = serde_json::from_slice(&fs::read(&record)?)?;
         let cpus = record["cpus"].as_array().context("bootstrap CPUs")?;
         assert_eq!(cpus.len(), 1);

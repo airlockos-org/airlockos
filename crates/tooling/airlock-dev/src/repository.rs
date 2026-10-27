@@ -316,7 +316,7 @@ fn guard_store() -> Result<()> {
             });
     ensure!(
         host || configured,
-        "Nix operations require the guarded Airlock store; run crates/tooling/airlock-dev/scripts/airlock-dev.sh"
+        "Nix operations require the guarded Airlock store; use airlock-dev with-environment"
     );
     Ok(())
 }

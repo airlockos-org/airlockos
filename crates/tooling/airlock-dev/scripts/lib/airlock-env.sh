@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # Compatibility exports for external callers; environment policy lives in Rust.
 ROOT="${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
-_AIRLOCK_ENV_NATIVE="${AIRLOCK_DEV_BIN:-$ROOT/crates/tooling/airlock-dev/scripts/airlock-dev.sh}"
+if [[ -z "${AIRLOCK_DEV_BIN:-}" ]]; then
+    make --no-print-directory -C "$ROOT" dev-tools-bootstrap || return
+    _AIRLOCK_ENV_NATIVE="$(cd "$ROOT" && realpath "${CARGO_TARGET_DIR:-crates/target}/debug/airlock-dev")" || return
+else
+    _AIRLOCK_ENV_NATIVE="$AIRLOCK_DEV_BIN"
+fi
 _AIRLOCK_ENV_EXPORTS="$("$_AIRLOCK_ENV_NATIVE" --repository-root "$ROOT" environment exports)" || return
 eval "$_AIRLOCK_ENV_EXPORTS"
 unset _AIRLOCK_ENV_EXPORTS

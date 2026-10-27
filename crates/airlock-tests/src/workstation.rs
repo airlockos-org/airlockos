@@ -79,6 +79,34 @@ pub(crate) fn execute(root: &Path, name: &str, args: &[String]) -> Result<()> {
                 fs::symlink_metadata(result).is_err(),
                 "existing image was offered before build"
             );
+            let argument = |name: &str| -> Result<&str> {
+                let index = args
+                    .iter()
+                    .position(|a| a == name)
+                    .context("missing USB run argument")?;
+                Ok(args[index + 1].as_str())
+            };
+            let source = Path::new(argument("--repo")?);
+            ensure!(
+                source != root.join("parent with spaces"),
+                "USB helper uses the active checkout"
+            );
+            ensure!(
+                airlock_tests::repository::git(source, &["rev-parse", "HEAD"])?
+                    == argument("--application-revision")?
+                    && airlock_tests::repository::git(
+                        &source.join("airlock-machine"),
+                        &["rev-parse", "HEAD"]
+                    )? == argument("--machine-revision")?,
+                "USB helper received different committed sources"
+            );
+            fs::write(
+                root.join("usb-source.json"),
+                serde_json::to_vec(&json!({
+                    "path":source, "revision":argument("--application-revision")?,
+                    "machine_revision":argument("--machine-revision")?,
+                }))?,
+            )?;
             if config["usb_flow"]["prepare_fail"].as_bool() == Some(true) {
                 std::process::exit(19);
             }
@@ -92,13 +120,6 @@ pub(crate) fn execute(root: &Path, name: &str, args: &[String]) -> Result<()> {
                 std::process::exit(1);
             }
             let completion: Value = serde_json::from_slice(&completion)?;
-            let argument = |name: &str| -> Result<&str> {
-                let index = args
-                    .iter()
-                    .position(|a| a == name)
-                    .context("missing USB run argument")?;
-                Ok(args[index + 1].as_str())
-            };
             ensure!(
                 completion["schema"] == "airlock.usb-build-complete.v2"
                     && completion["status"] == "passed"
@@ -147,15 +168,44 @@ pub(crate) fn execute(root: &Path, name: &str, args: &[String]) -> Result<()> {
             if config["usb_flow"]["source_change"].as_bool() == Some(true) {
                 let repo = root.join("parent with spaces");
                 fs::write(repo.join("README"), "new source commit")?;
+                let machine = repo.join("airlock-machine");
+                fs::write(machine.join("README"), "new machine commit")?;
+                airlock_tests::repository::git(
+                    &machine,
+                    &["commit", "-qam", "Concurrent machine change"],
+                )?;
                 ensure!(
                     Command::new("git")
                         .arg("-C")
-                        .arg(repo)
+                        .arg(&repo)
                         .args(["commit", "-qam", "Concurrent source change"])
                         .status()?
                         .success(),
                     "source change failed"
                 );
+                fs::write(
+                    repo.join("crates/application.rs"),
+                    "active uncommitted edit",
+                )?;
+            }
+            let source: Value = serde_json::from_slice(&fs::read(root.join("usb-source.json"))?)?;
+            let checkout = Path::new(source["path"].as_str().context("captured source path")?);
+            ensure!(
+                std::env::current_dir()? == checkout,
+                "build did not use the captured checkout"
+            );
+            ensure!(
+                airlock_tests::repository::git(checkout, &["rev-parse", "HEAD"])?
+                    == source["revision"]
+                    && airlock_tests::repository::git(
+                        &checkout.join("airlock-machine"),
+                        &["rev-parse", "HEAD"]
+                    )? == source["machine_revision"]
+                    && fs::read_to_string(checkout.join("crates/application.rs"))? == "application",
+                "active development changed the captured build inputs"
+            );
+            if config["usb_flow"]["snapshot_change"].as_bool() == Some(true) {
+                fs::write(checkout.join("README"), "mutated isolated source")?;
             }
             if config["usb_flow"]["missing_result"].as_bool() != Some(true) {
                 symlink(

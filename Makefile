@@ -24,8 +24,11 @@ export TMPDIR
 export XDG_CACHE_HOME
 endif
 
-AIRLOCK_DEV ?= $(if $(AIRLOCK_DEV_BIN),$(AIRLOCK_DEV_BIN) with-environment --,./crates/tooling/airlock-dev/scripts/airlock-dev.sh)
+AIRLOCK_DEV_NATIVE = $(abspath $(or $(CARGO_TARGET_DIR),crates/target))/debug/airlock-dev
+AIRLOCK_DEV_BOOTSTRAP = sh -ec 'env -u MAKEFLAGS -u MFLAGS make --no-print-directory -C "$$1" dev-tools-bootstrap; shift; exec "$$@"' airlock-dev "$(CURDIR)" "$(AIRLOCK_DEV_NATIVE)"
+AIRLOCK_DEV ?= $(if $(AIRLOCK_DEV_BIN),"$(AIRLOCK_DEV_BIN)",$(AIRLOCK_DEV_BOOTSTRAP)) --repository-root "$(CURDIR)" with-environment --
 AIRLOCK_NIX ?= $(AIRLOCK_DEV) nix --
+
 VM_IMAGE_MODE ?= dev
 ifeq ($(VM_IMAGE_MODE),dev)
 VM_IMAGE_MODE_SUFFIX := dev
@@ -77,17 +80,17 @@ DEPLOY_TARGET ?=
 DEPLOY_BRIDGE_VM ?=
 .PHONY: machine-gui-style-plan machine-gui-style-apply
 machine-gui-style-plan machine-gui-style-apply:
-	crates/tooling/airlock-dev/scripts/airlock-dev.sh gui-style $(patsubst machine-gui-style-%,%,$@) --target "$(DEPLOY_TARGET)"
+	$(AIRLOCK_DEV) gui-style $(patsubst machine-gui-style-%,%,$@) --target "$(DEPLOY_TARGET)"
 .PHONY: machine-build machine-plan machine-apply machine-status machine-verify machine-resume machine-rollback machine-guest-plan machine-guest-apply usr-assistant-machine-source
 machine-build machine-plan machine-apply machine-status machine-verify machine-resume machine-rollback:
-	crates/tooling/airlock-dev/scripts/airlock-dev.sh deploy $(patsubst machine-%,%,$@) --profile "$(DEPLOY_PROFILE)" $(if $(DEPLOY_TARGET),--target "$(DEPLOY_TARGET)",) $(if $(filter 1,$(DEPLOY_DEVELOPMENT_SHELL) $(DEPLOY_HOST_REPAIR)),--development-shell,) $(if $(filter 1,$(DEPLOY_HOST_REPAIR)),--host-repair,) $(if $(filter 1,$(UPDATE_COORDINATOR)),--update-coordinator,) $(if $(DEPLOY_BRIDGE_VM),--bridge-vm "$(DEPLOY_BRIDGE_VM)",)
+	$(AIRLOCK_DEV) deploy $(patsubst machine-%,%,$@) --profile "$(DEPLOY_PROFILE)" $(if $(DEPLOY_TARGET),--target "$(DEPLOY_TARGET)",) $(if $(filter 1,$(DEPLOY_DEVELOPMENT_SHELL) $(DEPLOY_HOST_REPAIR)),--development-shell,) $(if $(filter 1,$(DEPLOY_HOST_REPAIR)),--host-repair,) $(if $(filter 1,$(UPDATE_COORDINATOR)),--update-coordinator,) $(if $(DEPLOY_BRIDGE_VM),--bridge-vm "$(DEPLOY_BRIDGE_VM)",)
 machine-guest-plan machine-guest-apply:
 	@test -n "$(DEPLOY_TARGET)" || { echo 'set DEPLOY_TARGET to the Tailscale usr-assistant host'; exit 2; }
 	@test -n "$(ADMISSION_RECEIPT)" || { echo 'set ADMISSION_RECEIPT to the receipt path inside usr-assistant'; exit 2; }
-	crates/tooling/airlock-dev/scripts/airlock-dev.sh deploy $(patsubst machine-%,%,$@) --profile "$(DEPLOY_PROFILE)" --target "$(DEPLOY_TARGET)" --receipt "$(ADMISSION_RECEIPT)" $(if $(filter 1,$(UPDATE_COORDINATOR)),--update-coordinator) $(if $(filter 1,$(DEPLOY_DEVELOPMENT_SHELL)),--development-shell,)
+	$(AIRLOCK_DEV) deploy $(patsubst machine-%,%,$@) --profile "$(DEPLOY_PROFILE)" --target "$(DEPLOY_TARGET)" --receipt "$(ADMISSION_RECEIPT)" $(if $(filter 1,$(UPDATE_COORDINATOR)),--update-coordinator) $(if $(filter 1,$(DEPLOY_DEVELOPMENT_SHELL)),--development-shell,)
 usr-assistant-machine-source:
 	@test -n "$(DEPLOY_TARGET)" || { echo 'set DEPLOY_TARGET to the Tailscale usr-assistant host'; exit 2; }
-	crates/tooling/airlock-dev/scripts/airlock-dev.sh source push --target "$(DEPLOY_TARGET)"
+	$(AIRLOCK_DEV) source push --target "$(DEPLOY_TARGET)"
 VM_SLOW_DEFAULT_PARALLEL_FLOW_IDS = vm-config-flow vm-nix-closure-flow
 VM_SLOW_PARALLEL_FLOW_IDS = $(VM_SLOW_DEFAULT_PARALLEL_FLOW_IDS) vm-config-boot-flow
 VM_SLOW_SERIAL_FLOW_IDS = vm-config-boot-activate-flow vm-pool-admission-flow
@@ -224,10 +227,16 @@ test-native-storage-linux:
 
 .PHONY: check-publish
 check-publish:
-	crates/tooling/airlock-dev/scripts/airlock-dev.sh check-publish
+	$(AIRLOCK_DEV) check-publish
 
 # Cargo calls the debug profile "dev"; receipts must describe the selected build.
 NATIVE_BUILD_PROFILE ?= release
+
+# Keep the initial compiler within one allowed CPU before Rust can set the build budget.
+.PHONY: dev-tools-bootstrap
+dev-tools-bootstrap:
+	@bootstrap_cpu="$$(sed -n 's/^Cpus_allowed_list:[[:space:]]*\([0-9][0-9]*\).*/\1/p' /proc/self/status)"; \
+	taskset --cpu-list "$$bootstrap_cpu" cargo build --quiet --locked --jobs 1 --manifest-path "$(CURDIR)/crates/Cargo.toml" -p airlock-dev
 
 .PHONY: dev-tools-build
 dev-tools-build:
@@ -281,9 +290,9 @@ usb-dev-prepare-inputs: ensure-generated-dirs
 	seed_archive="$(or $(AIRLOCK_TMPDIR),$(CURDIR)/.airlock)/airlock-machine-seed.tar.gz"; \
 	offline_inputs="$(or $(AIRLOCK_TMPDIR),$(CURDIR)/.airlock)/airlock-machine-offline-inputs.json"; \
 	archive_json="$(or $(AIRLOCK_TMPDIR),$(CURDIR)/.airlock)/airlock-machine-flake-archive.json"; \
-	crates/tooling/airlock-dev/scripts/airlock-dev.sh source seed --reuse --output "$$seed_archive" >/dev/null; \
+	$(AIRLOCK_DEV) source seed --reuse --output "$$seed_archive" >/dev/null; \
 	$(AIRLOCK_NIX) flake archive --no-update-lock-file --json path:./airlock-machine > "$$archive_json"; \
-	crates/tooling/airlock-dev/scripts/airlock-dev.sh source offline-inputs --repository airlock-machine --output "$$offline_inputs" < "$$archive_json"
+	$(AIRLOCK_DEV) source offline-inputs --repository airlock-machine --output "$$offline_inputs" < "$$archive_json"
 
 # Force both offline trials and publish a fresh passing receipt.
 ifeq ($(AIRLOCK_IMAGE_BUILD_LIMITED),1)
@@ -293,7 +302,7 @@ usb-builder-offline-check: image-tools-build usb-dev-prepare-inputs
 	offline_inputs="$(or $(AIRLOCK_TMPDIR),$(CURDIR)/.airlock)/airlock-machine-offline-inputs.json"; \
 	closure="$$(AIRLOCK_MACHINE_SEED_ARCHIVE="$$seed_archive" AIRLOCK_MACHINE_OFFLINE_INPUTS="$$offline_inputs" $(AIRLOCK_NIX) build --impure .#airlock-usb-builder-input-closure --no-link --print-out-paths)"; \
 	nix_bin="$$(AIRLOCK_MACHINE_SEED_ARCHIVE="$$seed_archive" AIRLOCK_MACHINE_OFFLINE_INPUTS="$$offline_inputs" $(AIRLOCK_NIX) eval --impure --raw .#airlock-usb-builder-nix.outPath)/bin/nix"; \
-	prepared_source="$$(crates/tooling/airlock-dev/scripts/airlock-dev.sh source prepare | jq -er .source)"; \
+	prepared_source="$$($(AIRLOCK_DEV) source prepare | jq -er .source)"; \
 	"$(IMAGE_TOOLS_DIR)/airlock-image-check" \
 	  --closure "$$closure" --machine airlock-machine --prepared-machine "$$prepared_source/airlock-machine" --manifest "$$offline_inputs" --seed-archive "$$seed_archive" \
 	  --source-store-root "$(if $(filter 1,$(AIRLOCK_USE_HOST_NIX_STORE)),/,$(AIRLOCK_NIX_ROOT))" --nix-bin "$$nix_bin" \
@@ -307,7 +316,7 @@ usb-dev-image: image-tools-build usb-dev-prepare-inputs
 	offline_inputs="$(or $(AIRLOCK_TMPDIR),$(CURDIR)/.airlock)/airlock-machine-offline-inputs.json"; \
 	closure="$$(AIRLOCK_MACHINE_SEED_ARCHIVE="$$seed_archive" AIRLOCK_MACHINE_OFFLINE_INPUTS="$$offline_inputs" $(AIRLOCK_NIX) build --impure .#airlock-usb-builder-input-closure --no-link --print-out-paths)"; \
 	nix_bin="$$(AIRLOCK_MACHINE_SEED_ARCHIVE="$$seed_archive" AIRLOCK_MACHINE_OFFLINE_INPUTS="$$offline_inputs" $(AIRLOCK_NIX) eval --impure --raw .#airlock-usb-builder-nix.outPath)/bin/nix"; \
-	prepared_source="$$(crates/tooling/airlock-dev/scripts/airlock-dev.sh source prepare | jq -er .source)"; \
+	prepared_source="$$($(AIRLOCK_DEV) source prepare | jq -er .source)"; \
 	"$(IMAGE_TOOLS_DIR)/airlock-image-check" \
 	  --closure "$$closure" --machine airlock-machine --prepared-machine "$$prepared_source/airlock-machine" --manifest "$$offline_inputs" --seed-archive "$$seed_archive" \
 	  --source-store-root "$(if $(filter 1,$(AIRLOCK_USE_HOST_NIX_STORE)),/,$(AIRLOCK_NIX_ROOT))" --nix-bin "$$nix_bin" \
@@ -464,7 +473,7 @@ vm-nix-closure-warm-flow: ensure-generated-dirs gc-auto
 
 vm-pool-admission-flow: ensure-generated-dirs gc-auto
 	AIRLOCK_KEEP_VM=1 AIRLOCK_VM_IMAGE_ATTR=airlock-vm-pool-admission-test-image AIRLOCK_VM_DISPLAY=none AIRLOCK_VM_FRESH=1 AIRLOCK_BOOTSTRAP_QUBES=0 AIRLOCK_RUN_SETUP_CONFIG=1 AIRLOCK_RUN_CONFIG_INPUTS_IMPORT=0 AIRLOCK_RUN_CONFIG_VMS_SMOKE=0 AIRLOCK_RUN_NIX_CLOSURE_SMOKE=0 AIRLOCK_RUN_QUBES_SMOKE=0 AIRLOCK_RUN_GUI_SMOKE=0 $(AIRLOCK_DEV) with-environment nested smoke
-	crates/tooling/airlock-dev/scripts/airlock-dev.sh pool-smoke
+	$(AIRLOCK_DEV) pool-smoke
 
 disk-usage:
 	$(AIRLOCK_DEV) clean disk-usage
@@ -530,10 +539,10 @@ PREPARED_KEEP ?= 3
 
 .PHONY: prepared-prune prepared-prune-apply
 prepared-prune:
-	crates/tooling/airlock-dev/scripts/airlock-dev.sh source prune --keep "$(PREPARED_KEEP)"
+	$(AIRLOCK_DEV) source prune --keep "$(PREPARED_KEEP)"
 
 prepared-prune-apply:
-	crates/tooling/airlock-dev/scripts/airlock-dev.sh source prune --keep "$(PREPARED_KEEP)" --apply
+	$(AIRLOCK_DEV) source prune --keep "$(PREPARED_KEEP)" --apply
 
 # Preparation is explicit; quick/native execution reads Cargo's executable receipt only.
 NATIVE_TEST_RECEIPT ?= $(CURDIR)/.airlock-logs/native-integration-build.jsonl
