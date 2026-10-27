@@ -71,7 +71,8 @@ software and configuration; it does not reverse private application data.
 
 `make lab-start` builds and opens the interactive local Airlock machine in QEMU.
 Commit source changes and align the machine/application pins before building.
-Its Rust definition is in [local_lab.rs](../crates/airlock-config/src/profiles/local_lab.rs);
+The outer guest defaults to 32 GiB so the controller can evaluate whole-machine
+updates; the controller VM starts on demand. Its Rust definition is in [local_lab.rs](../crates/airlock-config/src/profiles/local_lab.rs);
 it uses the existing X11 display relay and normal VM services. `make lab-resume`
 keeps the selected image and writable disk without rebuilding. `make lab-status`
 reports QEMU state and source identity; `make lab-ssh` opens the dom0 development

@@ -10,7 +10,7 @@ use rusix::{
 };
 
 /// Declare two application VMs, the shared clipboard and normal network and management services.
-/// Fixed memory bounds keep this machine within a 16 GiB outer guest without changing role defaults.
+/// Fixed memory bounds keep this machine within a 32 GiB outer guest without changing role defaults.
 pub fn machine() -> Result<MachineSnapshot, AuthoringError> {
     let mut machine = Machine::default();
     let network = Vm::network("sys-net", GiB(2))?;
@@ -35,8 +35,9 @@ pub fn machine() -> Result<MachineSnapshot, AuthoringError> {
     gui.set_memory(Memory::Fixed(MiB(1536)));
     machine.add(&gui)?;
 
-    let controller = Vm::controller("sys-ctrl", &firewall, GiB(8))?;
-    controller.set_memory(Memory::Fixed(MiB(2048)));
+    let controller = Vm::controller("sys-ctrl", &firewall, GiB(16))?;
+    // Whole-machine Nix evaluation needs room for every VM system; the controller starts on demand.
+    controller.set_memory(Memory::Fixed(MiB(16384)));
     controller.add_module(application_scale());
     controller.add_module(NixosModule::with_arguments([] as [&str; 0], |_| {
         ModuleBody::new(nix_record! {
@@ -51,7 +52,7 @@ pub fn machine() -> Result<MachineSnapshot, AuthoringError> {
     }));
     machine.add(&controller)?;
 
-    let assistant = Vm::assistant("usr-assistant", &firewall, GiB(8))?;
+    let assistant = Vm::assistant("usr-assistant", &firewall, GiB(16))?;
     assistant.set_memory(Memory::Fixed(MiB(2048)));
     assistant.add_module(application_scale());
     machine.add(&assistant)?;

@@ -39,7 +39,7 @@ enum Action {
         #[arg(long, default_value_t = 2342)]
         ssh_port: u16,
         /// Outer guest memory in MiB, including dom0 and all nested VMs.
-        #[arg(long, default_value_t = 16384)]
+        #[arg(long, default_value_t = 32768)]
         memory: u32,
         /// Outer virtual CPU allocation.
         #[arg(long, default_value_t = 8)]
@@ -196,8 +196,8 @@ impl Instance {
     fn start(&self, reuse: bool, headless: bool, port: u16, memory: u32, cpus: u16) -> Result<()> {
         ensure!(self.monitor()?.is_none(), "instance is already running");
         ensure!(
-            port > 0 && memory >= 16384 && cpus > 0,
-            "lab requires a nonzero port/CPU count and at least 16384 MiB"
+            port > 0 && memory >= 32768 && cpus > 0,
+            "lab requires a nonzero port/CPU count and at least 32768 MiB"
         );
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))
             .context("SSH port is already in use; choose --ssh-port")?;
@@ -212,6 +212,29 @@ impl Instance {
             let (machine, machine_revision) = crate::repository::local(&self.context.root)?;
             let seed = self.directory.join("machine-source.tar.gz");
             crate::source::seed(&machine, &seed, true)?;
+            let archive_log = self.context.logs.join("input-archive.log");
+            let archive = self
+                .context
+                .nix(&[
+                    "flake",
+                    "archive",
+                    "--no-update-lock-file",
+                    "--json",
+                    &format!(
+                        "path:{root}/airlock-machine",
+                        root = self.context.root.display()
+                    ),
+                ])?
+                .stderr(File::create(&archive_log)?)
+                .output()?;
+            ensure!(
+                archive.status.success(),
+                "input archiving failed ({status}); see {log}",
+                status = archive.status,
+                log = archive_log.display()
+            );
+            let offline = self.directory.join("offline-inputs.json");
+            crate::source::offline_archive(&machine, &offline, &archive.stdout)?;
             let candidate_root = self.directory.join("result-links/candidate-image");
             fs::create_dir_all(candidate_root.parent().context("image root directory")?)?;
             let mut build = self.context.nix(&[
@@ -223,7 +246,9 @@ impl Instance {
                 "--print-out-paths",
                 "--print-build-logs",
             ])?;
-            build.env("AIRLOCK_MACHINE_SEED_ARCHIVE", seed);
+            build
+                .env("AIRLOCK_MACHINE_SEED_ARCHIVE", seed)
+                .env("AIRLOCK_MACHINE_OFFLINE_INPUTS", offline);
             let log = self.context.logs.join("image-build.log");
             let result = build.stderr(File::create(&log)?).output()?;
             ensure!(

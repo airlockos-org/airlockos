@@ -300,17 +300,22 @@ fn collect(
 }
 
 fn offline(repo: &Path, destination: &Path) -> Result<Value> {
-    let source = identity(repo)?;
-    let lock = support::json(&repo.join("flake.lock"))?;
     let mut bytes = Vec::new();
     std::io::stdin()
         .take(32 * 1024 * 1024 + 1)
         .read_to_end(&mut bytes)?;
+    offline_archive(repo, destination, &bytes)
+}
+
+/// Bind archived flake inputs to a clean machine source using the normal first-boot manifest.
+pub(crate) fn offline_archive(repo: &Path, destination: &Path, bytes: &[u8]) -> Result<Value> {
+    let source = identity(repo)?;
+    let lock = support::json(&repo.join("flake.lock"))?;
     ensure!(
         bytes.len() <= 32 * 1024 * 1024,
         "flake archive JSON exceeds limit"
     );
-    let archive: Value = airlock_nix_core::runtime::decode(&bytes)?;
+    let archive: Value = airlock_nix_core::runtime::decode(bytes)?;
     let root = archive["path"]
         .as_str()
         .context("machine flake archive lacks a store path")?;

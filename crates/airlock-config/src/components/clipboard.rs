@@ -238,27 +238,36 @@ fn endpoint(connection: ClipboardConnection, authority: bool) -> NixosModule {
 }
 
 /// Install the boot-offer observer and generated permissions in dom0.
-pub(crate) fn host_module(
-    connections: &[ClipboardConnection],
-    workspace: Workspace,
-    physical: bool,
-) -> NixValue {
+pub(crate) fn host_module(connections: &[ClipboardConnection], workspace: Workspace) -> NixValue {
     let connections = connections.to_vec();
     ContextualModule::new(move |inputs| {
         let service = Application::Dom0.build(&inputs.pkgs, &workspace).as_expression();
-        let endpoint = inputs.pkgs.clone().select("writeShellScript").call("airlock-clipboard-endpoint").call(nix_text!(r#"
-            exec {service}/bin/airlock-dom0-service clipboard-endpoint --config /etc/airlock/clipboards.json
-        "#, service = service));
-        let rules = policy(&connections);
-        let mut etc = vec![
-            ("airlock/clipboards.json", nix_record! { "text": serde_json::to_string(&connections).expect("clipboard contracts serialize") }),
-            ("qubes-rpc/airlock.ClipboardEndpoint", nix_record! { "source": endpoint }),
-        ];
-        if !physical { etc.push(("qubes/policy.d/44-airlock-clipboard.policy", nix_record! { "text": rules.clone() })); }
-        let body = ModuleBody::new(nix_record! { "environment": nix_record! { "etc": NixValue::record(etc) } });
-        if physical {
-            let policy = inputs.pkgs.clone().select("writeTextDir").call("etc/qubes/policy.d/44-airlock-clipboard.policy").call(rules);
-            body.module(ModuleBody::new(nix_record! { "virtualisation": nix_record! { "qubes": nix_record! { "packages": NixValue::list([policy]) } } }))
-        } else { body }
+        let endpoint = inputs.pkgs.clone().select("writeShellScript")
+            .call("airlock-clipboard-endpoint")
+            .call(nix_text!(r#"
+                exec {service}/bin/airlock-dom0-service clipboard-endpoint --config /etc/airlock/clipboards.json
+            "#, service = service));
+
+        // Upstream joins the complete policy directory from its Qubes packages.
+        let policy = inputs.pkgs.clone().select("writeTextDir")
+            .call("etc/qubes/policy.d/44-airlock-clipboard.policy")
+            .call(policy(&connections));
+        ModuleBody::new(nix_record! {
+            "virtualisation": nix_record! {
+                "qubes": nix_record! {
+                    "packages": NixValue::list([policy]),
+                },
+            },
+            "environment": nix_record! {
+                "etc": nix_record! {
+                    "airlock/clipboards.json": nix_record! {
+                        "text": serde_json::to_string(&connections).expect("clipboard contracts serialize"),
+                    },
+                    "qubes-rpc/airlock.ClipboardEndpoint": nix_record! {
+                        "source": endpoint,
+                    },
+                },
+            },
+        })
     }).into_expression()
 }

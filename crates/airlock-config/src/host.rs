@@ -122,7 +122,6 @@ pub(crate) fn modules(host: &HostSnapshot, machine: &MachineSnapshot) -> Package
         modules.push(crate::components::clipboard::host_module(
             machine.clipboard_connections(),
             airlock_build::Workspace::new(inputs.airlock_apps()),
-            false,
         ));
         if let Some(access) = machine.diagnostic_access() {
             modules.push(crate::components::diagnostics::host_module(
@@ -130,17 +129,26 @@ pub(crate) fn modules(host: &HostSnapshot, machine: &MachineSnapshot) -> Package
                 airlock_build::Workspace::new(inputs.airlock_apps()),
             ));
         }
-        modules.push(nix_record! {
-            "environment": nix_record! {
-                "etc": nix_record! {
-                    "qubes/policy.d/45-airlock-screen-capture.policy": nix_record! {
-                        "text": crate::components::screen_capture::policy(
-                            machine.capture_connections(),
-                        ),
+        let capture_policy = NixValue::function_attrs_open(["pkgs"], |arguments| {
+            let package = arguments
+                .clone()
+                .select("pkgs.writeTextDir")
+                .call("etc/qubes/policy.d/45-airlock-screen-capture.policy")
+                .call(crate::components::screen_capture::policy(
+                    machine.capture_connections(),
+                ));
+            (
+                Vec::<(&str, NixValue)>::new(),
+                nix_record! {
+                    "virtualisation": nix_record! {
+                        "qubes": nix_record! {
+                            "packages": NixValue::list([package]),
+                        },
                     },
                 },
-            },
+            )
         });
+        modules.push(capture_policy);
 
         (Vec::<(&str, NixValue)>::new(), NixValue::list(modules))
     })
