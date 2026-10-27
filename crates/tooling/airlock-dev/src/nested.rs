@@ -108,7 +108,9 @@ impl Context {
 
     /// Reinvoke a native subcommand with exact arguments and the same source checkout.
     fn native(&self, args: &[&str]) -> Result<Command> {
-        let mut command = Command::new(std::env::current_exe()?);
+        // Cargo may replace the executable during a long image build. Procfs keeps
+        // the running inode available even after its original path is unlinked.
+        let mut command = Command::new("/proc/self/exe");
         command.arg("--repository-root").arg(&self.root).args(args);
         Ok(command)
     }
