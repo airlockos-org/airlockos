@@ -32,6 +32,7 @@ pub(super) fn configurations(build: &Build, assembly: &NixValue) -> NixValue {
     let profiles = build.shared.clone().select("profiles");
     let mut configurations = vec![
         ("local-lab".to_owned(), super::local_lab::configuration(build)),
+        ("local-lab-image".to_owned(), super::local_lab::image(build)),
         (
             "test".to_owned(),
             build.lib.clone().select("nixosSystem").call(nix_record! {

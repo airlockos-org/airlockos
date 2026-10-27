@@ -4,6 +4,8 @@ mod store;
 
 mod usb;
 
+mod local;
+
 mod console;
 
 mod repair;
@@ -56,3 +58,6 @@ pub(crate) use console::module as console_module;
 
 /// Construct a guarded host-only repair against an admitted baseline.
 pub(crate) use repair::constructor as repair_constructor;
+
+/// Assemble a QEMU disk using the same prepared VM pool and Qubes runtime as physical images.
+pub(crate) use local::module as local_module;

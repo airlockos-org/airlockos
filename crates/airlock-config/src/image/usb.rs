@@ -91,7 +91,7 @@ pub(crate) fn module(workspace: &Workspace) -> NixValue {
 }
 
 /// Detach topology's VM path references while retaining every artifact actually consumed by dom0.
-fn prepared_configuration(
+pub(super) fn prepared_configuration(
     context: &ModuleContext,
     workspace: &Workspace,
     prepared: NixValue,

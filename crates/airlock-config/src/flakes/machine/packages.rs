@@ -55,7 +55,7 @@ pub(super) fn outputs(build: &Build, system: NixValue) -> NixValue {
             packages.extend([
                 (
                     "airlock-local-lab-image".into(),
-                    build.output("nixosConfigurations.local-lab.config.system.build.image"),
+                    build.output("nixosConfigurations.local-lab-image.config.system.build.image"),
                 ),
                 (
                     "airlock-machine-release-local-lab".into(),

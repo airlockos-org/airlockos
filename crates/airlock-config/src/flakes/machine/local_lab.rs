@@ -4,28 +4,50 @@
 use super::Build;
 use rusix::{
     interop::{NixExpression, NixPath, raw::NixValue},
-    nix_record,
+    nix_record, nix_text,
     nixos::{ContextualModule, ModuleBody},
 };
 
-/// Build the local desktop with the standard host composition and virtual hardware.
+/// Build the normal local machine release without copying VM payloads into dom0.
 pub(super) fn configuration(build: &Build) -> NixValue {
-    let system: NixValue = "x86_64-linux".into();
+    host(build, entries(build, "x86_64-linux".into()), None)
+}
+
+/// Prepare the initial VM pool and state only when assembling a fresh disk image.
+pub(super) fn image(build: &Build) -> NixValue {
+    entries(build, "x86_64-linux".into()).bind(|entries| {
+        crate::image::prepared_store(
+            &build.pkgs("x86_64-linux".into()),
+            &build.workspace,
+            entries.clone(),
+            seed_inputs().select("airlockMachineOfflineInputs"),
+        )
+        .bind(|prepared| host(build, entries, Some(prepared)))
+    })
+}
+
+/// Share the authored host and VM graph between ordinary releases and the initial carrier image.
+fn host(build: &Build, entries: NixValue, prepared: Option<NixValue>) -> NixValue {
     let generated = NixValue::builtin("import").call(
         build
             .source
             .join_relative("generated/local-lab/default.nix")
             .unwrap(),
     );
-    let entries = entries(build, system.clone());
-
     entries.bind(|entries| {
-        let domains = NixValue::builtin("mapAttrs")
-            .call(NixValue::function(|_| {
-                NixValue::function(|entry| crate::assembly::materialize(entry, &nix_record! {}, ""))
-            }))
-            .call(entries.clone());
-        let kernel = build.kernel(system.clone());
+        let stores = prepared.as_ref().map_or_else(|| nix_record! {}, |prepared| {
+            NixValue::builtin("mapAttrs")
+                .call(NixValue::function(|name| NixValue::function(|_| {
+                    nix_text!("{descriptors}/{name}", descriptors = prepared.clone().select("descriptors"), name = name.clone()).into()
+                })))
+                .call(entries.clone())
+        });
+        let machine = crate::profiles::local_lab::machine().expect("valid local lab");
+        let domains = NixValue::record(machine.vms().map(|vm| (
+            vm.name.as_str(),
+            crate::assembly::materialize(entries.clone().select(vm.name.as_str()), &stores, vm.name.as_str()),
+        )));
+        let kernel = build.kernel("x86_64-linux".into());
         let host = generated.clone().select("hostModules").call(nix_record! {
             "lib": build.lib.clone(),
             "airlockConfigDomains": domains,
@@ -36,33 +58,28 @@ pub(super) fn configuration(build: &Build) -> NixValue {
             "airlockApps": build.workspace.root(),
         });
         let identity = super::super::source_identity(&build.inputs.clone().select("self"));
-        let metadata = identity.clone().merge_attrs(nix_record! {
-            "lockHash": NixValue::builtin("hashFile").call("sha256").call(build.file("flake.lock")),
-        });
         let release = crate::release::module(&crate::release::Build {
-            source: build.source.clone(),
-            workspace: build.workspace.clone(),
-            entries,
-            metadata,
+            source: build.source.clone(), workspace: build.workspace.clone(), entries: entries.clone(),
+            metadata: identity.clone().merge_attrs(nix_record! {
+                "lockHash": NixValue::builtin("hashFile").call("sha256").call(build.file("flake.lock")),
+            }),
         });
-        let modules = NixValue::concat_lists([
-            NixValue::list([
-                build.output("nixosModules.dom0"),
-                build.shared.clone().select("profiles.development"),
-                settings(&identity, &build.source),
-                release,
-            ]),
-            host,
-        ]);
-
+        let mut modules = vec![
+            build.output("nixosModules.dom0"), build.shared.clone().select("profiles.development"),
+            settings(&identity, &build.source), release,
+            nix_record! { "system": nix_record! { "extraDependencies": NixValue::list([kernel.clone().select("package")]) } },
+        ];
+        if let Some(prepared) = prepared {
+            modules.push(crate::image::local_module(&build.workspace, prepared, entries.clone()));
+        }
         build.lib.clone().select("nixosSystem").call(nix_record! {
-            "system": system.clone(),
+            "system": "x86_64-linux",
             "specialArgs": nix_record! {
                 "airlockQubeKernel": kernel,
                 "airlockAppsSource": build.workspace.root(),
                 "airlockConfigInputs": build.configuration_inputs(),
             },
-            "modules": modules,
+            "modules": NixValue::concat_lists([NixValue::list(modules), host]),
         })
     })
 }
@@ -127,8 +144,12 @@ pub(super) fn entries(build: &Build, system: NixValue) -> NixValue {
         "extraVmSpecialArgs": seed_inputs(),
     });
     NixValue::builtin("mapAttrs")
-        .call(NixValue::function(|_| {
-            NixValue::function(|factory| factory.call(system.clone()))
+        .call(NixValue::function(|name| {
+            NixValue::function(|factory| {
+                factory.call(system.clone()).merge_attrs(nix_record! {
+                    "preparedDomainName": name.clone(),
+                })
+            })
         }))
         .call(factories)
 }
