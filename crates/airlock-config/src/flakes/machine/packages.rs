@@ -54,13 +54,13 @@ pub(super) fn outputs(build: &Build, system: NixValue) -> NixValue {
             let gui = airlock_sys_gui_service::authoring::Sources::new(build.workspace.root());
             packages.extend([
                 (
-                    "airlock-local-lab-image".into(),
-                    build.output("nixosConfigurations.local-lab-image.config.system.build.image"),
+                    "airlock-qemu-lab-image".into(),
+                    build.output("nixosConfigurations.qemu-lab-image.config.system.build.image"),
                 ),
                 (
-                    "airlock-machine-release-local-lab".into(),
+                    "airlock-machine-release-qemu-lab".into(),
                     build.output(
-                        "nixosConfigurations.local-lab.config.system.build.airlockMachineRelease",
+                        "nixosConfigurations.qemu-lab.config.system.build.airlockMachineRelease",
                     ),
                 ),
                 (

@@ -2,7 +2,7 @@
 
 mod nested;
 
-mod local_lab;
+mod qemu_lab;
 
 mod packages;
 

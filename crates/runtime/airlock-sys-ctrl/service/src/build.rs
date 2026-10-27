@@ -44,7 +44,7 @@ fn profile() -> Result<&'static str> {
 fn checked_profile(name: &str) -> Result<&'static str> {
     match name {
         "usb-lab" => Ok("usb-lab"),
-        "local-lab" => Ok("local-lab"),
+        "qemu-lab" => Ok("qemu-lab"),
         _ => Err(Error::Message(
             "unsupported installed machine build profile".into(),
         )),
@@ -59,12 +59,12 @@ mod profile_tests {
     #[test]
     fn build_profiles_are_explicit() {
         assert_eq!(checked_profile("usb-lab").unwrap(), "usb-lab");
-        assert_eq!(checked_profile("local-lab").unwrap(), "local-lab");
+        assert_eq!(checked_profile("qemu-lab").unwrap(), "qemu-lab");
         for invalid in [
             "",
             "usb-gui-lab",
-            "../../local-lab",
-            "local-lab;builtins.abort",
+            "../../qemu-lab",
+            "qemu-lab;builtins.abort",
         ] {
             assert!(checked_profile(invalid).is_err());
         }
@@ -184,8 +184,8 @@ pub(super) fn execute(store: &StateStore, grant: &Grant, lock: &OperationLock) -
         .target
         .as_ref()
         .ok_or_else(|| Error::Message("guest request has no target".into()))?;
-    let configuration = if profile()? == "local-lab" {
-        format!("airlock-local-lab-domain-{target}")
+    let configuration = if profile()? == "qemu-lab" {
+        format!("airlock-qemu-lab-domain-{target}")
     } else if target.as_str() == "sys-gui" {
         "airlock-domain-sys-gui-usb-lab".into()
     } else {

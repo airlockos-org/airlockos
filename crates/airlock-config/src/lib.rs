@@ -287,8 +287,8 @@ pub fn export_machine(
     export_installation(physical, &directory.join("generated/machine"))?;
     export_installation(bootstrap, &directory.join("generated/bootstrap"))?;
     export_installation(
-        &profiles::local_lab::machine()?,
-        &directory.join("generated/local-lab"),
+        &profiles::qemu_lab::machine()?,
+        &directory.join("generated/qemu-lab"),
     )?;
     let flake = crate::compile(flakes::machine_configuration(application_revision))
         .map_err(|diagnostic| diagnostic.render(directory))?;

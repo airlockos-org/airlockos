@@ -44,7 +44,7 @@ pub fn machine() -> Result<MachineSnapshot, AuthoringError> {
             "environment": nix_record! {
                 "etc": nix_record! {
                     "airlock/machine-build-profile": nix_record! {
-                        "text": "local-lab\n",
+                        "text": "qemu-lab\n",
                     },
                 },
             },
@@ -86,7 +86,7 @@ fn application_session() -> NixosModule {
 mod tests {
     /// Ordinary authoring and export must retain the lab's real service contributions.
     #[test]
-    fn local_machine_uses_the_standard_export_boundary() {
+    fn qemu_lab_machine_uses_the_standard_export_boundary() {
         let machine = super::machine().unwrap();
         let directory = tempfile::tempdir().unwrap();
         crate::export_installation(&machine, directory.path()).unwrap();

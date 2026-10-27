@@ -27,8 +27,8 @@ enum Profile {
     #[default]
     #[serde(rename = "usb-lab")]
     UsbLab,
-    #[serde(rename = "local-lab")]
-    LocalLab,
+    #[serde(rename = "qemu-lab")]
+    QemuLab,
 }
 
 #[derive(Deserialize)]

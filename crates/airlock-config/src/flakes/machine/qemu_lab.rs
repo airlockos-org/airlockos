@@ -8,7 +8,7 @@ use rusix::{
     nixos::{ContextualModule, ModuleBody},
 };
 
-/// Build the normal local machine release without copying VM payloads into dom0.
+/// Build the normal QEMU lab release without copying VM payloads into dom0.
 pub(super) fn configuration(build: &Build) -> NixValue {
     host(build, entries(build, "x86_64-linux".into()), None)
 }
@@ -31,7 +31,7 @@ fn host(build: &Build, entries: NixValue, prepared: Option<NixValue>) -> NixValu
     let generated = NixValue::builtin("import").call(
         build
             .source
-            .join_relative("generated/local-lab/default.nix")
+            .join_relative("generated/qemu-lab/default.nix")
             .unwrap(),
     );
     entries.bind(|entries| {
@@ -42,7 +42,7 @@ fn host(build: &Build, entries: NixValue, prepared: Option<NixValue>) -> NixValu
                 })))
                 .call(entries.clone())
         });
-        let machine = crate::profiles::local_lab::machine().expect("valid local lab");
+        let machine = crate::profiles::qemu_lab::machine().expect("valid QEMU lab");
         let domains = NixValue::record(machine.vms().map(|vm| (
             vm.name.as_str(),
             crate::assembly::materialize(entries.clone().select(vm.name.as_str()), &stores, vm.name.as_str()),
@@ -90,11 +90,11 @@ fn settings(identity: &NixValue, source: &NixPath) -> NixValue {
         let force = |value: NixValue| context.lib.clone().select("mkForce").call(value);
         ModuleBody::new(nix_record! {
             "image": nix_record! {
-                "baseName": force("airlock-local-lab".into()),
+                "baseName": force("airlock-qemu-lab".into()),
             },
             "airlock": nix_record! {
                 "machineDeployment": nix_record! {
-                    "profile": force("local-lab".into()),
+                    "profile": force("qemu-lab".into()),
                     "initialSource": NixValue::if_else(
                         identity.clone().select("dirty"),
                         NixValue::null(),
@@ -124,14 +124,14 @@ fn settings(identity: &NixValue, source: &NixPath) -> NixValue {
                 },
             },
         })
-        .key("airlock.host.local-lab")
+        .key("airlock.host.qemu-lab")
     })
     .into_expression()
 }
 
-/// Expose the exact guest systems used by the local machine for normal guest admission.
+/// Expose the exact guest systems used by the QEMU lab for normal guest admission.
 pub(super) fn entries(build: &Build, system: NixValue) -> NixValue {
-    let directory = build.source.join_relative("generated/local-lab").unwrap();
+    let directory = build.source.join_relative("generated/qemu-lab").unwrap();
     let generated =
         NixValue::builtin("import").call(directory.join_relative("default.nix").unwrap());
     let factories = generated.clone().select("builders").call(nix_record! {

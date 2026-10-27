@@ -12,7 +12,7 @@ mod baseline;
 
 mod evidence;
 
-pub(crate) mod lab;
+pub(crate) mod qemu_lab;
 
 use crate::{environment, support};
 use airlock_nix_core::runtime::process::{self, OwnedChild};

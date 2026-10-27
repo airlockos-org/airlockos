@@ -1,4 +1,4 @@
-//! Persistent local desktops reuse the nested image builder and QEMU command.
+//! Persistent QEMU lab desktops reuse the nested image builder and QEMU command.
 //! Only QEMU lifecycle and observation live here; guest behavior stays in Airlock services.
 
 mod qmp;
@@ -13,7 +13,7 @@ use std::{
     os::unix::{fs::FileTypeExt, process::CommandExt},
 };
 
-/// Workstation operations on one named local desktop.
+/// Workstation operations on one named QEMU lab desktop.
 #[derive(ClapArgs)]
 pub(crate) struct Args {
     /// Instance identity within this worktree; each instance owns its disk and monitor.
@@ -73,7 +73,7 @@ struct Instance {
     name: String,
 }
 
-const IMAGE: &str = "airlock-local-lab-image";
+const IMAGE: &str = "airlock-qemu-lab-image";
 
 impl Instance {
     /// Validate a simple identity and derive a stable directory from the canonical worktree path.
@@ -87,7 +87,7 @@ impl Instance {
         let key = format!("{digest:x}");
         let key = &key[..12];
         let data = path("AIRLOCK_DATA_ROOT", root.join(".airlock"));
-        let directory = data.join("local-lab").join(key).join(instance);
+        let directory = data.join("qemu-lab").join(key).join(instance);
         ensure!(
             directory
                 .join("qmp.sock")
@@ -95,19 +95,19 @@ impl Instance {
                 .as_encoded_bytes()
                 .len()
                 < 108,
-            "local lab path is too long for a Unix socket; select a shorter AIRLOCK_DATA_ROOT"
+            "QEMU lab path is too long for a Unix socket; select a shorter AIRLOCK_DATA_ROOT"
         );
         ensure!(
             !directory.to_string_lossy().contains(','),
-            "local lab path cannot contain a comma"
+            "QEMU lab path cannot contain a comma"
         );
         fs::create_dir_all(&directory)?;
-        let logs = root.join(".airlock-logs/local-lab").join(instance);
+        let logs = root.join(".airlock-logs/qemu-lab").join(instance);
         fs::create_dir_all(&logs)?;
         Ok(Self {
             context: Context { root, logs },
             directory,
-            name: format!("airlock-local-lab-{key}-{instance}"),
+            name: format!("airlock-qemu-lab-{key}-{instance}"),
         })
     }
 
@@ -179,7 +179,7 @@ impl Instance {
             Ok(record) => record,
             Err(error) if !self.directory.join("instance.json").exists() => {
                 let _ = error;
-                json!({"schema":"airlock.local-lab.v1"})
+                json!({"schema":"airlock.qemu-lab.v1"})
             }
             Err(error) => return Err(error),
         };
@@ -275,7 +275,7 @@ impl Instance {
                 );
             }
             json!({
-                "schema":"airlock.local-lab.v1",
+                "schema":"airlock.qemu-lab.v1",
                 "image":IMAGE,
                 "image_output":output,
                 "backing_image":backing,

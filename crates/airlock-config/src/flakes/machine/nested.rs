@@ -31,8 +31,8 @@ struct Scenario {
 pub(super) fn configurations(build: &Build, assembly: &NixValue) -> NixValue {
     let profiles = build.shared.clone().select("profiles");
     let mut configurations = vec![
-        ("local-lab".to_owned(), super::local_lab::configuration(build)),
-        ("local-lab-image".to_owned(), super::local_lab::image(build)),
+        ("qemu-lab".to_owned(), super::qemu_lab::configuration(build)),
+        ("qemu-lab-image".to_owned(), super::qemu_lab::image(build)),
         (
             "test".to_owned(),
             build.lib.clone().select("nixosSystem").call(nix_record! {
@@ -45,15 +45,15 @@ pub(super) fn configurations(build: &Build, assembly: &NixValue) -> NixValue {
             assembly.clone().select("configuration").call(nix_record! {}),
         ),
     ];
-    let local = super::local_lab::entries(build, "x86_64-linux".into());
-    for vm in crate::profiles::local_lab::machine()
-        .expect("valid local lab")
+    let qemu_lab = super::qemu_lab::entries(build, "x86_64-linux".into());
+    for vm in crate::profiles::qemu_lab::machine()
+        .expect("valid QEMU lab")
         .vms()
     {
         if matches!(vm.backend, crate::model::GuestBackend::Nixos) {
             configurations.push((
-                format!("airlock-local-lab-domain-{name}", name = vm.name),
-                local
+                format!("airlock-qemu-lab-domain-{name}", name = vm.name),
+                qemu_lab
                     .clone()
                     .select(vm.name.as_str())
                     .select("configuration"),

@@ -62,8 +62,8 @@ pub(crate) enum Profile {
     UsbLab,
     UsbGuiLab,
     /// Interactive Airlock development machine inside QEMU.
-    #[value(name = "local-lab")]
-    Local,
+    #[value(name = "qemu-lab")]
+    Qemu,
 }
 
 impl Profile {
@@ -71,7 +71,7 @@ impl Profile {
         match self {
             Self::UsbLab => "usb-lab",
             Self::UsbGuiLab => "usb-gui-lab",
-            Self::Local => "local-lab",
+            Self::Qemu => "qemu-lab",
         }
     }
 }
@@ -331,7 +331,7 @@ pub(crate) fn execute(root: &Path, args: Args) -> Result<u8> {
     let target = args.target.as_deref().unwrap_or("");
 
     if !args.development_shell
-        && matches!(args.profile, Profile::UsbLab | Profile::Local)
+        && matches!(args.profile, Profile::UsbLab | Profile::Qemu)
         && matches!(
             action,
             Operation::Plan

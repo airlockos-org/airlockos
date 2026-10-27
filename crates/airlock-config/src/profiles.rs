@@ -10,4 +10,4 @@ pub mod bootstrap;
 pub mod runtime;
 
 /// Interactive QEMU development machine using normal Airlock VM services.
-pub mod local_lab;
+pub mod qemu_lab;

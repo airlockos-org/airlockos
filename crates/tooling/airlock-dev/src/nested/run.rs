@@ -208,7 +208,7 @@ pub(super) fn execute(context: &Context) -> Result<u8> {
             "-qmp",
             &format!("unix:{path},server=on,wait=off", path = qmp.display()),
         ]);
-        command.args(["-name", &setting("AIRLOCK_VM_NAME", "airlock-local-lab")]);
+        command.args(["-name", &setting("AIRLOCK_VM_NAME", "airlock-qemu-lab")]);
     }
     command.args([
         "-machine",

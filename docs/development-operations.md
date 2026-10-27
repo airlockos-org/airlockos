@@ -67,26 +67,26 @@ For recovery, inspect status before `make machine-resume` or
 `make machine-rollback`, using the same `DEPLOY_TARGET`. Rollback changes system
 software and configuration; it does not reverse private application data.
 
-## Nested-VM checks
+## QEMU lab and nested-VM checks
 
-`make lab-start` builds and opens the interactive local Airlock machine in QEMU.
+`make qemu-lab-start` builds and opens the interactive Airlock machine in the QEMU lab.
 Commit source changes and align the machine/application pins before building.
 The outer guest defaults to 32 GiB so the controller can evaluate whole-machine
-updates; the controller VM starts on demand. Its Rust definition is in [local_lab.rs](../crates/airlock-config/src/profiles/local_lab.rs);
+updates; the controller VM starts on demand. Its Rust definition is in [qemu_lab.rs](../crates/airlock-config/src/profiles/qemu_lab.rs);
 it uses the existing X11 display relay and normal VM services. Log in to the
-nested desktop as `user` with the development password `airlock`. `make lab-resume`
-keeps the selected image and writable disk without rebuilding. `make lab-status`
-reports QEMU state and source identity; `make lab-ssh` opens the dom0 development
-endpoint. `make lab-stop` requests a clean shutdown. `make lab-reset` discards only
+nested desktop as `user` with the development password `airlock`. `make qemu-lab-resume`
+keeps the selected image and writable disk without rebuilding. `make qemu-lab-status`
+reports QEMU state and source identity; `make qemu-lab-ssh` opens the dom0 development
+endpoint. `make qemu-lab-stop` requests a clean shutdown. `make qemu-lab-reset` discards only
 a stopped instance's writable disk and EFI variables.
 
-Instances are isolated by worktree and `LAB_INSTANCE`; select a distinct
-`LAB_SSH_PORT` when running several concurrently. Logs live under
-`.airlock-logs/local-lab/`. The native `airlock-dev lab` command also exposes
+Instances are isolated by worktree and `QEMU_LAB_INSTANCE`; select a distinct
+`QEMU_LAB_SSH_PORT` when running several concurrently. Logs live under
+`.airlock-logs/qemu-lab/`. The native `airlock-dev qemu-lab` command also exposes
 headless startup and explicit forced shutdown. A changed image requires a reset
 or a new instance, so rebuilding cannot silently replace a development disk.
 Image build output is retained in the instance's log directory. Ordinary updates
-use the `local-lab` release profile through the existing reviewed deployment path.
+use the `qemu-lab` release profile through the existing reviewed deployment path.
 
 The workstation Rust tool owns image selection, writable overlays, baseline reuse,
 SSH orchestration and test evidence. Shell entry points pass arguments to that
