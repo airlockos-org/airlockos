@@ -45,6 +45,8 @@ VM_GUI_MINIMAL_IMAGE_ATTR ?= airlock-vm-gui-minimal-image
 VM_GUI_MINIMAL_DIR ?= $(or $(AIRLOCK_DATA_ROOT),$(CURDIR)/.airlock)/vm-gui-minimal
 VM_GUI_MINIMAL_SSH_PORT ?= 2332
 AIRLOCK_VM_GDK_BACKEND ?= x11
+LAB_INSTANCE ?= default
+LAB_SSH_PORT ?= 2342
 VM_PARALLEL_IMAGE_ATTR ?= $(VM_GUI_CONFIG_IMAGE_ATTR)
 VM_PARALLEL_IMAGE_LINK ?= $(AIRLOCK_RESULT_LINK_DIR)/$(VM_PARALLEL_IMAGE_ATTR)-parallel-shared-result
 VM_PARALLEL_BASELINE_ROOT ?= $(or $(AIRLOCK_DATA_ROOT),$(CURDIR)/.airlock)/vm-baselines
@@ -222,6 +224,19 @@ test-native-storage-linux:
 	"$(NATIVE_TEST_RUNNER)" "$(NATIVE_TEST_RECEIPT)" --ignored privileged_linux_storage --nocapture
 
 .PHONY: vm-gui-minimal-image vm-gui-minimal-run vm-gui-minimal-ssh
+
+.PHONY: lab-start lab-resume lab-status lab-stop lab-reset lab-ssh
+lab-start:
+	$(AIRLOCK_DEV) lab --instance "$(LAB_INSTANCE)" start --ssh-port "$(LAB_SSH_PORT)"
+
+lab-resume:
+	$(AIRLOCK_DEV) lab --instance "$(LAB_INSTANCE)" start --reuse --ssh-port "$(LAB_SSH_PORT)"
+
+lab-status lab-stop lab-reset:
+	$(AIRLOCK_DEV) lab --instance "$(LAB_INSTANCE)" $(patsubst lab-%,%,$@)
+
+lab-ssh:
+	$(AIRLOCK_DEV) lab --instance "$(LAB_INSTANCE)" ssh
 
 .PHONY: usb-dev-prepare-inputs usb-builder-offline-check usb-dev-image usb-dev-write usb-dev-help
 

@@ -46,6 +46,8 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Action {
+    /// Operate a persistent local Airlock desktop inside QEMU.
+    Lab(nested::lab::Args),
     /// Run a workstation build with one physical core excluded from its CPU affinity.
     BuildBudget {
         /// Build command and literal arguments, inherited by all its child processes.
@@ -123,6 +125,7 @@ enum Action {
 fn execute(args: Args) -> Result<u8> {
     let root = repository::root(args.repository_root.as_deref())?;
     match args.command {
+        Action::Lab(args) => nested::lab::execute(&root, args),
         Action::BuildBudget { arguments } => build_budget::run(&root, &arguments),
         Action::Nested { command } => nested::execute(&root, command),
         Action::WithEnvironment { arguments } => {

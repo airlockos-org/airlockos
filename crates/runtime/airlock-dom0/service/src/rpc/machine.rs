@@ -22,10 +22,13 @@ enum Schema {
     V2,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Copy, Default, Deserialize, Serialize, PartialEq)]
 enum Profile {
+    #[default]
     #[serde(rename = "usb-lab")]
     UsbLab,
+    #[serde(rename = "local-lab")]
+    LocalLab,
 }
 
 #[derive(Deserialize)]
@@ -40,9 +43,9 @@ struct Header {
     revision: GitRevision,
     // Dependency-lock digest expected in the imported manifest.
     lock_hash: LockHash,
-    // Physical-machine profile supported by this transport.
+    // Named machine profile supported by this transport.
     #[serde(rename = "profile")]
-    _profile: Profile,
+    profile: Profile,
     // Export inventory; absent only when reusing a prepared candidate.
     paths: Option<BTreeMap<StorePath, u64>>,
     // Guest pool receipts authenticated later by the coordinator.
@@ -62,9 +65,9 @@ struct Manifest {
     // Dependency-lock digest bound to that same immutable release.
     #[serde(rename = "lockHash")]
     lock_hash: LockHash,
-    // Only physical machine releases are accepted by these qrexec endpoints.
+    // Only explicitly supported machine releases are accepted by these qrexec endpoints.
     #[serde(rename = "profile")]
-    _profile: Profile,
+    profile: Profile,
     // Guest bytes belong to admitted pool generations, outside this Nix stream.
     #[serde(rename = "guestTransport")]
     _transport: GuestTransport,
@@ -84,6 +87,9 @@ struct Checked {
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Prepared {
+    // Release family bound to this prepared plan; older records describe the physical profile.
+    #[serde(default)]
+    profile: Profile,
     // Local candidate assembled from exact admitted artifacts and receipts.
     candidate: ReleasePath,
     // Locally selected executable which validated the saved candidate.
@@ -132,6 +138,7 @@ impl Receiver {
     ) -> Result<(String, Checked)> {
         let checked = self.checked(engine, &candidate)?;
         let saved = Prepared {
+            profile: header.profile,
             candidate,
             coordinator: engine.to_owned(),
             release: header.release.clone(),
@@ -160,6 +167,7 @@ impl Receiver {
         let saved: Prepared = serde_json::from_value(raw)?;
         ensure!(
             saved.release == header.release
+                && saved.profile == header.profile
                 && saved.revision == header.revision
                 && saved.lock_hash == header.lock_hash,
             "prepared candidate identity mismatch"
@@ -288,6 +296,7 @@ impl Receiver {
             state::read(&Path::new(header.release.as_str()).join("release.json"))?;
         ensure!(
             manifest.schema == "airlock.machine-release.v1"
+                && manifest.profile == header.profile
                 && manifest.revision == header.revision
                 && manifest.lock_hash == header.lock_hash,
             "imported release provenance differs from request"

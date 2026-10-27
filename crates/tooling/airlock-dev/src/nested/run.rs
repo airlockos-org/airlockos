@@ -4,7 +4,7 @@ use super::*;
 use std::os::unix::{fs::PermissionsExt, process::CommandExt};
 
 /// Delete only a generated file or symlink, refusing a directory at a selected state path.
-fn remove(path: &Path) -> Result<()> {
+pub(super) fn remove(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => {
             ensure!(
@@ -21,7 +21,7 @@ fn remove(path: &Path) -> Result<()> {
 }
 
 /// Select exactly one root-level disk image; declaration ordering cannot change the choice.
-fn disk(output: &Path) -> Result<PathBuf> {
+pub(super) fn disk(output: &Path) -> Result<PathBuf> {
     let mut images = Vec::new();
     for entry in fs::read_dir(output)? {
         let entry = entry?;
@@ -87,6 +87,7 @@ pub(super) fn execute(context: &Context) -> Result<u8> {
     let sysnet = toggle("AIRLOCK_VM_SYSNET_NIC", true)?;
     let keep = number("AIRLOCK_VM_BACKUP_RETENTION", 1)?;
     let display = setting("AIRLOCK_VM_DISPLAY", "none");
+    let managed = toggle("AIRLOCK_VM_MANAGED", false)?;
     ensure!(
         ["none", "gtk", "sdl"].contains(&display.as_str()),
         "unsupported VM display: {display}"
@@ -195,6 +196,15 @@ pub(super) fn execute(context: &Context) -> Result<u8> {
         fs::remove_file(&monitor)?;
     }
     let mut command = context.store(&PathBuf::from(qemu).join("bin/qemu-system-x86_64"))?;
+    if managed {
+        let qmp = directory.join("qmp.sock");
+        ensure!(!qmp.exists(), "managed QMP socket already exists");
+        command.args([
+            "-qmp",
+            &format!("unix:{path},server=on,wait=off", path = qmp.display()),
+        ]);
+        command.args(["-name", &setting("AIRLOCK_VM_NAME", "airlock-local-lab")]);
+    }
     command.args([
         "-machine",
         machine,
@@ -253,10 +263,14 @@ pub(super) fn execute(context: &Context) -> Result<u8> {
         },
         "-serial",
     ]);
-    if display == "none" {
+    if display == "none" && !managed {
         command.arg("mon:stdio");
     } else {
-        let serial = directory.join("serial.log");
+        let serial = if managed {
+            context.logs.join("serial.log")
+        } else {
+            directory.join("serial.log")
+        };
         File::create(&serial)?;
         command.arg(format!("file:{serial}", serial = serial.display()));
     }

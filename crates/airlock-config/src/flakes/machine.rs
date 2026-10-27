@@ -2,6 +2,8 @@
 
 mod nested;
 
+mod local_lab;
+
 mod packages;
 
 mod checks;

@@ -12,6 +12,8 @@ mod baseline;
 
 mod evidence;
 
+pub(crate) mod lab;
+
 use crate::{environment, support};
 use airlock_nix_core::runtime::process::{self, OwnedChild};
 use anyhow::{Context as AnyhowContext, Result, ensure};

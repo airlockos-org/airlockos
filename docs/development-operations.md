@@ -69,6 +69,20 @@ software and configuration; it does not reverse private application data.
 
 ## Nested-VM checks
 
+`make lab-start` builds and opens the interactive local Airlock machine in QEMU.
+Its Rust definition is in [local_lab.rs](../crates/airlock-config/src/profiles/local_lab.rs);
+it uses the existing X11 display relay and normal VM services. `make lab-resume`
+keeps the selected image and writable disk without rebuilding. `make lab-status`
+reports QEMU state and source identity; `make lab-ssh` opens the dom0 development
+endpoint. `make lab-stop` requests a clean shutdown. `make lab-reset` discards only
+a stopped instance's writable disk and EFI variables.
+
+Instances are isolated by worktree and `LAB_INSTANCE`; select a distinct
+`LAB_SSH_PORT` when running several concurrently. Logs live under
+`.airlock-logs/local-lab/`. The native `airlock-dev lab` command also exposes
+headless startup and explicit forced shutdown. A changed image requires a reset
+or a new instance, so rebuilding cannot silently replace a development disk.
+
 The workstation Rust tool owns image selection, writable overlays, baseline reuse,
 SSH orchestration and test evidence. Shell entry points pass arguments to that
 command. Warm tool sync is an explicit development override inside the disposable

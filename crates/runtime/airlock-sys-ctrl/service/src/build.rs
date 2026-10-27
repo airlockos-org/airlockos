@@ -30,6 +30,47 @@ use std::{
 
 const MACHINE_SCHEMA: &str = "airlock.sys-ctrl-machine-release.v2";
 
+/// Installed controller configuration selects a release family; wire requests cannot change it.
+fn profile() -> Result<&'static str> {
+    let name = match fs::read_to_string("/etc/airlock/machine-build-profile") {
+        Ok(name) => name,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok("usb-lab"),
+        Err(error) => return Err(error.into()),
+    };
+    checked_profile(name.trim())
+}
+
+/// Admit only the physical machine and the explicit local development machine.
+fn checked_profile(name: &str) -> Result<&'static str> {
+    match name {
+        "usb-lab" => Ok("usb-lab"),
+        "local-lab" => Ok("local-lab"),
+        _ => Err(Error::Message(
+            "unsupported installed machine build profile".into(),
+        )),
+    }
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::checked_profile;
+
+    /// Installed profile selection cannot turn a release attribute into an arbitrary Nix expression.
+    #[test]
+    fn build_profiles_are_explicit() {
+        assert_eq!(checked_profile("usb-lab").unwrap(), "usb-lab");
+        assert_eq!(checked_profile("local-lab").unwrap(), "local-lab");
+        for invalid in [
+            "",
+            "usb-gui-lab",
+            "../../local-lab",
+            "local-lab;builtins.abort",
+        ] {
+            assert!(checked_profile(invalid).is_err());
+        }
+    }
+}
+
 // The builder's store is mounted separately from this process's own Nix store.
 // This mapping belongs to sys-ctrl, not the shared store-path identity.
 fn physical(path: &StorePath) -> PathBuf {
@@ -54,7 +95,7 @@ fn manifest(release: &StorePath, grant: &Grant) -> Result<()> {
     let m: Manifest = decode(&serde_json::to_vec(&raw)?)?;
     require(
         m.schema == "airlock.machine-release.v1"
-            && m.profile == "usb-lab"
+            && m.profile == profile()?
             && m.revision == grant.header.revision
             && m.lock_hash == grant.header.lock_hash,
         "built release provenance differs from submitted source",
@@ -93,7 +134,10 @@ fn build_release(store: &StateStore, grant: &Grant, lock: &OperationLock) -> Res
 
     let release = StorePath::try_from(process::text(
         "airlock-usr-assistant-machine-build",
-        &["build", ".#airlock-machine-release-usb-lab"],
+        &[
+            "build",
+            &format!(".#airlock-machine-release-{profile}", profile = profile()?),
+        ],
     )?)?;
     manifest(&release, grant)?;
     require(
@@ -140,19 +184,19 @@ pub(super) fn execute(store: &StateStore, grant: &Grant, lock: &OperationLock) -
         .target
         .as_ref()
         .ok_or_else(|| Error::Message("guest request has no target".into()))?;
-    let configuration = if target.as_str() == "sys-gui" {
-        "sys-gui-usb-lab"
+    let configuration = if profile()? == "local-lab" {
+        format!("airlock-local-lab-domain-{target}")
+    } else if target.as_str() == "sys-gui" {
+        "airlock-domain-sys-gui-usb-lab".into()
     } else {
-        target.as_str()
+        format!("airlock-domain-{target}")
     };
     let mut receipt: AdmissionReceipt = decode(&process::output(
         "airlock-usr-assistant-machine-build",
         &[
             "admit",
             target.as_str(),
-            &format!(
-                ".#nixosConfigurations.airlock-domain-{configuration}.config.system.build.toplevel"
-            ),
+            &format!(".#nixosConfigurations.{configuration}.config.system.build.toplevel"),
         ],
     )?)?;
     receipt.check_transfer(target, &grant.header.source())?;
@@ -393,7 +437,7 @@ fn send_release(
             check_plan(&saved, grant)?;
             let mut result = process::rpc(
                 "airlock.Ctrl.MachineApply",
-                &json!({"schema":MACHINE_SCHEMA,"release":transport,"revision":grant.header.revision,"lock_hash":grant.header.lock_hash,"profile":"usb-lab","prepared":prepared,"review_authorization":grant.id}),
+                &json!({"schema":MACHINE_SCHEMA,"release":transport,"revision":grant.header.revision,"lock_hash":grant.header.lock_hash,"profile":profile()?,"prepared":prepared,"review_authorization":grant.id}),
                 None,
             )?;
             result["build_seconds"] = json!(0);
@@ -616,7 +660,7 @@ fn send_transport(
     let mut output = BufReader::new(child.0.stdout.take().expect("piped stdout"));
     serde_json::to_writer(
         &mut input,
-        &json!({"schema":MACHINE_SCHEMA,"release":transport,"revision":grant.header.revision,"lock_hash":grant.header.lock_hash,"profile":"usb-lab","receipts":receipts,"paths":paths,"review_authorization":grant.id}),
+        &json!({"schema":MACHINE_SCHEMA,"release":transport,"revision":grant.header.revision,"lock_hash":grant.header.lock_hash,"profile":profile()?,"receipts":receipts,"paths":paths,"review_authorization":grant.id}),
     )?;
     input.write_all(b"\n")?;
     input.flush()?;

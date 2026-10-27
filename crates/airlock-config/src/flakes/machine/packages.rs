@@ -54,6 +54,16 @@ pub(super) fn outputs(build: &Build, system: NixValue) -> NixValue {
             let gui = airlock_sys_gui_service::authoring::Sources::new(build.workspace.root());
             packages.extend([
                 (
+                    "airlock-local-lab-image".into(),
+                    build.output("nixosConfigurations.local-lab.config.system.build.image"),
+                ),
+                (
+                    "airlock-machine-release-local-lab".into(),
+                    build.output(
+                        "nixosConfigurations.local-lab.config.system.build.airlockMachineRelease",
+                    ),
+                ),
+                (
                     "qubes-input-proxy".into(),
                     upstream::input_proxy(&pkgs).as_expression(),
                 ),

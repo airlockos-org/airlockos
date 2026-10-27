@@ -8,3 +8,6 @@ pub mod bootstrap;
 
 /// Initial editable controller candidate with the nested machine resource envelope.
 pub mod runtime;
+
+/// Interactive QEMU development machine using normal Airlock VM services.
+pub mod local_lab;

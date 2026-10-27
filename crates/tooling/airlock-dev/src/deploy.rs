@@ -61,6 +61,9 @@ impl Operation {
 pub(crate) enum Profile {
     UsbLab,
     UsbGuiLab,
+    /// Interactive Airlock development machine inside QEMU.
+    #[value(name = "local-lab")]
+    Local,
 }
 
 impl Profile {
@@ -68,6 +71,7 @@ impl Profile {
         match self {
             Self::UsbLab => "usb-lab",
             Self::UsbGuiLab => "usb-gui-lab",
+            Self::Local => "local-lab",
         }
     }
 }
@@ -318,7 +322,7 @@ pub(crate) fn execute(root: &Path, args: Args) -> Result<u8> {
         "--update-coordinator requires guest activation or development-shell resume/rollback"
     );
     ensure!(
-        args.profile == Profile::UsbLab || action == Operation::Build || args.development_shell,
+        args.profile != Profile::UsbGuiLab || action == Operation::Build || args.development_shell,
         "usb-gui-lab operations require --development-shell"
     );
     if let Some(target) = &args.target {
@@ -327,7 +331,7 @@ pub(crate) fn execute(root: &Path, args: Args) -> Result<u8> {
     let target = args.target.as_deref().unwrap_or("");
 
     if !args.development_shell
-        && args.profile == Profile::UsbLab
+        && matches!(args.profile, Profile::UsbLab | Profile::Local)
         && matches!(
             action,
             Operation::Plan

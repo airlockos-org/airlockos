@@ -115,7 +115,8 @@ pub(crate) fn bundle(repo: &Path, destination: &Path) -> Result<SourceIdentity> 
     Ok(identity)
 }
 
-fn seed(repo: &Path, destination: &Path, reuse: bool) -> Result<Value> {
+/// Create a source-identified shallow checkout for the existing first-boot seeding service.
+pub(crate) fn seed(repo: &Path, destination: &Path, reuse: bool) -> Result<Value> {
     let source = identity(repo)?;
     ensure!(
         git(repo, &["submodule", "status", "--recursive"])?.is_empty(),
