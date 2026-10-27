@@ -19,8 +19,7 @@ anyhow = "1.0"
 airlock-diagnostics = { path = "../airlock-common/diagnostics" }
 airlock-build = { path = "../airlock-common/build" }
 airlock-machine-core = { path = "../airlock-common/machine" }
-# Pinned source and provenance are checked in alongside the workspace.
-rusix = { path = "../vendor/rusix/crates/rusix", default-features = false }
+rusix = { workspace = true }
 airlock-nix-core = { path = "../airlock-common/nix" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

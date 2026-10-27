@@ -41,4 +41,4 @@ tempfile = { version = "3.0", optional = true }
 airlock-vm-service = { path = "../../airlock-vm/service", optional = true }
 uuid = { version = "1", features = ["serde"], optional = true }
 x11rb = { version = "0.13", features = ["res"], optional = true }
-rusix = { path = "../../../vendor/rusix/crates/rusix", default-features = false, optional = true }
+rusix = { workspace = true, optional = true }

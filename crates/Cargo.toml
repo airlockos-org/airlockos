@@ -1,5 +1,5 @@
 [workspace]
-exclude = ["vendor/rusix", "tooling/airlock-store-packer"]
+exclude = ["tooling/airlock-store-packer"]
 members = [
     "airlock-common/clipboard",
     "runtime/airlock-sys-clipboard",
@@ -28,6 +28,9 @@ members = [
     "runtime/airlock-vm/init",
 ]
 resolver = "3"
+
+[workspace.dependencies]
+rusix = { git = "https://github.com/rndhouse/rusix", rev = "36e989e8acfa292066363f04b449a1722efbb196", default-features = false }
 
 [profile.release]
 strip = true

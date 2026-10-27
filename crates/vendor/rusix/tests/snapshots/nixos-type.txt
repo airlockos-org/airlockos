@@ -1,7 +1,0 @@
-error[nixos-type]: NixOS rejected an option value
-  --> crates/rusix/src/bin/cli/nixos_fixtures.rs:13:18
-   = origin: set services.openssh.ports
-   = option: services.openssh.ports
-   = Nix: A definition for option `services.openssh.ports."[definition 1-entry 1]"' is not of type `16 bit unsigned integer; between 0 and 65535 (both inclusive)'. Definition values:
-- In `Rust crates/rusix/src/bin/cli/nixos_fixtures.rs:13:18': "twenty-two"
-   = provenance: ModuleDefinition

@@ -1,4 +1,0 @@
-error[nix-eval]: generated configuration was rejected by Nix
-   = Rust origin unavailable
-   = Nix: backend failure without metadata
-   = provenance: Unavailable

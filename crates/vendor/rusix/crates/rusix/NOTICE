@@ -1,6 +1,0 @@
-Rusix's NixOS declarations and package examples contain material adapted from
-nixpkgs revision 8b27c1239e5c421a2bbc2c65d52e4a6fbf2ff296.
-
-Copyright (c) 2003-2024 Eelco Dolstra and the Nixpkgs/NixOS contributors.
-The upstream MIT permission notice is reproduced in LICENSE-NIXPKGS.
-The vendor/nixpkgs submodule retains its own notices and package-specific licences.

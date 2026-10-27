@@ -1,5 +1,0 @@
-error[nix-eval]: generated configuration was rejected by Nix
-  --> crates/rusix/src/bin/cli/fixtures.rs:15:47
-   = origin: integer division
-   = Nix: division by zero
-   = provenance: SourceMap

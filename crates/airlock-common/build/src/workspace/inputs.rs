@@ -13,7 +13,7 @@ use std::collections::BTreeSet;
 
 mod lowering;
 
-/// One local package, including vendored authoring libraries outside the application workspace.
+/// One locally authored package, excluding dependencies supplied by Cargo.
 struct Package {
     // Workspace-relative directory, also used to resolve path dependencies without filesystem I/O.
     directory: &'static str,
@@ -55,8 +55,6 @@ const MANIFESTS: &[(&str, &str)] = manifests![
     "runtime/airlock-sys-gui/setup",
     "runtime/airlock-vm/service",
     "runtime/airlock-vm/init",
-    "vendor/rusix/crates/rusix",
-    "vendor/rusix/crates/rusix-derive",
 ];
 
 /// Parse each embedded manifest once, independently of the application source path supplied to Nix.

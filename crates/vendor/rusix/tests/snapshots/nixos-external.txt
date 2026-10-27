@@ -1,7 +1,0 @@
-error[external-nix]: imported NixOS module evaluation failed
-  --> crates/rusix/src/bin/cli/nixos_fixtures.rs:33:14
-   = origin: import nixos/modules/misc/label.nix
-   = option: system.nixos.label
-   = imported Nix: nixos/modules/misc/label.nix
-   = Nix: attribute 'version' missing
-   = provenance: ImportBoundary

@@ -10,3 +10,9 @@ directory = "/etc/airlock/authoring/vendor"
 # Keep Rust source identities stable when the admitted application tree moves.
 [build]
 rustflags = ["--remap-path-prefix=/etc/airlock/config-inputs/airlock-apps/="]
+
+# Match the workspace Git dependency while resolving it from admitted offline sources.
+[source.rusix]
+git = "https://github.com/rndhouse/rusix"
+rev = "36e989e8acfa292066363f04b449a1722efbb196"
+replace-with = "airlock-admitted"

@@ -1,3 +1,0 @@
-error[codegen]: generated Nix is invalid (Rusix compiler bug)
-   = Nix: syntax error, unexpected ';'
-   = provenance: Unavailable

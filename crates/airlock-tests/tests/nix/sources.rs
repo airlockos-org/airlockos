@@ -105,7 +105,6 @@ fn filtered_sources_preserve_cache_keys_and_compile() -> Result<()> {
         baseline,
         inspect(root, &relocated, "source-relocated", &cases)?
     );
-    change(&workspace.join("vendor/rusix/README.md"))?;
     writeln!(
         fs::OpenOptions::new()
             .append(true)
@@ -129,30 +128,18 @@ fn filtered_sources_preserve_cache_keys_and_compile() -> Result<()> {
         authoring["sources"]["authoring"]
     );
 
-    change(&workspace.join("vendor/rusix/crates/rusix/src/compiler.rs"))?;
-    let vendor = inspect(root, &workspace, "source-vendor-change", &cases)?;
-    assert_eq!(authoring["derivations"], vendor["derivations"]);
-    assert_eq!(
-        authoring["sources"]["airlock-sys-gui-service"],
-        vendor["sources"]["airlock-sys-gui-service"]
-    );
-    assert_ne!(
-        authoring["sources"]["airlock-image"],
-        vendor["sources"]["airlock-image"]
-    );
-
     change(&workspace.join("airlock-common/machine-planning/src/lib.rs"))?;
     let dependency = inspect(root, &workspace, "source-required-change", &cases)?;
     assert_ne!(
-        vendor["derivations"]["cli"],
+        authoring["derivations"]["cli"],
         dependency["derivations"]["cli"]
     );
     assert_eq!(
-        vendor["derivations"]["init"],
+        authoring["derivations"]["init"],
         dependency["derivations"]["init"]
     );
     assert_eq!(
-        vendor["derivations"]["packer"],
+        authoring["derivations"]["packer"],
         dependency["derivations"]["packer"]
     );
 

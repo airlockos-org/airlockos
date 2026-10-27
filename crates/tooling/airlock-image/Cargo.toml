@@ -36,7 +36,7 @@ anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 quick-xml = "0.41"
 pyo3 = { version = "0.29.0", default-features = false, features = ["auto-initialize"], optional = true }
-rusix = { path = "../../vendor/rusix/crates/rusix", default-features = false }
+rusix = { workspace = true }
 rustix = { version = "1.1", features = ["fs", "process", "stdio"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

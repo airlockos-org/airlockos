@@ -60,8 +60,8 @@ inputs select the same committed Airlock snapshot.
 
 ## Rusix
 
-`crates/vendor/rusix` contains the MIT-licensed Rusix source from
-https://github.com/rndhouse/rusix.
-The snapshot includes the local integration commits used by Airlock configuration;
-upstream license and Nixpkgs attribution files are preserved. `AIRLOCK-PIN` records
-the source identity.
+Rusix is maintained separately at https://github.com/rndhouse/rusix and consumed
+at the Git revision pinned in [`crates/Cargo.toml`](crates/Cargo.toml), with resolved
+dependencies in Cargo.lock. Offline preparation supplies that source through the
+admitted Cargo dependency tree. Rusix retains its MIT license and the Nixpkgs
+attribution files included in that dependency.

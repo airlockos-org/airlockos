@@ -1,8 +1,0 @@
-error[nixos-assertion]: NixOS configuration assertion failed
-  --> crates/rusix/src/bin/cli/nixos_fixtures.rs:25:14
-   = origin: assertion assertions.port-policy
-   = option: assertions.port-policy
-   = Nix: 
-Failed assertions:
-- SSH port policy rejected
-   = provenance: AssertionMessage

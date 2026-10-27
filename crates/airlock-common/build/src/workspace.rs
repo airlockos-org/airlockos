@@ -90,6 +90,8 @@ impl Workspace {
         nix_record! {
             "lockFile": self.file("Cargo.lock").snapshot(),
             "outputHashes": nix_record! {
+                // Both Rusix crates share this Git tree, including its pinned Nixpkgs test input.
+                "rusix-0.1.1": "sha256-imwt8RWoAlhuKQCCXV5APCA8RPehaxEzOg5/5rPAFk4=",
                 // importCargoLock's Git fetch includes the upstream kernel submodule.
                 // The Hermit executable builder separately selects our patched kernel.
                 "hermit-0.13.2": "sha256-Doox+f2DRDn/J+PBLoiNAMoB9XgW3U3gqysw+mk61lw=",
@@ -112,7 +114,7 @@ impl Workspace {
 
     /// Select sources for a package with its default Cargo features enabled.
     /// Keep implementation sources for its local normal/build dependencies and required embedded assets.
-    /// Cargo resolution also needs the workspace manifests and vendored library discovery entry files.
+    /// Cargo resolution also needs every local manifest and implicit library discovery entry file.
     ///
     /// # Panics
     /// Panics under the same conditions as [`Self::source_with_features`].

@@ -1,5 +1,0 @@
-error[nix-eval]: generated configuration was rejected by Nix
-  --> crates/rusix/src/bin/cli/fixtures.rs:11:35
-   = origin: integer range constraint
-   = Nix: SSH port must be in 1..=65535
-   = provenance: ErrorContext

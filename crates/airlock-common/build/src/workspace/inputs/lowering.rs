@@ -107,12 +107,8 @@ fn local(package: &Package, packages: &BTreeMap<String, Package>) -> Vec<(String
     let mut result = Vec::new();
     for (alias, dependency) in dependencies(&package.manifest) {
         if dependency.get("workspace").and_then(Value::as_bool) == Some(true) {
-            let contents = if package.directory.starts_with("vendor/rusix/") {
-                include_str!("../../../../../vendor/rusix/Cargo.toml")
-            } else {
-                include_str!("../../../../../Cargo.toml")
-            };
-            let workspace: Value = toml::from_str(contents).unwrap();
+            let workspace: Value =
+                toml::from_str(include_str!("../../../../../Cargo.toml")).unwrap();
             assert!(
                 workspace["workspace"]
                     .get("dependencies")
@@ -283,7 +279,7 @@ pub(super) fn checked(
     }
     let (facts, rules) = requirements(packages, root, features);
     let mut files = BTreeMap::new();
-    for path in ["Cargo.toml", "Cargo.lock", "vendor/rusix/Cargo.toml"] {
+    for path in ["Cargo.toml", "Cargo.lock"] {
         input(&mut files, path.into(), None, false);
     }
     let mut discoveries = Vec::new();
@@ -298,9 +294,7 @@ pub(super) fn checked(
                 "binary targets require explicit source paths"
             );
         }
-        let discovery = if directory.starts_with("vendor/rusix/crates/")
-            || (package.manifest.get("lib").is_none() && bins.is_none_or(Vec::is_empty))
-        {
+        let discovery = if package.manifest.get("lib").is_none() && bins.is_none_or(Vec::is_empty) {
             let path = format!("{directory}/src/lib.rs");
             input(&mut files, path.clone(), None, false);
             vec![path]
