@@ -13,10 +13,11 @@ use rusix::{
 /// Build the format-only tool from an independently locked source root.
 /// Application manifests, lockfile, feature graph and authoring code never enter this derivation.
 pub(crate) fn packer(pkgs: &NixValue, workspace: &Workspace) -> Package {
-    let root = workspace.file("airlock-store-packer");
-    let manifest: toml::Value =
-        toml::from_str(include_str!("../../../airlock-store-packer/Cargo.toml"))
-            .expect("valid standalone packer manifest");
+    let root = workspace.file("tooling/airlock-store-packer");
+    let manifest: toml::Value = toml::from_str(include_str!(
+        "../../../tooling/airlock-store-packer/Cargo.toml"
+    ))
+    .expect("valid standalone packer manifest");
     let source = pkgs
         .clone()
         .select("lib.fileset.toSource")

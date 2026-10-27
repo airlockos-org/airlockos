@@ -27,7 +27,7 @@
 //! structured observations; matching completed assignments are skipped even on running VMs.
 //! No exactly-once or atomic replacement guarantee is claimed.
 //!
-//! The direct [local API adapter](../../../airlock-dom0/service/src/qubes/pci.rs) receives the
+//! The direct [local API adapter](../../../runtime/airlock-dom0/service/src/qubes/pci.rs) receives the
 //! opaque request and serializes its retained identity, mode and options. Topology decoding,
 //! legacy option normalization, truthful complete snapshots and faithful Qubes execution
 //! remain trusted. All selections for one VM are checked before its first mutation. The

@@ -75,7 +75,7 @@ pub(super) fn module(workspace: &Workspace) -> NixValue {
                 NixValue::function(|_| nix_record! {
                     "name": rusix::nix_text!("qubes/templates/libvirt/xen/by-name/{name}.xml", name = name),
                     "value": nix_record! {
-                        "source": workspace.file("airlock-qubes-python/assets/amd-vbios.xml").snapshot(),
+                        "source": workspace.file("runtime/airlock-qubes-python/assets/amd-vbios.xml").snapshot(),
                     },
                 })
             }))

@@ -26,4 +26,4 @@
 /flake.nix
 /crates/flake.nix
 /crates/airlock-config/generated/
-/crates/airlock-sys-gui/service/generated/
+/crates/runtime/airlock-sys-gui/service/generated/

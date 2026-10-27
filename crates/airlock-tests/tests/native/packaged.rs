@@ -131,7 +131,7 @@ impl Packages {
                 "source \"$1\"; shift; airlock_run_store_path \"$@\"",
                 "packaged",
             ])
-            .arg(common::root().join("crates/airlock-dev/scripts/lib/airlock-env.sh"))
+            .arg(common::root().join("crates/tooling/airlock-dev/scripts/lib/airlock-env.sh"))
             .arg(logical);
         command
     }

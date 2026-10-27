@@ -13,7 +13,7 @@ const AGENT: &str = "a8c14e6d-05c6-412a-952d-28f41c910aca";
 fn javascript(kind: &str, scenario: &str, arguments: Value, shell: bool) -> Result<()> {
     let temporary = tempfile::tempdir()?;
     let root = temporary.path();
-    let gnome = common::root().join("crates/airlock-sys-gui/gnome");
+    let gnome = common::root().join("crates/runtime/airlock-sys-gui/gnome");
     let extension = match kind {
         "workspace" => "vm-workspaces-extension",
         "search" => "vm-search-extension",

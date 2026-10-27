@@ -403,7 +403,7 @@ fn hardware_override_reaches_reservation_and_assignment() -> Result<()> {
         report["firmwareTemplate"],
         fs::read_to_string(
             nix.prepared
-                .join("crates/airlock-qubes-python/assets/amd-vbios.xml")
+                .join("crates/runtime/airlock-qubes-python/assets/amd-vbios.xml")
         )?
     );
     Ok(())

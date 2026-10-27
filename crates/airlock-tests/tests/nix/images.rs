@@ -230,7 +230,7 @@ fn package_store_cache_reuses_unchanged_fragments_and_indexes() -> Result<()> {
     );
     assert_eq!(first["indexes"][0], second["indexes"][0]);
     assert_ne!(first["indexes"][1], second["indexes"][1]);
-    let service = apps.join("airlock-dom0/service/src/lib.rs");
+    let service = apps.join("runtime/airlock-dom0/service/src/lib.rs");
     let mut body = fs::read_to_string(&service)?;
     body.push_str("\n// Unrelated service edit must not invalidate package packing.\n");
     fs::write(service, body)?;

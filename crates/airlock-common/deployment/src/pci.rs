@@ -20,7 +20,7 @@
 //! cannot relax ownership, change endpoints or bypass the operation/attempt/authority/
 //! complete-plan binding and executing publication gate.
 //!
-//! The [Qubes adapter](../../../airlock-dom0/service/src/qubes/pci.rs) queries all registered
+//! The [Qubes adapter](../../../runtime/airlock-dom0/service/src/qubes/pci.rs) queries all registered
 //! frontends, validates identity consistency and encodes the selected virtual assignment
 //! for the upstream [device API](https://github.com/QubesOS/qubes-core-admin-client/blob/v4.3.30/qubesadmin/devices.py).
 //! It preserves wildcard device identity rather than resolving it to the current device.

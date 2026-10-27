@@ -45,7 +45,7 @@ packages, filesystem/daemon truth and administrative path overrides remain trust
 Before evaluation, the [authoring snapshot](../../airlock-config/src/model.rs)
 uses `Relationships::ordered` to check its typed VM references. After
 [NixOS normalization](../../airlock-config/src/topology/normalize.rs),
-[release loading](../../airlock-dom0/service/src/state.rs) decodes `Topology`;
+[release loading](../../runtime/airlock-dom0/service/src/state.rs) decodes `Topology`;
 the deployment planner uses the same relationship interpreter. This shared path
 does not prove that evaluation or decoding preserves the original source.
 

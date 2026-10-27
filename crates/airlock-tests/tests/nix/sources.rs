@@ -66,7 +66,9 @@ fn filtered_sources_preserve_cache_keys_and_compile() -> Result<()> {
     let baseline = inspect(root, &workspace, "source-baseline", &cases)?;
 
     // Shell extensions are packaged directly, so their edits must not rebuild native applications.
-    change(&workspace.join("airlock-sys-gui/gnome/startup-progress-extension/extension.js"))?;
+    change(
+        &workspace.join("runtime/airlock-sys-gui/gnome/startup-progress-extension/extension.js"),
+    )?;
     assert_eq!(
         baseline,
         inspect(root, &workspace, "source-extension-change", &cases)?
@@ -77,7 +79,7 @@ fn filtered_sources_preserve_cache_keys_and_compile() -> Result<()> {
     writeln!(
         fs::OpenOptions::new()
             .append(true)
-            .open(workspace.join("airlock-qubes-python/assets/amd-vbios.xml"))?,
+            .open(workspace.join("runtime/airlock-qubes-python/assets/amd-vbios.xml"))?,
         "{{# source input regression #}}"
     )?;
     assert_eq!(
@@ -158,7 +160,7 @@ fn filtered_sources_preserve_cache_keys_and_compile() -> Result<()> {
     for path in [
         "Cargo.toml",
         "Cargo.lock",
-        "airlock-dom0/service/Cargo.toml",
+        "runtime/airlock-dom0/service/Cargo.toml",
     ] {
         writeln!(
             fs::OpenOptions::new()
@@ -177,13 +179,15 @@ fn filtered_sources_preserve_cache_keys_and_compile() -> Result<()> {
         manifests["derivations"]["cli"]
     );
 
-    change(&workspace.join("airlock-sys-ctrl/gui/examples/diff-context/usr-home.before.rs"))?;
+    change(
+        &workspace.join("runtime/airlock-sys-ctrl/gui/examples/diff-context/usr-home.before.rs"),
+    )?;
     let asset = inspect(root, &workspace, "source-asset-change", &cases)?;
     assert_ne!(manifests["derivations"]["gui"], asset["derivations"]["gui"]);
     assert_eq!(manifests["derivations"]["cli"], asset["derivations"]["cli"]);
 
     // Embedded binary assets must invalidate the owning package independently of Rust examples.
-    let font = workspace.join("airlock-sys-ctrl/gui/assets/fonts/Inter-Regular.ttf");
+    let font = workspace.join("runtime/airlock-sys-ctrl/gui/assets/fonts/Inter-Regular.ttf");
     let mut bytes = fs::read(&font)?;
     *bytes.last_mut().context("nonempty embedded font")? ^= 1;
     fs::write(font, bytes)?;
@@ -191,7 +195,7 @@ fn filtered_sources_preserve_cache_keys_and_compile() -> Result<()> {
     assert_ne!(asset["derivations"]["gui"], font["derivations"]["gui"]);
     assert_eq!(asset["derivations"]["cli"], font["derivations"]["cli"]);
 
-    change(&workspace.join("airlock-store-packer/src/lib.rs"))?;
+    change(&workspace.join("tooling/airlock-store-packer/src/lib.rs"))?;
     let packing = inspect(root, &workspace, "source-packing-change", &cases)?;
     assert_ne!(
         font["derivations"]["packer"],
@@ -200,7 +204,7 @@ fn filtered_sources_preserve_cache_keys_and_compile() -> Result<()> {
     writeln!(
         fs::OpenOptions::new()
             .append(true)
-            .open(workspace.join("airlock-store-packer/Cargo.lock"))?,
+            .open(workspace.join("tooling/airlock-store-packer/Cargo.lock"))?,
         "\n# independently locked packing dependencies"
     )?;
     let packing_lock = inspect(root, &workspace, "source-packing-lock-change", &cases)?;

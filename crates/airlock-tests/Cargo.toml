@@ -23,7 +23,7 @@ required-features = ["qubes"]
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
 airlock-nix-core = { path = "../airlock-common/nix", features = ["runtime"] }
-airlock-dom0-service = { path = "../airlock-dom0/service", default-features = false, optional = true }
+airlock-dom0-service = { path = "../runtime/airlock-dom0/service", default-features = false, optional = true }
 airlock-qubes = { path = "../airlock-common/qubes", optional = true }
 pyo3 = { version = "0.29.0", features = ["auto-initialize"], optional = true }
 anyhow = "1.0"
@@ -34,7 +34,7 @@ serde_json = "1.0"
 sha2 = "0.10"
 tar = "0.4"
 tempfile = "3.0"
-airlock-vm-service = { path = "../airlock-vm/service" }
+airlock-vm-service = { path = "../runtime/airlock-vm/service" }
 airlock-deployment-core = { path = "../airlock-common/deployment" }
 
 [dev-dependencies]

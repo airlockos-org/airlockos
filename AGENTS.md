@@ -85,7 +85,7 @@
 
 These are the authoritative standards for first-party Rust in this repository,
 including development tools and examples. `crates/Cargo.toml` is the application
-workspace. `crates/airlock-store-packer/Cargo.toml` has its own workspace and
+workspace. `crates/tooling/airlock-store-packer/Cargo.toml` has its own workspace and
 lockfile so unrelated application changes cannot invalidate every image fragment.
 Its format implementation is shared with runtime artifact transfer and follows
 these standards.
@@ -94,7 +94,7 @@ vendored, generated and build output is outside this policy's editing scope.
 There are currently no nested first-party Rust `AGENTS.md` files to reconcile.
 Future nested instructions must link here rather than duplicate these standards.
 
-- Keep workstation-only build and deployment tooling in `crates/airlock-dev/`;
+- Keep workstation-only build and deployment tooling in `crates/tooling/airlock-dev/`;
   do not install its development transport in production VMs. Keep upstream Qubes
   API adapters thin and put Airlock policy and filesystem operations in Rust.
 - Airlock crates are internal applications and libraries. Keep `publish = false`

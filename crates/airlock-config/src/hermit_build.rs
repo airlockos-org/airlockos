@@ -22,16 +22,17 @@ pub(crate) fn input() -> NixValue {
 fn source(pkgs: &NixValue, workspace: &Workspace, integration: &NixValue) -> NixValue {
     // Converting input text to a path does not retain Nix string context. Capture each
     // crate explicitly so the sandbox and release closure retain its immutable source.
-    let crate_source = |name| {
+    let crate_source = |relative, name| {
         NixValue::builtin("path").call(nix_record! {
-            "path": workspace.root().join_relative(name).unwrap(),
+            "path": workspace.root().join_relative(relative).unwrap(),
             "name": name,
         })
     };
     let read = |relative| {
         NixValue::builtin("readFile").call(workspace.root().join_relative(relative).unwrap())
     };
-    let manifest = NixValue::builtin("fromTOML").call(read("airlock-sys-clipboard/Cargo.toml"));
+    let manifest =
+        NixValue::builtin("fromTOML").call(read("runtime/airlock-sys-clipboard/Cargo.toml"));
     let dependency = |old: NixValue| {
         let matches = old.clone().select("rev").equals(INTEGRATION_REVISION).and(
             old.clone()
@@ -41,7 +42,7 @@ fn source(pkgs: &NixValue, workspace: &Workspace, integration: &NixValue) -> Nix
         let patched = NixValue::builtin("removeAttrs")
             .call(old)
             .call(NixValue::list(["git".into(), "rev".into()]))
-            .merge_attrs(nix_record! { "path": "../../.hermit-xen/crates/xen-transport" });
+            .merge_attrs(nix_record! { "path": "../../../.hermit-xen/crates/xen-transport" });
         NixValue::if_else(
             matches,
             patched,
@@ -71,24 +72,24 @@ fn source(pkgs: &NixValue, workspace: &Workspace, integration: &NixValue) -> Nix
         .call("clipboard-Cargo.toml")
         .call(patched);
     pkgs.clone().select("runCommand").call("airlock-hermit-application-source").call(nix_record! {}).call(nix_text!(r#"
-        mkdir -p "$out/crates/airlock-clipboard-core" "$out/crates/airlock-sys-clipboard" "$out/.hermit-xen/crates"
-        cp -r {core}/src {core}/Cargo.toml "$out/crates/airlock-clipboard-core/"
-        cp -r {service}/src "$out/crates/airlock-sys-clipboard/"
-        cp {manifest} "$out/crates/airlock-sys-clipboard/Cargo.toml"
+        mkdir -p "$out/crates/airlock-common/clipboard" "$out/crates/runtime/airlock-sys-clipboard" "$out/.hermit-xen/crates"
+        cp -r {core}/src {core}/Cargo.toml "$out/crates/airlock-common/clipboard/"
+        cp -r {service}/src "$out/crates/runtime/airlock-sys-clipboard/"
+        cp {manifest} "$out/crates/runtime/airlock-sys-clipboard/Cargo.toml"
         cp -r {integration}/crates/xen-transport "$out/.hermit-xen/crates/"
         cp {service}/lab.lock "$out/Cargo.lock"
         cat > "$out/Cargo.toml" <<'TOML'
         [workspace]
         resolver = "3"
-        members = ["crates/airlock-clipboard-core", "crates/airlock-sys-clipboard"]
+        members = ["crates/airlock-common/clipboard", "crates/runtime/airlock-sys-clipboard"]
         exclude = [".hermit-xen/crates/xen-transport"]
 
         [profile.release]
         debug = 2
         strip = false
         TOML
-    "#, core = crate_source("airlock-clipboard-core"),
-        service = crate_source("airlock-sys-clipboard"),
+    "#, core = crate_source("airlock-common/clipboard", "airlock-clipboard-core"),
+        service = crate_source("runtime/airlock-sys-clipboard", "airlock-sys-clipboard"),
         manifest = manifest, integration = integration.clone()))
 }
 

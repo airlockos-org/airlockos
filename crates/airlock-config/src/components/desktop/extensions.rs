@@ -205,7 +205,7 @@ fn extension(
 /// Resolves GNOME implementation assets from the admitted application source with Nix path context.
 fn asset(inputs: &ModuleContext, relative: &str) -> NixValue {
     machine_source::application_source(inputs)
-        .join_relative(&format!("airlock-sys-gui/gnome/{relative}"))
+        .join_relative(&format!("runtime/airlock-sys-gui/gnome/{relative}"))
         .expect("extension asset paths are static and relative")
         .as_expression()
 }

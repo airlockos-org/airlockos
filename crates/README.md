@@ -10,6 +10,10 @@ machine control, configuration building and user interaction can each have the
 access they need. Shared libraries let applications reuse code while keeping
 those boundaries explicit.
 
+`runtime/` groups installed applications by their VM responsibilities.
+`airlock-common/` holds shared libraries, while `tooling/` holds workstation and
+image-build tools. Configuration authoring remains in `airlock-config/`.
+
 Rust application and configuration development belongs here. The separate `airlock-machine` repository
 defines how the software is installed and connected into a working machine.
 

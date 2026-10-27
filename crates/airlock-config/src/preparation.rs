@@ -265,7 +265,7 @@ pub fn inspection(directory: &Path) -> Result<()> {
             crate::display_builders()?,
         ),
         (
-            "airlock-sys-gui/service/generated/packages.nix",
+            "runtime/airlock-sys-gui/service/generated/packages.nix",
             crate::gui_service_packages()?,
         ),
     ] {

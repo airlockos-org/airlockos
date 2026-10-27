@@ -37,7 +37,7 @@ for this change). Its MIT copyright and terms are retained in
 
 `airlock-sys-ctrl-gui` bundles Inter by the Inter Project Authors under the SIL Open
 Font License 1.1. The original website WOFF2 source, native TTF instances and
-license are retained in [`crates/airlock-sys-ctrl/gui/assets/fonts/`](crates/airlock-sys-ctrl/gui/assets/fonts/README.md),
+license are retained in [`crates/runtime/airlock-sys-ctrl/gui/assets/fonts/`](crates/runtime/airlock-sys-ctrl/gui/assets/fonts/README.md),
 which records the upstream revision, checksum and regeneration procedure.
 These font files retain their own license rather than Airlock's MIT license.
 

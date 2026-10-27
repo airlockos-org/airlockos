@@ -1,0 +1,18 @@
+[package]
+publish = false
+name = "airlock-sys-gui-setup"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "MIT"
+description = "Airlock first-run welcome interface"
+
+[[bin]]
+name = "airlock-sys-gui-setup"
+path = "src/main.rs"
+
+[dependencies]
+airlock-desktop = { path = "../../../airlock-common/desktop" }
+airlock-vm-service = { path = "../../airlock-vm/service" }
+anyhow = "1.0"
+libadwaita = { version = "0.8", features = ["v1_4"] }

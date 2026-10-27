@@ -22,7 +22,7 @@ job-writer = []
 artifacts = ["dep:airlock-store-packer", "runtime", "dep:anyhow", "dep:tar", "dep:flate2"]
 
 [dependencies]
-airlock-store-packer = { path = "../../airlock-store-packer", optional = true }
+airlock-store-packer = { path = "../../tooling/airlock-store-packer", optional = true }
 airlock-machine-planning = { path = "../machine-planning" }
 rustix = { version = "1.1", features = ["fs", "event", "process"] }
 serde = { version = "1.0", features = ["derive"] }

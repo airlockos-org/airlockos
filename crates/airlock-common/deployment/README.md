@@ -6,7 +6,7 @@ requests for configuration, storage and VM lifecycle changes. It performs no I/O
 [Machine planning](../machine-planning/README.md) independently calculates required
 effects; a required effect acquires no permission merely by being planned.
 
-The coordinator's [approval adapter](../../airlock-dom0/service/src/coordinator/approval.rs)
+The coordinator's [approval adapter](../../runtime/airlock-dom0/service/src/coordinator/approval.rs)
 authenticates records and carries owned authority from a reviewed plan through
 durable publication to the Qubes adapter. Authority values cannot be cloned or
 deserialized. A wire journal or progress record does not grant execution authority.

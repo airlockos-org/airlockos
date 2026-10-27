@@ -49,5 +49,5 @@ force a boot. Inspect the declared hardware configuration and Qubes assignments
 from recovery before changing ownership.
 
 For an active display stall, the GUI service keeps the bounded
-[display recovery procedure](../crates/airlock-sys-gui/service/src/gpu/README.md)
+[display recovery procedure](../crates/runtime/airlock-sys-gui/service/src/gpu/README.md)
 beside its tool.

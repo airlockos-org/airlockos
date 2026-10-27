@@ -38,7 +38,7 @@
 //! `releases` proves this mapping; changing the rollback baseline or dropping a
 //! fingerprint comparison violates its executable contracts.
 //!
-//! The [coordinator adapter](../../../airlock-dom0/service/src/coordinator/recovery.rs)
+//! The [coordinator adapter](../../../runtime/airlock-dom0/service/src/coordinator/recovery.rs)
 //! loads and checks those files, replans from fresh stable power observations and
 //! rechecks the complete proposed effects against the original approval. It must
 //! consume the accepted decision through `authorize` to create the new

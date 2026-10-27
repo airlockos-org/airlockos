@@ -1,8 +1,8 @@
 [workspace]
-exclude = ["vendor/rusix", "airlock-store-packer"]
+exclude = ["vendor/rusix", "tooling/airlock-store-packer"]
 members = [
-    "airlock-clipboard-core",
-    "airlock-sys-clipboard",
+    "airlock-common/clipboard",
+    "runtime/airlock-sys-clipboard",
     "airlock-config",
     "airlock-tests",
     "airlock-common/nix",
@@ -15,17 +15,17 @@ members = [
     "airlock-common/build-plan",
     "airlock-common/desktop",
     "airlock-common/qubes",
-    "airlock-qubes-python",
-    "airlock-cli",
-    "airlock-image",
-    "airlock-dev",
-    "airlock-dom0/service",
-    "airlock-sys-ctrl/gui",
-    "airlock-sys-ctrl/service",
-    "airlock-sys-gui/service",
-    "airlock-sys-gui/setup",
-    "airlock-vm/service",
-    "airlock-vm/init",
+    "runtime/airlock-qubes-python",
+    "runtime/airlock-cli",
+    "tooling/airlock-image",
+    "tooling/airlock-dev",
+    "runtime/airlock-dom0/service",
+    "runtime/airlock-sys-ctrl/gui",
+    "runtime/airlock-sys-ctrl/service",
+    "runtime/airlock-sys-gui/service",
+    "runtime/airlock-sys-gui/setup",
+    "runtime/airlock-vm/service",
+    "runtime/airlock-vm/init",
 ]
 resolver = "3"
 

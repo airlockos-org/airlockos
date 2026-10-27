@@ -387,7 +387,7 @@ fn image_build_bootstrap_limits_compilation_before_native_policy_is_available() 
     for action in ["build-budget", "check-image-source"] {
         let result = run(
             Command::new(common::tool("bash")?)
-                .arg(common::root().join("crates/airlock-dev/scripts/airlock-dev.sh"))
+                .arg(common::root().join("crates/tooling/airlock-dev/scripts/airlock-dev.sh"))
                 .arg(action)
                 .env("PATH", std::env::join_paths(&paths)?)
                 .env("AIRLOCK_TEST_CPU_BOOTSTRAP_RECORD", &record),
@@ -797,7 +797,7 @@ fn publication_requires_the_actual_upstream_main() -> Result<()> {
 fn workstation_nix_requires_guarded_store_selection() -> Result<()> {
     let fixture = Repository::new()?;
     let data = fixture.path("external data");
-    let script = common::root().join("crates/airlock-dev/scripts/lib/airlock-env.sh");
+    let script = common::root().join("crates/tooling/airlock-dev/scripts/lib/airlock-env.sh");
     let mut command = Command::new("bash");
     for (key, _) in std::env::vars_os() {
         if key.to_string_lossy().starts_with("AIRLOCK_")
