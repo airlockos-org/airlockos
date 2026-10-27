@@ -197,10 +197,7 @@ impl Gui<'_> {
                     ("xdpyinfo", self.package("xdpyinfo")),
                     ("daemon", self.package("qubes-gui-daemon")),
                     ("xserver", self.package("xorg-server")),
-                    (
-                        "groupId",
-                        self.context.config.clone().select("users.groups.qubes.gid"),
-                    ),
+                    ("utilLinux", self.package("util-linux")),
                 ],
             ),
             false,

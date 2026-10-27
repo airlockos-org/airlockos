@@ -149,8 +149,6 @@ fn login_xserver_retains_arguments_and_environment() -> Result<()> {
             .arg(peers.path("bin/display-probe"))
             .arg("--server")
             .arg(peers.path("bin/nested-xserver"))
-            .arg("--group-id")
-            .arg(rustix::process::getgid().as_raw().to_string())
             .args([
                 "--preload",
                 "/fixture/preload.so",

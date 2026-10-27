@@ -316,8 +316,16 @@ pub(crate) fn contract<const N: usize>(
             false,
         ),
         "login-xserver" => (
-            "@service@/bin/airlock-vm-service",
+            // Xephyr retains root access to LightDM's authentication file. Its
+            // Qubes preload creates shm.id with mode 0660; resolve the desktop
+            // user's Qubes group at boot, when NixOS has assigned its numeric ID.
+            "@utilLinux@/bin/setpriv",
             &[
+                "--regid",
+                "qubes",
+                "--keep-groups",
+                "--",
+                "@service@/bin/airlock-vm-service",
                 "desktop",
                 "login-xserver",
                 "--probe",
@@ -326,8 +334,6 @@ pub(crate) fn contract<const N: usize>(
                 "@xserver@/bin/Xephyr",
                 "--preload",
                 "@daemon@/lib/qubes-gui-daemon/shmoverride.so",
-                "--group-id",
-                "@groupId@",
                 "--",
             ],
             true,

@@ -48,9 +48,6 @@ enum Action {
         /// Qubes shared-memory preload library.
         #[arg(long)]
         preload: PathBuf,
-        /// Qubes group owning the display's shared-memory file alongside root.
-        #[arg(long)]
-        group_id: u32,
         /// LightDM's original argument vector.
         #[arg(last = true)]
         args: Vec<OsString>,
@@ -258,7 +255,6 @@ pub(crate) fn execute(request: Request) -> Result<()> {
             probe,
             server,
             preload,
-            group_id,
             args,
         } => {
             let deadline = Instant::now() + Duration::from_secs(60);
@@ -298,10 +294,6 @@ pub(crate) fn execute(request: Request) -> Result<()> {
             }
             exec(
                 Command::new(server)
-                    // Xephyr needs root to read LightDM's authentication file. The
-                    // Qubes preload creates shm.id with mode 0660, so its primary
-                    // group must admit the desktop user's GUI daemons as well.
-                    .gid(group_id)
                     .args(["-sw-cursor", "-no-host-grab", "-output", "DUMMY0"])
                     .args(kept)
                     .env("DISPLAY", ":1")
