@@ -66,7 +66,7 @@ fn declaration(machine: &Machine, version: u8) -> Result<Value> {
 }
 
 /// Add Hermit to both real coordinator inputs without manufacturing Linux pool receipts for it.
-fn mixed() -> Result<Machine> {
+pub(super) fn mixed() -> Result<Machine> {
     let mut machine = Machine::new()?;
     for (release, version) in [(&machine.baseline, 1), (&machine.candidate, 2)] {
         let path = machine.physical(release).join("topology.json");

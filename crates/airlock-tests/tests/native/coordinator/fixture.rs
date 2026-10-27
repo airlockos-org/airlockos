@@ -462,9 +462,9 @@ impl Machine {
             .as_array_mut()
             .unwrap()
             .push(json!("sys-gui"));
-        for name in topology["domains"].as_object().unwrap().keys() {
+        for (name, domain) in topology["domains"].as_object().unwrap() {
             self.data["selected"][name] = json!(1);
-            if name == "usr-home" {
+            if name == "usr-home" || domain["backend"]["type"] == "hermit" {
                 continue;
             }
             let mut info = self.data["generations"]["usr-home:1"].clone();
@@ -486,11 +486,17 @@ impl Machine {
 </pools><properties/><domains>
 <domain id="domain-0" class="AdminVM"><properties><property name="label">black</property></properties></domain>"#,
         );
-        for name in topology["domains"].as_object().unwrap().keys() {
+        for (name, domain) in topology["domains"].as_object().unwrap() {
+            let class = domain["class"].as_str().context("fixture VM class")?;
             xml.push_str(&format!(
-                r#"<domain><properties><property name="name">{name}</property></properties>
+                r#"<domain class="{class}"><properties><property name="name">{name}</property></properties>
 <features/><tags/><volume-config>"#
             ));
+            if domain["backend"]["type"] == "hermit" {
+                xml.push_str("</volume-config></domain>");
+                continue;
+            }
+
             for kind in ["root", "private"] {
                 let path = self.path(&format!("{name}-{kind}.img"));
                 if !path.exists() {

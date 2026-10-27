@@ -693,14 +693,15 @@ fn namespace_candidate_binding_checks_pool_identity_and_baseline() -> Result<()>
     Ok(())
 }
 
-/// Scoped boot overlaps home and assistant, joins readiness once and checks storage before cache reuse.
+/// Mixed scoped boot accepts diskless Hermit, joins readiness once and checks artifacts before cache reuse.
 #[test]
 #[ignore = "requires explicitly prepared bubblewrap and unprivileged user namespaces"]
 fn namespace_boot_cache_checks_persistent_disks_before_reuse() -> Result<()> {
-    let mut machine = Machine::new()?;
+    let mut machine = hermit::mixed()?;
     let path = machine.physical(&machine.baseline).join("topology.json");
     let mut topology = read(&path)?;
     topology["domains"]["usr-home"]["features"]["airlock-boot-foreground"] = json!("1");
+    topology["domains"]["sys-clipboard"]["features"]["airlock-boot-foreground"] = json!("1");
     let mut assistant = declaration("usr-assistant", 1);
     assistant["features"]["airlock-role"] = json!("usr-assistant");
     assistant["prefs"]["guivm"] = json!("sys-gui");
@@ -714,6 +715,12 @@ fn namespace_boot_cache_checks_persistent_disks_before_reuse() -> Result<()> {
     let first = machine.run(&["boot-setup", "--gui", SETUP, "--apply"], None, true)?;
     assert_eq!(first["scope"], "gui");
     assert_eq!(first["reused"], false);
+    assert!(
+        first["domains"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("sys-clipboard"))
+    );
     assert!(
         first["domains"]
             .as_array()
@@ -790,6 +797,39 @@ fn namespace_boot_cache_checks_persistent_disks_before_reuse() -> Result<()> {
         machine.run(&["boot-setup", "--gui", SETUP, "--apply"], None, true)?["reused"],
         true
     );
+
+    let executable = machine
+        .path("view")
+        .join(Path::new(&store("clipboard", 1)).file_name().unwrap())
+        .join("kernel.elf");
+    let saved_executable = executable.with_extension("saved");
+    fs::rename(&executable, &saved_executable)?;
+    let missing = machine.run(&["boot-setup", "--gui", SETUP, "--apply"], None, false)?;
+    assert!(missing["error"].as_str().unwrap().contains("No such file"));
+    fs::rename(&saved_executable, &executable)?;
+    assert_eq!(
+        machine.run(&["boot-setup", "--gui", SETUP, "--apply"], None, true)?["reused"],
+        false,
+        "restoring the executable must invalidate the saved artifact metadata"
+    );
+
+    let xml_path = machine.path("qubes.xml");
+    let xml = fs::read_to_string(&xml_path)?;
+    fs::write(
+        &xml_path,
+        xml.replace(
+            r#"<domain class="HermitVM"><properties><property name="name">sys-clipboard</property></properties>
+<features/><tags/><volume-config>"#,
+            r#"<domain class="HermitVM"><properties><property name="name">sys-clipboard</property></properties>
+<features/><tags/><volume-config><volume name="unexpected" pool="file" vid="clipboard-disk"/>"#,
+        ),
+    )?;
+    error(
+        &machine.run(&["boot-setup", "--gui", SETUP, "--apply"], None, false)?,
+        "Hermit volumes must be empty",
+    );
+    fs::write(xml_path, xml)?;
+
     fs::remove_file(machine.path("sys-gui-private.img"))?;
     let result = machine.run(&["boot-setup", "--gui", SETUP, "--apply"], None, false)?;
     let message = result["error"].as_str().unwrap();

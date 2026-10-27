@@ -297,23 +297,43 @@ impl Coordinator {
                     })
                 });
             }
+            let hermit = topology.domains[name].backend.hermit();
+            if hermit.is_some() {
+                ensure!(
+                    node.attr("class")? == "HermitVM",
+                    "{name}: Hermit backend requires HermitVM class"
+                );
+            }
+
             let volumes = node
                 .children
                 .iter_mut()
                 .find(|n| n.tag == "volume-config")
                 .context("missing persistent volumes; use recovery")?;
-            let kinds: BTreeSet<_> = volumes
-                .children
-                .iter()
-                .map(|v| v.attr("name"))
-                .collect::<Result<_>>()?;
-            ensure!(
-                ["root", "private", "store", "store-data"]
-                    .iter()
-                    .all(|n| kinds.contains(n)),
-                "{name}: persistent or closure volumes missing"
-            );
             let mut artifacts = BTreeMap::new();
+            if let Some(image) = hermit {
+                // Hermit boots one authenticated executable and deliberately has no disks.
+                // Track that file so cache reuse still detects missing or replaced artifacts.
+                ensure!(
+                    volumes.children.is_empty(),
+                    "{name}: Hermit volumes must be empty"
+                );
+                let path = PathBuf::from(image.executable.as_str());
+                artifacts.insert(path.clone(), metadata(&path)?);
+            } else {
+                let kinds: BTreeSet<_> = volumes
+                    .children
+                    .iter()
+                    .map(|v| v.attr("name"))
+                    .collect::<Result<_>>()?;
+                ensure!(
+                    ["root", "private", "store", "store-data"]
+                        .iter()
+                        .all(|n| kinds.contains(n)),
+                    "{name}: persistent or closure volumes missing"
+                );
+            }
+
             let mut disks = BTreeMap::new();
             volumes
                 .children
