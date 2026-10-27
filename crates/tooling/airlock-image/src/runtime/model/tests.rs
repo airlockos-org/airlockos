@@ -140,6 +140,11 @@ fn custom_labels_have_one_consistent_color() {
 /// Missing providers inherit; explicit null is retained as an intentional reset.
 #[test]
 fn provider_declarations_preserve_inheritance() {
+    // Qubes creates dom0 itself; the nested display relay may use that built-in provider.
+    let mut relay = topology();
+    relay["domains"]["usr-home"]["prefs"]["guivm"] = json!("dom0");
+    checked(relay).unwrap();
+
     let explicit: Topology = serde_json::from_value(topology()).unwrap();
     assert_eq!(explicit.domains["usr-home"].netvm, VmReference::Disabled);
     assert_eq!(

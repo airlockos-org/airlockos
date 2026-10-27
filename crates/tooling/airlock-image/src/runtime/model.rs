@@ -200,7 +200,7 @@ pub(crate) fn validate(topology: &Topology) -> Result<()> {
         if let Some(gui) = domain.prefs.get("guivm").filter(|v| !v.is_null()) {
             ensure!(
                 gui.as_str()
-                    .is_some_and(|s| topology.domains.contains_key(s)),
+                    .is_some_and(|s| s == "dom0" || topology.domains.contains_key(s)),
                 "missing GUI provider for {name}"
             );
         }
