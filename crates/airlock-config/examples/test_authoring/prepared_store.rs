@@ -107,6 +107,9 @@ pub(super) fn sealed_store(inputs: NixValue) -> NixValue {
 /// the caller supplied deferred values.
 fn prepared_store_sealed_store_body(config: NixValue) -> NixValue {
     {
+        let boot = config
+            .clone()
+            .select("specialisation.usb-lab.configuration");
         let field_recovery_recorder = config.clone().select_segments([
             "specialisation",
             "usb-text-recovery",
@@ -181,6 +184,29 @@ fn prepared_store_sealed_store_body(config: NixValue) -> NixValue {
                         config
                             .clone()
                             .select_segments(["system", "extraDependencies"]),
+                    ),
+            ),
+            (
+                "bootDependencies",
+                NixValue::builtin("map")
+                    .call(NixValue::builtin("toString"))
+                    .call(boot.clone().select("system.extraDependencies")),
+            ),
+            (
+                "hermitExecutables",
+                NixValue::builtin("map")
+                    .call(NixValue::function(|domain| {
+                        domain.select("backend.system.source")
+                    }))
+                    .call(
+                        NixValue::builtin("filter")
+                            .call(NixValue::function(|domain| {
+                                domain.clone().select("backend.type").equals("hermit")
+                            }))
+                            .call(
+                                NixValue::builtin("attrValues")
+                                    .call(boot.select("airlock.qubes.topology.domains")),
+                            ),
                     ),
             ),
             (

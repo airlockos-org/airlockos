@@ -247,6 +247,17 @@ pub(crate) fn prepared(
     })
 }
 
+/// Select the normal USB boot topology rather than the carrier's recovery-only declarations.
+pub(super) fn boot_topology(config: &NixValue) -> NixValue {
+    NixValue::if_else(
+        config.clone().select("specialisation").has_attr("usb-lab"),
+        config
+            .clone()
+            .select("specialisation.usb-lab.configuration.airlock.qubes.topology"),
+        config.clone().select("airlock.qubes.topology"),
+    )
+}
+
 /// Add the host and alternative boot generations to the same immutable object pool.
 pub(super) fn unified(
     pkgs: &NixValue,
@@ -343,11 +354,12 @@ pub(super) fn unified(
         let check = nix_text!(
             r#"
             {vm_check}
-            {native}/bin/airlock-dom0-service storage image verify-host {seed}
+            {native}/bin/airlock-dom0-service storage image verify-host {seed} {topology}
         "#,
             vm_check = vm_store.clone().select("checkCommand"),
             native = native,
             seed = seed.clone(),
+            topology = json(pkgs, "airlock-host-topology.json", boot_topology(config)),
         );
 
         seed.merge_attrs(nix_record! {

@@ -619,7 +619,22 @@ pub(super) fn prepare_host(
     })
 }
 
-pub(super) fn verify_host(seed: &Path) -> Result<Value> {
+/// Require diskless guest executables in the packaged host view, not merely the builder's store.
+fn host_artifacts(topology: &crate::model::Topology, paths: &BTreeSet<String>) -> Result<()> {
+    for (name, domain) in &topology.domains {
+        if let Some(image) = domain.backend.hermit() {
+            ensure!(
+                paths.contains(domain.backend.system.source.as_str()),
+                "{name}: Hermit executable is absent from the packaged host store: {path}",
+                path = image.executable.as_str()
+            );
+        }
+    }
+
+    Ok(())
+}
+
+pub(super) fn verify_host(seed: &Path, topology: &crate::model::Topology) -> Result<Value> {
     let root = seed.join("pool");
     verify_files(&root, &read(&seed.join("pool-fingerprints.json"))?, false)?;
 
@@ -629,11 +644,17 @@ pub(super) fn verify_host(seed: &Path) -> Result<Value> {
         }
         for path in children(&root.join("host/boots"))? {
             let record: Value = read(&path)?;
-            host::validate(
+            let receipt = host::validate(
                 &root,
                 Path::new(host::POOL),
                 &text(&record, "system")?,
                 false,
+            )?;
+            let manifest = root.join(receipt.manifest.strip_prefix(host::POOL)?);
+            let manifest: Value = read(&manifest)?;
+            host_artifacts(
+                topology,
+                &serde_json::from_value(manifest["store"]["paths"].clone())?,
             )?;
         }
         for role in ["usr-assistant", "sys-ctrl"] {
@@ -728,4 +749,49 @@ pub(super) fn install_host(
     )?;
     rustix::fs::syncfs(&std::fs::File::open(root)?)?;
     Ok(receipt)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A valid guest declaration cannot substitute for retaining its executable in dom0's image.
+    #[test]
+    fn host_manifest_must_retain_diskless_guest_executables() -> Result<()> {
+        let hermit = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-clipboard";
+        let linux = "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-linux";
+        let inputs = airlock_machine_core::boot::BootInputs::new(json!({
+            "schema":"airlock.qubes-topology.v1", "domains":{
+                "sys-clipboard":{
+                    "class":"HermitVM", "netvm":null, "template":null,
+                    "features":{"qrexec":"","gui":""},
+                    "prefs":{"memory":32,"maxmem":32,"vcpus":1,"guivm":null,"audiovm":null,"kernel":"","virt_mode":"pvh"},
+                    "backend":{"type":"hermit", "system":{"source":hermit}, "artifact":{
+                        "schema":"airlock.hermit-pvh.v1", "executable":format!("{hermit}/kernel.elf"),
+                        "sha256":"a".repeat(64), "bytes":1024, "source_revision":"b".repeat(40),
+                        "integration_revision":"c".repeat(40), "build_lock":"d".repeat(64), "authority":"disconnected"
+                    }}
+                },
+                "usr-home":{
+                    "class":"StandaloneVM", "netvm":null, "template":null,
+                    "backend":{"type":"nix-closure", "system":{"source":linux},
+                        "root":{"source":format!("{linux}/root.img")}, "kernel":{"name":"test"},
+                        "store":{"source":linux,"mode":"shared-closure","mountpoint":"/nix/store",
+                            "device":"/dev/xvde","blobDevice":"/dev/xvdf","viewBackend":"erofs-objectmap"}}
+                }
+            }
+        }))?;
+        let mut paths = BTreeSet::new();
+        let error = host_artifacts(inputs.topology(), &paths).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("sys-clipboard: Hermit executable is absent")
+        );
+        assert!(error.to_string().contains(&format!("{hermit}/kernel.elf")));
+
+        // Linux payloads remain in the guest pool; only Hermit needs its system in dom0.
+        paths.insert(hermit.into());
+        host_artifacts(inputs.topology(), &paths)
+    }
 }

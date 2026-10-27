@@ -78,6 +78,8 @@ enum Operation {
     VerifyHost {
         // Unified prepared image store, checked without assembling mounts.
         seed: PathBuf,
+        // Exact guest topology whose Hermit executables must be retained by dom0.
+        topology: PathBuf,
     },
     VerifyPrepared {
         // JSON request binding the selected descriptor to the configured VM.
@@ -181,7 +183,12 @@ fn execute(command: Request) -> Result<Value> {
         } => super::progress::phase("Installing recovery and sealing host boot", || {
             prepared::install_host(&root, &recovery_paths, &recovery_system)
         }),
-        Operation::VerifyHost { seed } => prepared::verify_host(&seed),
+        Operation::VerifyHost { seed, topology } => {
+            let inputs = airlock_machine_core::boot::BootInputs::new(crate::state::configuration(
+                &topology,
+            )?)?;
+            prepared::verify_host(&seed, inputs.topology())
+        }
         Operation::VerifyPrepared { request: path } => {
             let value = request(&path)?;
             if !Path::new(&text(&value, "artifact")?)

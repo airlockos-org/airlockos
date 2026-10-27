@@ -380,6 +380,20 @@ fn prepared_image_validates_sealed_pool_before_assembly() -> Result<()> {
     let dependencies = report["dependencies"].as_array().unwrap();
     assert!(!dependencies.contains(&report["runtimeSeed"]));
     assert!(dependencies.contains(&report["validation"]));
+    let executables = report["hermitExecutables"].as_array().unwrap();
+    assert!(
+        !executables.is_empty(),
+        "normal USB boot must exercise Hermit retention"
+    );
+    for executable in executables {
+        assert!(
+            report["bootDependencies"]
+                .as_array()
+                .unwrap()
+                .contains(executable),
+            "Hermit executable omitted from dom0: {executable}"
+        );
+    }
     let command = text(&report["imageCommand"]);
     let mut previous = 0;
     for token in [

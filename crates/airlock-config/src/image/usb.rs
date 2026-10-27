@@ -17,14 +17,7 @@ pub(crate) fn module(workspace: &Workspace) -> NixValue {
         let prepared: NixValue = context.argument("airlockUsbPreparedStore");
         let unified = store::unified(&context.pkgs, workspace, &context.config, prepared.clone());
         let settings = unified.bind(|unified| {
-            let config = &context.config;
-            let topology = NixValue::if_else(
-                config.clone().select("specialisation").has_attr("usb-lab"),
-                config
-                    .clone()
-                    .select("specialisation.usb-lab.configuration.airlock.qubes.topology"),
-                config.clone().select("airlock.qubes.topology"),
-            );
+            let topology = store::boot_topology(&context.config);
             let runtime = store::runtime(&context.pkgs, workspace, topology, unified.clone());
 
             runtime.bind(|runtime| {
@@ -129,6 +122,26 @@ pub(super) fn prepared_configuration(
             NixValue::builtin("attrValues")
                 .call(context.config.clone().select("airlock.qubes.kernels")),
         );
+    // The detached topology no longer retains these paths. Hermit boots from
+    // dom0's store, unlike Linux guest payloads served by the prepared pool.
+    let hermit = context
+        .lib
+        .clone()
+        .select("filterAttrs")
+        .call(NixValue::function(|_| {
+            NixValue::function(|domain| domain.select("backend.type").equals("hermit"))
+        }))
+        .call(
+            context
+                .config
+                .clone()
+                .select("airlock.qubes.topology.domains"),
+        );
+    let executables = NixValue::builtin("map")
+        .call(NixValue::function(|domain| {
+            domain.select("backend.system.source")
+        }))
+        .call(NixValue::builtin("attrValues").call(hermit));
 
     nix_record! {
         "environment": nix_record! {
@@ -146,6 +159,7 @@ pub(super) fn prepared_configuration(
                     prepared.clone().select("validation"),
                 ]),
                 kernels,
+                executables,
             ]),
             "build": nix_record! {
                 "usbPreparedGuestStore": prepared,
