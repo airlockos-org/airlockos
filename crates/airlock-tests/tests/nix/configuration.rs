@@ -307,6 +307,13 @@ fn package_physical_graphics_and_input_dependencies_preserve_boot_guards() -> Re
         json!("airlock/input")
     );
     assert_eq!(report["discovery"]["KillMode"], json!("control-group"));
+    assert_eq!(report["discovery"]["Type"], "notify");
+    assert_eq!(report["discovery"]["NotifyAccess"], "all");
+    assert!(contains(
+        &report["discovery"]["ExecStart"],
+        &json!("/bin/systemd-notify")
+    ));
+    assert_eq!(report["inputConnect"]["Restart"], "on-failure");
     assert_eq!(
         report["deviceReceiver"]["args"],
         json!(["--keyboard", "--mouse", "--tablet"])
@@ -326,9 +333,19 @@ fn package_physical_graphics_and_input_dependencies_preserve_boot_guards() -> Re
         report["inputReceiverReadyConfig"],
         json!("force-user='root'\n")
     );
+    assert_eq!(
+        report["inputInitialization"]["args"][0],
+        "input-initialization"
+    );
+    assert_eq!(report["inputInitialization"]["callers"], json!(["dom0"]));
+    assert_eq!(report["inputInitializationConfig"], "force-user='root'\n");
     assert!(contains(
         &report["inputPolicy"],
         &json!("airlock.InputReceiverReady * @anyvm sys-gui deny")
+    ));
+    assert!(contains(
+        &report["inputPolicy"],
+        &json!("airlock.InputInitialization * @anyvm sys-gui deny")
     ));
     assert!(!contains(&report["udevRules"], &json!("SYNA8018")));
     assert!(!contains(
@@ -340,7 +357,7 @@ fn package_physical_graphics_and_input_dependencies_preserve_boot_guards() -> Re
     let guest = &report["guest"];
     assert_eq!(guest["failed"], json!([]));
     assert_eq!(guest["defaultUnit"], json!("graphical.target"));
-    assert_eq!(guest["displayWantedBy"], json!(["graphical.target"]));
+    assert_eq!(guest["displayWantedBy"], json!([]));
     assert_eq!(guest["session"], json!("gnome"));
     assert_eq!(guest["gdm"], json!(true));
     assert_eq!(guest["lightdm"], json!(false));

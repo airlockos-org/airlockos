@@ -419,31 +419,35 @@ fn usb_startup_gates_are_acyclic_and_preserve_health_budgets() -> Result<()> {
     startup_units_are_acyclic(units)?;
     let gui_units = report["guiUnits"].as_object().unwrap();
     startup_units_are_acyclic(gui_units)?;
-    let login_gate = &gui_units["airlock-input-login-ready.service"];
+    let startup = &gui_units["airlock-input-startup.service"];
     includes(
         &gui_units["display-manager.service"]["requires"],
-        "airlock-input-login-ready.service",
+        "airlock-input-startup.service",
     );
     includes(
         &gui_units["display-manager.service"]["after"],
-        "airlock-input-login-ready.service",
+        "airlock-input-startup.service",
     );
-    includes(&login_gate["before"], "display-manager.service");
-    includes(&login_gate["start"], "airlock-wait-input-login");
+    includes(&startup["before"], "display-manager.service");
+    includes(&startup["start"], "airlock-input-startup");
+    includes(&startup["wantedBy"], "graphical.target");
+    assert_eq!(gui_units["display-manager.service"]["wantedBy"], json!([]));
+    includes(&report["inputInitializedTarget"], "display-manager.service");
     assert!(
-        !login_gate["after"]
+        !startup["after"]
             .as_array()
             .unwrap()
             .contains(&json!("display-manager.service"))
     );
     assert!(
-        !login_gate["after"]
+        !gui_units["qubes-qrexec-agent.service"]["after"]
             .as_array()
             .unwrap()
             .contains(&json!("graphical.target"))
     );
-    assert!(
-        login_gate["timeout"].as_u64().unwrap() > airlock_machine_core::input::LOGIN_WAIT_SECONDS
+    assert_eq!(
+        units["airlock-gui-input-boot-ready.service"]["timeout"],
+        "infinity"
     );
     assert_eq!(report["guiConsoleLogin"], false);
     assert!(

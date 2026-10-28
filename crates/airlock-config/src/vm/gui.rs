@@ -294,18 +294,18 @@ impl Gui<'_> {
                 .clone()
                 .select("airlock.inputProxy.receiver.enable"),
         );
-        let login_wait = self.script(
-            "airlock-wait-input-login",
+        let input_startup = self.script(
+            "airlock-input-startup",
             crate::commands::contract(
                 &self.context.pkgs,
-                "input-login-wait",
+                "input-startup",
                 [("service", vm_service.clone())],
             ),
             false,
         );
         let input_dependency = self.optional(
             login_gate.clone(),
-            strings(&["airlock-input-login-ready.service"]),
+            strings(&["airlock-input-startup.service"]),
         );
 
         nix_record! {
@@ -384,13 +384,20 @@ impl Gui<'_> {
                     )),
                 ),
                 "packages": NixValue::list([agent]),
+                "targets": nix_record! {
+                    // GDM is activated only by dom0's fixed initialization handoff.
+                    "airlock-input-initialized": self.when(login_gate.clone(), nix_record! {
+                        "wants": strings(&["display-manager.service"]),
+                    }),
+                },
                 "services": nix_record! {
                     // Reserve tty1 for startup progress and the greeter; other VTs keep recovery consoles.
                     "getty@tty1": nix_record! {
                         "enable": self.when(login_gate.clone(), false.into()),
                     },
-                    "airlock-input-login-ready": self.when(login_gate, nix_record! {
-                        "description": "Keep startup visible until forwarded typing input is ready",
+                    "airlock-input-startup": self.when(login_gate.clone(), nix_record! {
+                        "description": "Show startup while dom0 initializes input forwarding",
+                        "wantedBy": strings(&["graphical.target"]),
                         "before": strings(&["display-manager.service"]),
                         "after": strings(&["systemd-udev-trigger.service"]),
                         "partOf": strings(&["display-manager.service"]),
@@ -398,13 +405,15 @@ impl Gui<'_> {
                             "Type": "oneshot",
                             "RemainAfterExit": true,
                             "ExecStartPre": nix_text!("-{kbd}/bin/chvt 1", kbd = self.package("kbd")),
-                            "ExecStart": login_wait.to_text(),
-                            "TimeoutStartSec": (airlock_machine_core::input::LOGIN_WAIT_SECONDS + 15) as i64,
+                            "ExecStart": input_startup.to_text(),
+                            "TimeoutStartSec": 15_i64,
                         },
                     }),
                     "display-manager": nix_record! {
-                        "wantedBy": self
-                            .force(self.optional(physical_boot, strings(&["graphical.target"]))),
+                        "wantedBy": self.force(self.optional(
+                            physical_boot.and(login_gate.equals(false)),
+                            strings(&["graphical.target"]),
+                        )),
                         "requires": NixValue::concat_lists([
                             strings(&["airlock-qubes-rw-init.service", "systemd-user-sessions.service"]),
                             qubes_gui.clone(),

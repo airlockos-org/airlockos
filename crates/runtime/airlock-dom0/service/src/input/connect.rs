@@ -12,27 +12,31 @@ use std::{
 };
 
 /// Retry the independently managed connection job; observer cleanup may cancel that job at boot.
-pub(super) fn boot_ready(target: &GuestName, timeout: u64) -> Result<()> {
+pub(super) fn boot_ready(target: &GuestName, timeout: Option<u64>) -> Result<()> {
     let runner = Runner::default();
     let before = instance(&runner, target)?;
-    let deadline = Instant::now() + Duration::from_secs(timeout);
+    let deadline = timeout.map(|seconds| Instant::now() + Duration::from_secs(seconds));
     let mut error = "input forwarding is not ready".to_owned();
     let mut delay = Duration::from_millis(500);
-    while Instant::now() < deadline {
+    while deadline.is_none_or(|at| Instant::now() < at) {
         let result = (|| -> Result<()> {
             runner.run(
                 tool("AIRLOCK_INPUT_SYSTEMCTL", "systemctl"),
                 &["start".into(), "airlock-gui-input-connect.service".into()],
-                deadline.saturating_duration_since(Instant::now()),
+                deadline.map_or(Duration::from_secs(240), |at| {
+                    at.saturating_duration_since(Instant::now())
+                }),
                 &[],
             )?;
             check(&runner, target)?;
-            ensure!(
-                instance(&runner, target)? == before,
-                "{target} restarted during boot input readiness"
-            );
             Ok(())
         })();
+        // A changed VM is a real startup failure. Transient transport failures
+        // keep retrying without allowing an old instance to release a new login.
+        ensure!(
+            instance(&runner, target)? == before,
+            "{target} restarted during boot input readiness"
+        );
         match result {
             Ok(()) => return Ok(()),
             Err(failure) => {
@@ -43,7 +47,9 @@ pub(super) fn boot_ready(target: &GuestName, timeout: u64) -> Result<()> {
                 error = latest;
             }
         }
-        thread::sleep(delay.min(deadline.saturating_duration_since(Instant::now())));
+        thread::sleep(deadline.map_or(delay, |at| {
+            delay.min(at.saturating_duration_since(Instant::now()))
+        }));
         delay = (delay * 2).min(Duration::from_secs(4));
     }
     bail!("{target}: boot input readiness timed out: {error}")
@@ -106,8 +112,33 @@ fn instance(runner: &Runner, target: &GuestName) -> Result<String> {
 pub(super) fn connect(target: &GuestName) -> Result<()> {
     let runner = Runner::default();
     let before = instance(&runner, target)?;
+    let result = connect_instance(&runner, target, &before);
+    if result.is_err() {
+        // Reporting progress never authorizes initialization or masks the failure.
+        if let Err(error) = notify(&runner, &before, "retrying") {
+            eprintln!("cannot report input retry: {error:#}");
+        }
+    }
+    result
+}
+
+/// Address the observed Xen instance's qrexec socket, never a name that could resolve to a replacement.
+fn notify(runner: &Runner, instance: &str, status: &str) -> Result<()> {
+    let rpc = format!("DEFAULT:QUBESRPC airlock.InputInitialization+{status} dom0");
     run(
-        &runner,
+        runner,
+        "AIRLOCK_INPUT_QREXEC",
+        "qrexec-client",
+        &["-d", instance, "-T", "-w", "5", &rpc],
+        15,
+    )?;
+    Ok(())
+}
+
+/// Complete discovery and attached-device registration before explicitly releasing this VM's login.
+fn connect_instance(runner: &Runner, target: &GuestName, before: &str) -> Result<()> {
+    run(
+        runner,
         "AIRLOCK_INPUT_QREXEC",
         "qrexec-client",
         &[
@@ -120,18 +151,18 @@ pub(super) fn connect(target: &GuestName) -> Result<()> {
         ],
         65,
     )?;
-    let after = instance(&runner, target)?;
+    let after = instance(runner, target)?;
     ensure!(after == before, "{target} restarted during input readiness");
 
     run(
-        &runner,
+        runner,
         "AIRLOCK_INPUT_SYSTEMCTL",
         "systemctl",
         &["restart", "airlock-gui-input.target"],
         30,
     )?;
     run(
-        &runner,
+        runner,
         "AIRLOCK_INPUT_SYSTEMCTL",
         "systemctl",
         &[
@@ -144,7 +175,7 @@ pub(super) fn connect(target: &GuestName) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut last_error = None;
     loop {
-        match check(&runner, target) {
+        match check(runner, target) {
             Ok(()) => break,
             Err(error) if Instant::now() >= deadline => {
                 return Err(error).context("input forwarding did not become ready");
@@ -165,9 +196,10 @@ pub(super) fn connect(target: &GuestName) -> Result<()> {
         thread::sleep(Duration::from_millis(500));
     }
     ensure!(
-        instance(&runner, target)? == before,
+        instance(runner, target)? == before,
         "{target} restarted while connecting input"
     );
+    notify(runner, before, "ready")?;
     Ok(())
 }
 

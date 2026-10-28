@@ -604,6 +604,26 @@ fn gui_gpu_assignment_gpu_selection_3(lab: NixValue, captures: Bindings) -> NixV
                     "text",
                 ]),
             ),
+            (
+                "inputInitialization",
+                native_contract(vm_base.clone().select_segments([
+                    "config",
+                    "environment",
+                    "etc",
+                    "qubes-rpc/airlock.InputInitialization",
+                    "source",
+                ])),
+            ),
+            (
+                "inputInitializationConfig",
+                vm_base.clone().select_segments([
+                    "config",
+                    "environment",
+                    "etc",
+                    "qubes/rpc-config/airlock.InputInitialization",
+                    "text",
+                ]),
+            ),
             ("inputPolicy", field_input_policy),
             (
                 "discovery",

@@ -199,12 +199,15 @@ fn receiver_reply() -> Value {
 fn input_connection_requires_the_same_ready_instance() -> Result<()> {
     for state in [
         "ready",
+        "no-keyboard",
+        "pointer-only",
         "halted",
         "invalid-xid",
         "dom0-xid",
         "readiness-failed",
         "stopped",
         "restarted",
+        "late-restarted",
         "discovery-failed",
     ] {
         let mut peers = Peers::new()?;
@@ -214,21 +217,34 @@ fn input_connection_requires_the_same_ready_instance() -> Result<()> {
         ]))?;
         peers.rules("qvm-ls", json!([
             {"args":["--raw-data","--fields","XID","sys-gui"],"missing":"xid-seen","write":{"xid-seen":""},"stdout":if state == "invalid-xid" {" 7\n"} else if state == "dom0-xid" {"0\n"} else {"7\n"}},
-            {"args":["--raw-data","--fields","XID","sys-gui"],"stdout":if state == "restarted" {"8\n"} else {"7\n"}}
+            {"args":["--raw-data","--fields","XID","sys-gui"],"missing":"second-xid","write":{"second-xid":""},"stdout":if state == "restarted" {"8\n"} else {"7\n"}},
+            {"args":["--raw-data","--fields","XID","sys-gui"],"stdout":if state == "late-restarted" {"8\n"} else {"7\n"}}
         ]))?;
         peers.rules("qrexec-client", json!([
             {"args":["-d","sys-gui","-T","-w","60","DEFAULT:QUBESRPC airlock.InputReceiverReady dom0"],"write":{"ready":""},"exit":if state == "readiness-failed" {1} else {0}},
-            {"args":["-d","sys-gui","-T","-w","5","DEFAULT:QUBESRPC airlock.InputReceiverReady dom0"],"stdout":serde_json::to_string(&receiver_reply())?}
+            {"args":["-d","sys-gui","-T","-w","5","DEFAULT:QUBESRPC airlock.InputReceiverReady dom0"],"stdout":serde_json::to_string(&if state == "no-keyboard" {json!({"schema":"airlock.input-receiver.v1","devices":[]})} else if state == "pointer-only" {json!({"schema":"airlock.input-receiver.v1","devices":[{"name":"dom0: Mouse","keyboard":false,"pointer":true}]})} else {receiver_reply()})?},
+            {"args":["-d","7","-T","-w","5","DEFAULT:QUBESRPC airlock.InputInitialization+ready dom0"]},
+            {"args":["-d","7","-T","-w","5","DEFAULT:QUBESRPC airlock.InputInitialization+retrying dom0"]}
         ]))?;
         peers.rules("systemctl", json!([
             {"args":["restart","airlock-gui-input.target"]},
             {"args":["is-active","--quiet","airlock-gui-input-discovery.service"],"exit":if state == "discovery-failed" {1} else {0}}
         ]))?;
+        let physical = input_inventory(&peers)?;
+        if state == "no-keyboard" {
+            fs::write(&physical, "[]")?;
+        } else if state == "pointer-only" {
+            fs::write(
+                &physical,
+                r#"[{"name":"Mouse","keyboard":false,"pointer":true}]"#,
+            )?;
+        }
+        let initialized = matches!(state, "ready" | "no-keyboard" | "pointer-only");
         let mut command =
             peers.command(common::binary("AIRLOCK_DOM0_BIN", "airlock-dom0-service"))?;
         command
             .args(["input", "connect", "--target", "sys-gui"])
-            .env("AIRLOCK_INPUT_PHYSICAL", input_inventory(&peers)?)
+            .env("AIRLOCK_INPUT_PHYSICAL", physical)
             .env("AIRLOCK_INPUT_QVM_CHECK", peers.path("bin/qvm-check"))
             .env("AIRLOCK_INPUT_QVM_LS", peers.path("bin/qvm-ls"))
             .env("AIRLOCK_INPUT_QREXEC", peers.path("bin/qrexec-client"))
@@ -236,7 +252,7 @@ fn input_connection_requires_the_same_ready_instance() -> Result<()> {
         let output = common::run(&mut command, None)?;
         assert_eq!(
             output.status.success(),
-            state == "ready",
+            initialized,
             "state={state}: {error}",
             error = String::from_utf8_lossy(&output.stderr)
         );
@@ -248,12 +264,24 @@ fn input_connection_requires_the_same_ready_instance() -> Result<()> {
         assert_eq!(
             forwarding.len(),
             match state {
-                "ready" => 3,
+                "ready" | "no-keyboard" | "pointer-only" | "late-restarted" => 3,
                 "discovery-failed" => 2,
                 _ => 0,
             }
         );
-        if state == "ready" {
+        assert_eq!(
+            calls.iter().any(|call| call["args"]
+                == json!([
+                    "-d",
+                    "7",
+                    "-T",
+                    "-w",
+                    "5",
+                    "DEFAULT:QUBESRPC airlock.InputInitialization+ready dom0"
+                ])),
+            initialized
+        );
+        if initialized {
             assert_eq!(
                 calls
                     .iter()
@@ -300,19 +328,15 @@ fn boot_input_readiness_survives_connection_job_cancellation() -> Result<()> {
         let mut command =
             peers.command(common::binary("AIRLOCK_DOM0_BIN", "airlock-dom0-service"))?;
         command
-            .args([
-                "input",
-                "boot-ready",
-                "--target",
-                "sys-gui",
-                "--timeout",
-                "1",
-            ])
+            .args(["input", "boot-ready", "--target", "sys-gui"])
             .env("AIRLOCK_INPUT_PHYSICAL", input_inventory(&peers)?)
             .env("AIRLOCK_INPUT_QREXEC", peers.path("bin/qrexec-client"))
             .env("AIRLOCK_INPUT_QVM_CHECK", peers.path("bin/qvm-check"))
             .env("AIRLOCK_INPUT_QVM_LS", peers.path("bin/qvm-ls"))
             .env("AIRLOCK_INPUT_SYSTEMCTL", peers.path("bin/systemctl"));
+        if state != "ready" {
+            command.args(["--timeout", "1"]);
+        }
         let output = common::run(&mut command, None)?;
         assert_eq!(
             output.status.success(),
@@ -320,7 +344,17 @@ fn boot_input_readiness_survives_connection_job_cancellation() -> Result<()> {
             "{state}: {error}",
             error = String::from_utf8_lossy(&output.stderr)
         );
-        assert!(peers.calls()?.iter().filter(|call| call["args"] == json!(["start","airlock-gui-input-connect.service"])).count() >= 2);
+        if state != "restarted" {
+            assert!(
+                peers
+                    .calls()?
+                    .iter()
+                    .filter(|call| call["args"]
+                        == json!(["start", "airlock-gui-input-connect.service"]))
+                    .count()
+                    >= 2
+            );
+        }
     }
     Ok(())
 }
@@ -338,9 +372,17 @@ fn input_receiver_readiness_enforces_caller_device_and_handler_guards() -> Resul
         "missing-device",
         "missing-handler",
         "non-executable-handler",
+        "missing-event",
+        "regular-event",
     ] {
         let peers = Peers::new()?;
         let sys_input = peers.path("sys-input");
+        fs::create_dir(peers.path("dev-input"))?;
+        match state {
+            "missing-event" => {}
+            "regular-event" => fs::write(peers.path("dev-input/event1"), "not a device")?,
+            _ => std::os::unix::fs::symlink("/dev/null", peers.path("dev-input/event1"))?,
+        }
         let device_path = sys_input.join("event1/device");
         fs::create_dir_all(device_path.join("capabilities"))?;
         fs::write(device_path.join("name"), "dom0: Keyboard\n")?;
@@ -389,6 +431,8 @@ fn input_receiver_readiness_enforces_caller_device_and_handler_guards() -> Resul
             .arg("input-receiver-ready")
             .arg("--sys-input")
             .arg(&sys_input)
+            .arg("--dev-input")
+            .arg(peers.path("dev-input"))
             .arg("--uinput")
             .arg(device)
             .arg("--handler")
@@ -414,11 +458,22 @@ fn input_receiver_readiness_enforces_caller_device_and_handler_guards() -> Resul
         let output = common::run(&mut command, None)?;
         assert_eq!(
             output.status.success(),
-            matches!(state, "ready" | "relative-pointer" | "multitouch-pointer"),
+            matches!(
+                state,
+                "ready"
+                    | "relative-pointer"
+                    | "multitouch-pointer"
+                    | "missing-event"
+                    | "regular-event"
+            ),
             "state={state}: {error}",
             error = String::from_utf8_lossy(&output.stderr)
         );
         assert!(peers.calls()?.is_empty());
+        if matches!(state, "missing-event" | "regular-event") {
+            let reply: Value = serde_json::from_slice(&output.stdout)?;
+            assert_eq!(reply["devices"], json!([]));
+        }
         if matches!(state, "ready" | "relative-pointer" | "multitouch-pointer") {
             let reply: Value = serde_json::from_slice(&output.stdout)?;
             assert_eq!(reply["devices"][0]["name"], "dom0: Keyboard");
@@ -429,101 +484,86 @@ fn input_receiver_readiness_enforces_caller_device_and_handler_guards() -> Resul
     Ok(())
 }
 
-/// Build a local input observation and gate using inert character devices and kernel metadata.
-fn login_fixture(name: &str, keys: &str) -> Result<(Peers, Command)> {
-    let peers = Peers::new()?;
-    let device = peers.path("sys-input/event1/device");
-    fs::create_dir_all(device.join("capabilities"))?;
-    fs::create_dir(peers.path("dev-input"))?;
-    fs::write(device.join("name"), name)?;
-    fs::write(device.join("capabilities/key"), keys)?;
-    for kind in ["rel", "abs"] {
-        fs::write(device.join(format!("capabilities/{kind}")), "0")?;
-    }
-    let handler = peers.path("handler");
-    fs::write(&handler, "not executed")?;
-    fs::set_permissions(&handler, fs::Permissions::from_mode(0o755))?;
-
-    let mut command = peers.command(common::binary("AIRLOCK_VM_BIN", "airlock-vm-service"))?;
-    command
-        .arg("wait-input-login")
-        .arg("--uinput")
-        .arg("/dev/null")
-        .arg("--sys-input")
-        .arg(peers.path("sys-input"))
-        .arg("--dev-input")
-        .arg(peers.path("dev-input"))
-        .arg("--status-device")
-        .arg(peers.path("status"))
-        .arg("--handler")
-        .arg(handler);
-    Ok((peers, command))
-}
-
-/// Local keyboards, multimedia buttons and non-device files must never release the greeter.
+/// Startup does not inspect hardware; only dom0's closed handoff may activate the fixed login target.
 #[test]
-fn login_gate_requires_an_openable_forwarded_typing_device() -> Result<()> {
-    for state in ["ready", "local", "multimedia", "regular-node"] {
-        let (peers, mut command) = login_fixture(
-            if state == "local" {
-                "Local Keyboard"
-            } else {
-                "dom0: Keyboard"
-            },
-            if state == "multimedia" {
-                "1"
-            } else {
-                "100050000000"
-            },
-        )?;
-        let node = peers.path("dev-input/event1");
-        if state == "regular-node" {
-            fs::write(node, "not an input device")?;
-        } else {
-            std::os::unix::fs::symlink("/dev/null", node)?;
+fn login_starts_only_on_dom0_initialization_and_retries_remain_recoverable() -> Result<()> {
+    for state in [
+        "ready",
+        "retrying",
+        "retry-active",
+        "wrong-caller",
+        "missing-caller",
+        "argument",
+        "release-failed",
+    ] {
+        let mut peers = Peers::new()?;
+        peers.rules("systemctl", json!([
+            {"args":["--no-block","start","airlock-input-initialized.target"],"exit":if state == "release-failed" {1} else {0}},
+            {"args":["is-active","--quiet","airlock-input-initialized.target"],"exit":if state == "retry-active" {0} else {3}}
+        ]))?;
+        let mut startup = peers.command(common::binary("AIRLOCK_VM_BIN", "airlock-vm-service"))?;
+        common::run(
+            startup
+                .arg("input-startup")
+                .arg("--status-device")
+                .arg(peers.path("status")),
+            None,
+        )?
+        .checked()?;
+        assert!(peers.calls()?.is_empty());
+        let initial = fs::read_to_string(peers.path("status"))?;
+        assert!(initial.contains("Initializing input forwarding"));
+
+        let mut command = peers.command(common::binary("AIRLOCK_VM_BIN", "airlock-vm-service"))?;
+        command
+            .arg("input-initialization")
+            .arg("--status-device")
+            .arg(peers.path("status"))
+            .arg("--systemctl")
+            .arg(peers.path("bin/systemctl"))
+            .env(
+                "QREXEC_REMOTE_DOMAIN",
+                if state == "wrong-caller" {
+                    "usr-home"
+                } else {
+                    "dom0"
+                },
+            )
+            .env(
+                "QREXEC_SERVICE_ARGUMENT",
+                match state {
+                    "retrying" | "retry-active" => "retrying",
+                    "argument" => "start-other-service",
+                    _ => "ready",
+                },
+            );
+        if state == "missing-caller" {
+            command.env_remove("QREXEC_REMOTE_DOMAIN");
         }
-        let output = common::run(command.args(["--timeout", "1"]), None)?;
+        let output = common::run(&mut command, None)?;
         assert_eq!(
             output.status.success(),
-            state == "ready",
+            matches!(state, "ready" | "retrying" | "retry-active"),
             "{state}: {error}",
             error = String::from_utf8_lossy(&output.stderr)
         );
-        let status = fs::read_to_string(peers.path("status"))?;
-        assert!(status.contains(if state == "ready" {
-            "Opening login"
+        let calls = peers.calls()?;
+        if matches!(state, "wrong-caller" | "missing-caller" | "argument") {
+            assert!(calls.is_empty());
         } else {
-            "Login is paused"
-        }));
-        assert!(
-            peers.calls()?.is_empty(),
-            "the gate must not start services or send input"
+            assert_eq!(calls.len(), 1);
+        }
+        assert_eq!(
+            fs::read_to_string(peers.path("status"))?.contains("Retrying automatically"),
+            state == "retrying"
         );
+        if state == "ready" {
+            // A second completion after reconnect must not restart an already active GDM.
+            common::run(&mut command, None)?.checked()?;
+            assert!(peers.calls()?.iter().all(|call| call["args"]
+                == json!(["--no-block", "start", "airlock-input-initialized.target"])));
+        }
     }
-    Ok(())
-}
-
-/// A registered keyboard is insufficient until its event node appears; progress stays visible meanwhile.
-#[test]
-fn login_gate_keeps_startup_visible_until_device_publication() -> Result<()> {
-    let (peers, mut command) = login_fixture("dom0: Keyboard", "100050000000")?;
-    let mut child = command
-        .args(["--timeout", "5"])
-        .stdout(Stdio::null())
-        .stderr(File::create(peers.path("gate.stderr"))?)
-        .spawn()?;
-    common::until(|| {
-        Ok(fs::read_to_string(peers.path("status"))
-            .is_ok_and(|text| text.contains("Connecting your keyboard")))
-    })?;
-    assert!(
-        child.try_wait()?.is_none(),
-        "a kernel registration without a usable node must keep login stopped"
-    );
-    std::os::unix::fs::symlink("/dev/null", peers.path("dev-input/event1"))?;
-    assert!(child.wait()?.success());
-    assert!(fs::read_to_string(peers.path("status"))?.contains("Opening login"));
-    assert!(peers.calls()?.is_empty());
     Ok(())
 }
 

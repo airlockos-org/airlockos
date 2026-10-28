@@ -212,7 +212,9 @@ pub(super) fn configuration(
                                 "serviceConfig": nix_record! {
                                     "Type": "oneshot",
                                     "RemainAfterExit": true,
-                                    "TimeoutStartSec": 360_i64,
+                                    // Each connection attempt is bounded and retried. Input
+                                    // startup itself has no terminal keyboard-presence timeout.
+                                    "TimeoutStartSec": "infinity",
                                     "ExecStart": nix_text!(
                                         "{engine}/bin/airlock-dom0-service input boot-ready --target {target}",
                                         engine = engine.clone(),

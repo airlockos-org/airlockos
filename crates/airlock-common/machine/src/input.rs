@@ -2,9 +2,6 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Guest-local login gate budget; expiration leaves the startup console visible.
-pub const LOGIN_WAIT_SECONDS: u64 = 180;
-
 /// A physical keyboard/pointer interface or its registered counterpart in the guest.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -49,13 +46,11 @@ fn forwarded_name(name: &str) -> String {
 }
 
 impl Receiver {
-    /// Require typing input and every observed physical keyboard/pointer interface in the guest.
+    /// Require every attached keyboard/pointer interface to be registered in the guest.
     ///
-    /// This verifies transport registration, not that a human has pressed a key or moved a pointer.
+    /// An empty physical inventory is valid. This verifies transport registration,
+    /// not that a human has pressed a key or moved a pointer.
     pub fn covers(&self, physical: &[Device]) -> Result<(), String> {
-        if !physical.iter().any(|device| device.keyboard) {
-            return Err("no physical typing keyboard was discovered".into());
-        }
         let mut available: Vec<_> = self.devices.iter().collect();
         for expected in physical
             .iter()
@@ -122,7 +117,8 @@ mod tests {
             pointer: true,
         });
         assert!(receiver.covers(&physical).is_ok());
-        assert!(receiver.covers(&[]).is_err());
+        assert!(receiver.covers(&[]).is_ok());
+        assert!(receiver.covers(&physical[1..]).is_ok());
         let mut duplicate = physical.clone();
         duplicate.push(physical[0].clone());
         assert!(receiver.covers(&duplicate).is_err());

@@ -1,14 +1,15 @@
-//! Observe existing root input receivers without creating devices or injecting events.
+//! Observe input receivers and accept dom0's explicit graphical startup handoff.
 
 use airlock_machine_core::input::{Device, Receiver, Schema};
+use airlock_nix_core::runtime::process;
 use anyhow::{Context, Result, ensure};
 use clap::Args;
 use std::{
     fs,
     os::unix::fs::{FileTypeExt, OpenOptionsExt},
     path::{Path, PathBuf},
-    thread,
-    time::{Duration, Instant},
+    process::Command,
+    time::Duration,
 };
 
 /// Fixed local device and handler paths supplied by the installed input RPC wrapper.
@@ -20,26 +21,31 @@ pub(crate) struct Request {
     /// Kernel input-class directory; override only for explicitly scoped local diagnostics.
     #[arg(long, default_value = "/sys/class/input")]
     sys_input: PathBuf,
+    /// Event nodes corresponding to the observed kernel interfaces.
+    #[arg(long, default_value = "/dev/input")]
+    dev_input: PathBuf,
     /// Every handler required by the installed keyboard/mouse/tablet receiver composition.
     #[arg(long = "handler", required = true)]
     handlers: Vec<PathBuf>,
 }
 
-/// Local display-manager gate; it observes the same receiver state without accepting an RPC caller.
+/// Guest-local startup message, independent of keyboard presence.
 #[derive(Args)]
-pub(crate) struct LoginWait {
-    // Installed receiver paths, shared with the read-only readiness RPC.
-    #[command(flatten)]
-    receiver: Request,
-    // Device nodes must be usable as well as registered in the kernel.
-    #[arg(long, default_value = "/dev/input")]
-    dev_input: PathBuf,
+pub(crate) struct Startup {
     // Guest-local boot console remains visible until the display manager can start.
     #[arg(long, default_value = "/dev/tty1")]
     status_device: PathBuf,
-    // Bound a failed boot without ever falling through to an unusable login screen.
-    #[arg(long, default_value_t = airlock_machine_core::input::LOGIN_WAIT_SECONDS, value_parser = clap::value_parser!(u64).range(1..=300))]
-    timeout: u64,
+}
+
+/// Fixed local adapter for dom0's input initialization handoff.
+#[derive(Args)]
+pub(crate) struct Initialization {
+    // Exact systemd executable supplied by the installed RPC wrapper.
+    #[arg(long)]
+    systemctl: PathBuf,
+    // Console used only while the login target has not been released.
+    #[command(flatten)]
+    startup: Startup,
 }
 
 /// Display progress in the GUI VM; diagnostic details remain in its journal.
@@ -56,53 +62,43 @@ fn progress(path: &Path, message: &str) {
     }
 }
 
-/// Keep GNOME stopped until an authenticated dom0 receiver exposes a usable typing device.
-/// No input is injected, no service is started and no success receipt survives this observation.
-pub(crate) fn wait_login(request: LoginWait) -> Result<()> {
-    let started = Instant::now();
-    let deadline = started + Duration::from_secs(request.timeout);
-    let mut last_error = String::new();
-    let mut displayed = None;
-    loop {
-        let ready = observe(&request.receiver, Some(&request.dev_input)).and_then(|receiver| {
-            ensure!(
-                receiver.devices.iter().any(|device| device.keyboard),
-                "no forwarded typing keyboard is ready"
-            );
-            Ok(())
-        });
-        match ready {
-            Ok(()) => {
-                progress(&request.status_device, "Keyboard connected. Opening login…");
-                return Ok(());
-            }
-            Err(error) => {
-                let detail = format!("{error:#}");
-                if detail != last_error {
-                    eprintln!("Waiting for login input: {detail}");
-                    last_error = detail;
-                }
-            }
-        }
-        if Instant::now() >= deadline {
-            progress(
-                &request.status_device,
-                "Keyboard connection failed. Login is paused.",
-            );
-            anyhow::bail!("login input readiness timed out: {last_error}");
-        }
-        let elapsed = started.elapsed().as_secs();
-        if displayed != Some(elapsed) {
-            progress(
-                &request.status_device,
-                &format!("Connecting your keyboard… {elapsed}s"),
-            );
-            displayed = Some(elapsed);
-        }
-        thread::sleep(
-            Duration::from_millis(250).min(deadline.saturating_duration_since(Instant::now())),
+/// Show progress once; dom0 explicitly activates the login target after initialization.
+pub(crate) fn startup(request: Startup) {
+    progress(&request.status_device, "Initializing input forwarding…");
+}
+
+/// Accept dom0's closed status protocol; only completion activates the fixed login target.
+/// Repeated completion is idempotent, and later transport retries leave an active login alone.
+pub(crate) fn initialization(request: Initialization) -> Result<()> {
+    ensure!(
+        std::env::var("QREXEC_REMOTE_DOMAIN").as_deref() == Ok("dom0"),
+        "input initialization is restricted to dom0"
+    );
+    let argument = std::env::var("QREXEC_SERVICE_ARGUMENT").unwrap_or_default();
+    ensure!(
+        matches!(argument.as_str(), "ready" | "retrying"),
+        "invalid input initialization status"
+    );
+    let target = "airlock-input-initialized.target";
+    let run = |args: &[&str]| {
+        process::run(
+            Command::new(&request.systemctl).args(args),
+            None,
+            Some(Duration::from_secs(10)),
+        )
+    };
+    if argument == "ready" {
+        // GDM can require the startup message service. Never block its qrexec
+        // caller on graphical startup, which may itself need further RPCs.
+        run(&["--no-block", "start", target])?
+            .checked("release login after input initialization")?;
+    } else if !run(&["is-active", "--quiet", target])?.status.success() {
+        progress(
+            &request.startup.status_device,
+            "Input forwarding failed. Retrying automatically…",
         );
     }
+    Ok(())
 }
 
 /// Accept only dom0's argument-free readiness RPC and observe device/handler accessibility.
@@ -116,12 +112,12 @@ pub(crate) fn ready(request: Request) -> Result<()> {
         "airlock.InputReceiverReady does not accept arguments"
     );
 
-    println!("{}", serde_json::to_string(&observe(&request, None)?)?);
+    println!("{}", serde_json::to_string(&observe(&request)?)?);
     Ok(())
 }
 
-/// Observe existing kernel receivers; the login gate also requires an openable event device.
-fn observe(request: &Request, dev_input: Option<&Path>) -> Result<Receiver> {
+/// Observe existing kernel receivers without changing their device or service state.
+fn observe(request: &Request) -> Result<Receiver> {
     ensure!(
         fs::metadata(&request.uinput).is_ok_and(|metadata| metadata.file_type().is_char_device())
             && rustix::fs::access(&request.uinput, rustix::fs::Access::WRITE_OK).is_ok(),
@@ -159,17 +155,17 @@ fn observe(request: &Request, dev_input: Option<&Path>) -> Result<Receiver> {
         if !name.starts_with("dom0: ") {
             continue;
         }
-        if let Some(directory) = dev_input {
-            let node = directory.join(entry.file_name());
-            if !fs::metadata(&node).is_ok_and(|m| m.file_type().is_char_device())
-                || fs::OpenOptions::new()
-                    .read(true)
-                    .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
-                    .open(&node)
-                    .is_err()
-            {
-                continue;
-            }
+        // Kernel registration alone must not acknowledge a device whose event
+        // node is still unavailable to the guest's input stack.
+        let node = request.dev_input.join(entry.file_name());
+        if !fs::metadata(&node).is_ok_and(|metadata| metadata.file_type().is_char_device())
+            || fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
+                .open(&node)
+                .is_err()
+        {
+            continue;
         }
         let keys = fs::read_to_string(path.join("capabilities/key"))?;
         let relative = fs::read_to_string(path.join("capabilities/rel"))?;

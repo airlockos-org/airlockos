@@ -59,13 +59,9 @@ pub(crate) fn contract<const N: usize>(
             .call(NixValue::list(values))
             .call(template)
     };
-    // The local greeter gate and dom0 observer inspect the same installed receiver handlers.
+    // The dom0 observer inspects the same handlers used for physical forwarding.
     let receiver_arguments = [
-        if kind == "input-login-wait" {
-            "wait-input-login"
-        } else {
-            "input-receiver-ready"
-        },
+        "input-receiver-ready",
         "--handler",
         "/etc/qubes-rpc/airlock.InputDevice",
         "--handler",
@@ -83,9 +79,23 @@ pub(crate) fn contract<const N: usize>(
             &["input", "connect", "--target", "@quotedTarget@"],
             false,
         ),
-        "receiver-ready" | "input-login-wait" => (
+        "receiver-ready" => (
             "@service@/bin/airlock-vm-service",
             &receiver_arguments,
+            false,
+        ),
+        "input-startup" => (
+            "@service@/bin/airlock-vm-service",
+            &["input-startup"],
+            false,
+        ),
+        "input-initialization" => (
+            "@service@/bin/airlock-vm-service",
+            &[
+                "input-initialization",
+                "--systemctl",
+                "@systemd@/bin/systemctl",
+            ],
             false,
         ),
         "device-receiver" => (
@@ -511,7 +521,10 @@ pub(crate) fn contract<const N: usize>(
     if !prefix.is_empty() {
         fields.push(("prefix_env", NixValue::record(prefix)));
     }
-    if matches!(kind, "poweroff" | "device-receiver") {
+    if matches!(
+        kind,
+        "poweroff" | "device-receiver" | "input-initialization"
+    ) {
         fields.push((
             "callers",
             NixValue::list([if kind == "poweroff" {

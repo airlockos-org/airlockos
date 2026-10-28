@@ -47,7 +47,7 @@ fn startup_units(config: NixValue, names: &[&str]) -> NixValue {
     }))
 }
 
-/// Inspect both sides of the login handoff, including the guest-local input gate.
+/// Inspect both sides of the explicit input initialization and login handoff.
 pub(super) fn startup_contract(inputs: NixValue) -> NixValue {
     NixValue::builtin("getFlake")
         .call(inputs.select("root"))
@@ -90,8 +90,17 @@ pub(super) fn startup_contract(inputs: NixValue) -> NixValue {
                     "guiUnits",
                     startup_units(
                         gui.clone(),
-                        &["display-manager", "airlock-input-login-ready"],
+                        &[
+                            "display-manager",
+                            "airlock-input-startup",
+                            "qubes-qrexec-agent",
+                        ],
                     ),
+                ),
+                (
+                    "inputInitializedTarget",
+                    gui.clone()
+                        .select("systemd.targets.airlock-input-initialized.wants"),
                 ),
                 (
                     "guiConsoleLogin",

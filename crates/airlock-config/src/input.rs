@@ -136,6 +136,9 @@ fn receiver(context: &ModuleContext, proxy: NixValue, workspace: &Workspace) -> 
     let handlers = SERVICES
         .map(|service| format!("--handler /etc/qubes-rpc/{service}"))
         .join(" ");
+    let vm_service = Application::VmService
+        .build(&context.pkgs, workspace)
+        .as_expression();
     let ready = script(
         "airlock-input-receiver-ready",
         crate::commands::contract(
@@ -143,12 +146,18 @@ fn receiver(context: &ModuleContext, proxy: NixValue, workspace: &Workspace) -> 
             "receiver-ready",
             [
                 ("handlers", handlers.into()),
-                (
-                    "service",
-                    Application::VmService
-                        .build(&context.pkgs, workspace)
-                        .as_expression(),
-                ),
+                ("service", vm_service.clone()),
+            ],
+        ),
+    );
+    let initialization = script(
+        "airlock-input-initialization",
+        crate::commands::contract(
+            &context.pkgs,
+            "input-initialization",
+            [
+                ("service", vm_service),
+                ("systemd", context.pkgs.clone().select("systemd")),
             ],
         ),
     );
@@ -174,6 +183,14 @@ fn receiver(context: &ModuleContext, proxy: NixValue, workspace: &Workspace) -> 
             },
         ),
         (
+            "qubes-rpc/airlock.InputInitialization".into(),
+            nix_record! { "source": initialization, "mode": "symlink" },
+        ),
+        (
+            "qubes/rpc-config/airlock.InputInitialization".into(),
+            nix_record! { "text": root.clone(), "mode": "0444" },
+        ),
+        (
             "qubes/rpc-config/airlock.InputReceiverReady".into(),
             nix_record! {
                 "text": root,
@@ -183,6 +200,12 @@ fn receiver(context: &ModuleContext, proxy: NixValue, workspace: &Workspace) -> 
     ]);
 
     nix_record! {
+        "systemd": nix_record! {
+            "targets": nix_record! {
+                // Receiver-only guests acknowledge setup without starting a display manager.
+                "airlock-input-initialized": nix_record! { "description": "dom0 input initialization completed" },
+            },
+        },
         "boot": nix_record! {
             "kernelModules": strings(&["uinput"]),
         },
@@ -330,12 +353,15 @@ fn sender(
                     "description": "Connect physical input after the GUI VM is ready",
                     "requires": boot_guard,
                     "after": strings(&["qubesd.service", "airlock-input-boot-guard.service"]),
+                    "unitConfig": nix_record! { "StartLimitIntervalSec": 0_i64 },
                     "serviceConfig": nix_record! {
                         "Type": "oneshot",
                         "ExecStart": connect.to_text(),
                         // Include the 65-second receiver RPC, Xen identity checks
                         // and forwarding discovery instead of truncating their budgets.
                         "TimeoutStartSec": 240_i64,
+                        "Restart": "on-failure",
+                        "RestartSec": 3_i64,
                     },
                 },
                 "airlock-gui-input-events": nix_record! {
@@ -360,15 +386,18 @@ fn sender(
                     "partOf": strings(&["airlock-gui-input.target"]),
                     "after": strings(&["qubesd.service"]),
                     "serviceConfig": nix_record! {
-                        "Type": "exec",
+                        "Type": "notify",
+                        "NotifyAccess": "all",
                         "ExecStart": nix_text!(
                             "{executable} input discover --target {target} --qrexec {qrexec}/bin/qrexec-client \
                              --sender {proxy}/bin/input-proxy-sender \
-                             --inventory /var/lib/airlock/input/trusted-devices.json",
+                             --inventory /var/lib/airlock/input/trusted-devices.json \
+                             --notify {systemd}/bin/systemd-notify",
                             executable = executable,
                             target = quoted,
                             qrexec = qrexec,
                             proxy = proxy,
+                            systemd = context.pkgs.clone().select("systemd"),
                         ),
                         "StateDirectory": "airlock/input",
                         "StateDirectoryMode": "0700",
@@ -390,7 +419,11 @@ fn policy(context: &ModuleContext, target: NixValue) -> NixValue {
     let rules = NixValue::concat_text(
         SERVICES
             .into_iter()
-            .chain(["airlock.InputDevice", "airlock.InputReceiverReady"])
+            .chain([
+                "airlock.InputDevice",
+                "airlock.InputReceiverReady",
+                "airlock.InputInitialization",
+            ])
             .map(|service| {
                 nix_text!(
                     r#"

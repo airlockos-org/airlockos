@@ -48,8 +48,10 @@ enum Action {
     Desktop(desktop::Request),
     /// Observe input-device and handler readiness through the dom0-only input RPC.
     InputReceiverReady(input::Request),
-    /// Keep the guest startup console visible until forwarded typing input is usable.
-    WaitInputLogin(input::LoginWait),
+    /// Show input startup progress until dom0 releases the graphical login.
+    InputStartup(input::Startup),
+    /// Accept the dom0-only input initialization handoff for this GUI boot.
+    InputInitialization(input::Initialization),
     /// Wait for this graphical user's session through the sys-gui-only readiness RPC.
     SessionReady {
         // Complete readiness budget, shared by user-manager and display probes.
@@ -121,7 +123,8 @@ fn run(args: Args) -> Result<()> {
         Action::Diagnostics(request) => diagnostics::execute(request),
         Action::Desktop(request) => desktop::execute(request)?,
         Action::InputReceiverReady(request) => input::ready(request)?,
-        Action::WaitInputLogin(request) => input::wait_login(request)?,
+        Action::InputStartup(request) => input::startup(request),
+        Action::InputInitialization(request) => input::initialization(request)?,
         Action::SessionReady { timeout } => {
             ensure!(
                 std::env::var("QREXEC_REMOTE_DOMAIN").as_deref() == Ok("sys-gui"),

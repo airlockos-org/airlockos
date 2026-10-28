@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
+    process::Command,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -148,6 +149,7 @@ pub(super) fn run(
     qrexec: PathBuf,
     sender: PathBuf,
     path: PathBuf,
+    notify: PathBuf,
     stop: Arc<AtomicBool>,
 ) -> Result<()> {
     ensure!(
@@ -170,6 +172,22 @@ pub(super) fn run(
         }
         add(&device, &mut forwarder, &mut inventory, &path);
     }
+
+    // An empty inventory is complete only after the hotplug monitor is listening
+    // and the first scan has finished. Type=notify keeps connection setup behind
+    // this boundary, including on machines booted without input hardware.
+    ensure!(
+        !stop.load(Ordering::Relaxed),
+        "input discovery was cancelled during initialization"
+    );
+    // Forwarder owns live sender children here. Use the direct-child runner;
+    // dom0's general runner assumes sole ownership of process descendants.
+    airlock_nix_core::runtime::process::run(
+        Command::new(notify).arg("--ready"),
+        None,
+        Some(Duration::from_secs(5)),
+    )?
+    .checked("publish completed input discovery")?;
 
     while !stop.load(Ordering::Relaxed) {
         let mut fds = [PollFd::new(&socket, PollFlags::IN)];

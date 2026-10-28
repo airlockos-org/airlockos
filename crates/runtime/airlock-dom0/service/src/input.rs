@@ -38,9 +38,9 @@ enum Action {
         // Already-running GUI VM whose connection must complete on the same instance.
         #[arg(long)]
         target: GuestName,
-        // Total retry budget, including cancelled connection jobs.
-        #[arg(long, default_value_t = 300, value_parser = clap::value_parser!(u64).range(1..=300))]
-        timeout: u64,
+        // Optional diagnostic budget; normal boot keeps retrying recoverable connection failures.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=300))]
+        timeout: Option<u64>,
     },
     /// Observe an already-running input connection without changing VM or service state.
     Check {
@@ -68,6 +68,9 @@ enum Action {
         // Advisory record of observed physical devices; failure does not disable input.
         #[arg(long)]
         inventory: PathBuf,
+        // Installed systemd readiness adapter, called after subscribing and enumerating.
+        #[arg(long)]
+        notify: PathBuf,
     },
     /// Connect and release forwarding in response to native Qubes lifecycle events.
     Events {
@@ -121,7 +124,8 @@ pub(crate) fn execute(request: Request) -> Result<()> {
             qrexec,
             sender,
             inventory,
-        } => discovery::run(target, qrexec, sender, inventory, stopping()?),
+            notify,
+        } => discovery::run(target, qrexec, sender, inventory, notify, stopping()?),
         Action::Events { target } => events::run(target, stopping()?),
         Action::BootGuard => guard::check(),
         Action::Finalize => guard::finalize(),
