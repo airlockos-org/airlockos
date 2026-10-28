@@ -1,6 +1,6 @@
 # Hermit clipboard service
 
-The normal clipboard stores one complete, multi-format offer in the diskless
+The clipboard stores one complete, multi-format offer in the diskless
 Hermit VM. Linux session adapters copy application selections into it and expose
 the latest offer on their own desktops. Reads do not consume content, and completed
 content has no expiry. Only unfinished transfers and inactive connections time out.
@@ -16,9 +16,8 @@ A new GUI authority lifetime restarts the volatile clipboard service. Individual
 participant reconnections preserve completed content and receive fresh epochs.
 
 The shared core keeps source identity, connection epoch and generation separate
-from desktop format handling. Its access boundary currently permits every admitted
-participant to read and replace the clipboard. This is the extension point for
-future modes; no protected mode or user-gesture authorization is implemented.
+from desktop format handling. Every admitted participant can read and replace
+the clipboard.
 
 The desktop adapter uses the existing Qubes X servers and sys-gui's Xwayland
 selection bridge. It handles binary representations and incremental transfers,
