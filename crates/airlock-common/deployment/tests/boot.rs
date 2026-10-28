@@ -2,6 +2,88 @@
 
 use airlock_deployment_core::boot::{DomainState, Handoff, Reuse, Selection};
 
+/// A mixed image needs a host kernel and a Hermit executable, while Linux payloads stay separate.
+fn image_requirements() -> airlock_deployment_core::boot::artifacts::Requirements {
+    use airlock_deployment_core::boot::artifacts::{Guest, Requirements};
+    Requirements::derive(vec![
+        Guest::Nixos {
+            name: "usr-home".into(),
+            system: "linux".into(),
+            root: "root.img".into(),
+            store: "guest-pool".into(),
+            kernel: "qubes-kernel".into(),
+            kernel_source: Some("host-kernel".into()),
+        },
+        Guest::Hermit {
+            name: "sys-clipboard".into(),
+            system: "clipboard".into(),
+            executable: "clipboard/kernel.elf".into(),
+        },
+    ])
+}
+
+/// One normal boot binds the full topology, seed coordinate, selected host and integrity manifest.
+fn image_identity() -> airlock_deployment_core::boot::artifacts::Identity {
+    use airlock_deployment_core::boot::artifacts::{Identity, Profile};
+    Identity {
+        profile: Profile::Normal,
+        topology: "all-guests".into(),
+        seed: "seed-one".into(),
+        host: "host-one".into(),
+        manifest: "manifest-one".into(),
+    }
+}
+
+/// The executable proof rejects an omitted backend and refuses every substituted image coordinate.
+#[test]
+fn image_completeness_retains_every_guest_and_exact_assembly_binding() {
+    use airlock_deployment_core::boot::artifacts::Profile;
+    let requirements = image_requirements();
+    let guests = requirements.guests();
+    assert_eq!(
+        guests.iter().map(|guest| guest.name()).collect::<Vec<_>>(),
+        ["usr-home", "sys-clipboard"]
+    );
+    assert_eq!(
+        guests[0]
+            .volumes()
+            .iter()
+            .map(|v| v.name())
+            .collect::<Vec<_>>(),
+        ["root", "private", "store", "store-data"]
+    );
+    assert!(guests[1].volumes().is_empty());
+    assert!(
+        requirements
+            .check(image_identity(), &["host-kernel".into()])
+            .is_none()
+    );
+    assert!(
+        image_requirements()
+            .check(image_identity(), &["clipboard".into()])
+            .is_none()
+    );
+    let checked = image_requirements()
+        .check(
+            image_identity(),
+            &["clipboard".into(), "host-kernel".into()],
+        )
+        .unwrap();
+    assert_eq!(checked.requirements().guests().len(), 2);
+    assert!(checked.matches(&image_identity()));
+    for field in ["profile", "topology", "seed", "host", "manifest"] {
+        let mut changed = image_identity();
+        match field {
+            "profile" => changed.profile = Profile::Recovery,
+            "topology" => changed.topology = "recovery-only".into(),
+            "seed" => changed.seed = "other-seed".into(),
+            "host" => changed.host = "other-host".into(),
+            _ => changed.manifest = "other-manifest".into(),
+        }
+        assert!(!checked.matches(&changed), "{field}");
+    }
+}
+
 /// One generation with separate root, descriptor and guest device identities.
 fn selection() -> Selection {
     Selection {

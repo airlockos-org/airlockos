@@ -23,6 +23,36 @@ fn valid(value: Value) -> bool {
     serde_json::from_value::<Topology>(value).is_ok_and(|topology| topology.validate().is_ok())
 }
 
+/// The topology adapter projects all guests without filtering the diskless backend out of requirements.
+#[test]
+fn complete_boot_requirements_preserve_both_backends() -> anyhow::Result<()> {
+    let mut raw = topology();
+    let system = "/nix/store/cccccccccccccccccccccccccccccccc-linux";
+    let kernel = "/nix/store/dddddddddddddddddddddddddddddddd-kernel";
+    raw["kernels"] = json!({"qubes-kernel":{"source":kernel}});
+    raw["domains"]["usr-home"] = json!({
+        "class":"StandaloneVM", "netvm":null, "template":null,
+        "backend":{"type":"nix-closure", "system":{"source":system},
+            "root":{"source":format!("{system}/root.img")}, "kernel":{"name":"qubes-kernel"},
+            "store":{"source":system,"mode":"shared-closure","mountpoint":"/nix/store",
+                "device":"/dev/xvde","blobDevice":"/dev/xvdf","viewBackend":"erofs-objectmap"}}
+    });
+    let inputs = airlock_machine_core::boot::BootInputs::new(raw)?;
+    let requirements = inputs.requirements()?;
+    assert_eq!(requirements.guests().len(), inputs.topology().domains.len());
+    for name in inputs.topology().domains.keys() {
+        assert_eq!(requirements.guest(name)?.name(), name.as_str());
+    }
+    assert_eq!(
+        requirements.host_roots(),
+        [
+            "/nix/store/00000000000000000000000000000000-clipboard",
+            kernel
+        ]
+    );
+    Ok(())
+}
+
 #[test]
 fn hermit_cannot_inherit_linux_storage_or_services() {
     assert!(valid(topology()));

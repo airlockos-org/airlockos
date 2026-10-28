@@ -201,6 +201,7 @@ dependencies = [
 name = "airlock-machine-core"
 version = "0.1.0"
 dependencies = [
+ "airlock-deployment-core",
  "airlock-machine-planning",
  "airlock-nix-core",
  "anyhow",

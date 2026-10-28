@@ -8,6 +8,8 @@ use anyhow::{Context, Result, ensure};
 use serde_json::Value;
 use std::collections::BTreeSet;
 
+pub mod artifacts;
+
 /// Default budget for Qubes to start one guest, before readiness polling begins.
 pub const GUEST_START_SECONDS: u64 = 240;
 
