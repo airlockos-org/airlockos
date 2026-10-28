@@ -778,7 +778,7 @@ fn package_usb_lab_keeps_network_dependencies_and_development_authority_explicit
     // Run the authored window contract with an inert terminal; sudo stays inside the VM window.
     let temporary = tempfile::tempdir()?;
     let mut window = report["tailscaleWindow"].clone();
-    assert!(text(&window["program"]).ends_with("/bin/xterm"));
+    assert!(text(&window["program"]).ends_with("/bin/kgx"));
     let mut peers = common::peers::Peers::new()?;
     peers.rules("enrollment-terminal", json!([{}]))?;
     window["program"] = json!(peers.path("bin/enrollment-terminal"));
@@ -789,12 +789,21 @@ fn package_usb_lab_keeps_network_dependencies_and_development_authority_explicit
 
     let calls = peers.calls()?;
     let args = calls[0]["args"].as_array().unwrap();
-    let class = args.iter().position(|arg| arg == "-class").unwrap();
+    let class = args
+        .iter()
+        .position(|arg| arg == "--gapplication-app-id")
+        .unwrap();
     assert_eq!(args[class + 1], "org.airlockos.Tailscale");
-    let terminal_command = args.iter().position(|arg| arg == "-e").unwrap();
+    let terminal_command = args.iter().position(|arg| arg == "--").unwrap();
+    assert!(text(&args[terminal_command + 1]).ends_with("/bin/airlock-vm-service"));
     assert_eq!(
-        &args[terminal_command + 1..],
-        &[json!("/run/wrappers/bin/sudo"), json!("-n"), json!(helper)]
+        &args[terminal_command + 2..],
+        &[
+            json!("desktop"),
+            json!("tailscale-enrollment"),
+            json!("--enrollment"),
+            json!(helper)
+        ]
     );
 
     let mut enrollment = report["tailscaleHandler"].clone();

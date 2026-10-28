@@ -75,7 +75,8 @@ pub(super) fn module() -> NixValue {
                 pkgs,
                 "usr-assistant-tailscale-window",
                 [
-                    ("xterm", package("xterm")),
+                    ("console", package("gnome-console")),
+                    ("service", native.clone()),
                     ("enrollment", local_enrollment.clone()),
                 ],
             ));

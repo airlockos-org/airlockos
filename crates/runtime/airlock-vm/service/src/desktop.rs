@@ -7,7 +7,7 @@ use std::{
     env,
     ffi::OsString,
     fs::{self, OpenOptions},
-    io,
+    io::{self, Write},
     os::unix::process::{CommandExt, ExitStatusExt},
     path::PathBuf,
     process::{Command, Stdio},
@@ -28,6 +28,15 @@ pub(crate) struct Request {
 
 #[derive(Subcommand)]
 enum Action {
+    /// Run the fixed local enrollment helper and keep its output visible until Enter or terminal closure.
+    TailscaleEnrollment {
+        /// Installed argument-free helper admitted by the assistant's existing sudo rule.
+        #[arg(long)]
+        enrollment: PathBuf,
+        /// Existing sudo wrapper; the terminal adapter itself remains unprivileged.
+        #[arg(long, default_value = "/run/wrappers/bin/sudo")]
+        sudo: PathBuf,
+    },
     /// Own the GUI login lock until display-manager termination or relay disconnect.
     GuiSession {
         /// Installed systemd controller used for session lifetime operations.
@@ -204,6 +213,27 @@ fn exec(command: &mut Command) -> Result<()> {
 
 pub(crate) fn execute(request: Request) -> Result<()> {
     match request.action {
+        Action::TailscaleEnrollment { enrollment, sudo } => {
+            // Inherit the PTY so browser-login URLs and failures appear as they
+            // happen. The existing helper retains all privilege and time limits.
+            let outcome = Command::new(sudo)
+                .arg("-n")
+                .arg(enrollment)
+                .status()
+                .context("could not start the installed Tailscale enrollment helper");
+            match &outcome {
+                Ok(status) if !status.success() => {
+                    eprintln!("Tailscale connection exited with {status}.")
+                }
+                Err(error) => eprintln!("{error:#}"),
+                _ => {}
+            }
+
+            print!("\nPress Enter to close this window.");
+            io::stdout().flush()?;
+            io::stdin().read_line(&mut String::new())?;
+            finish(outcome?)
+        }
         Action::GuiSession {
             systemctl,
             journalctl,

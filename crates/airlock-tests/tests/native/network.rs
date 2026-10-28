@@ -1,9 +1,66 @@
 //! Enrollment failures and provider probes remain bounded and require the firewall to be healthy.
 
-use crate::common;
+use crate::common::{self, peers::Peers};
 use anyhow::Result;
 use serde_json::{Value, json};
-use std::{fs, process::Command};
+use std::{
+    fs::{self, File},
+    io::Write,
+    process::{Command, Stdio},
+};
+
+/// Success and failure output remain live in the Console PTY until the user closes the result.
+#[test]
+fn enrollment_console_keeps_output_until_enter_and_preserves_exit_status() -> Result<()> {
+    for code in [0, 17] {
+        let mut peers = Peers::new()?;
+        peers.rules(
+            "sudo",
+            json!([{
+                "stdout":"Login URL: https://login.example.invalid/device\n",
+                "stderr":if code == 0 {""} else {"Enrollment failed\n"},
+                "exit":code,
+            }]),
+        )?;
+        let helper = peers.path("installed enrollment helper");
+        let output = File::create(peers.path("console"))?;
+        let mut child = airlock_nix_core::runtime::process::OwnedChild(
+            peers
+                .command(common::binary(
+                    "AIRLOCK_VM_SERVICE_BIN",
+                    "airlock-vm-service",
+                ))?
+                .args(["desktop", "tailscale-enrollment", "--enrollment"])
+                .arg(&helper)
+                .arg("--sudo")
+                .arg(peers.path("bin/sudo"))
+                .stdin(Stdio::piped())
+                .stdout(output.try_clone()?)
+                .stderr(output)
+                .spawn()?,
+        );
+        common::until(|| {
+            Ok(fs::read_to_string(peers.path("console"))?.contains("Press Enter to close"))
+        })?;
+        assert!(
+            child.0.try_wait()?.is_none(),
+            "completed enrollment must remain visible"
+        );
+        let visible = fs::read_to_string(peers.path("console"))?;
+        assert!(visible.contains("https://login.example.invalid/device"));
+        assert_eq!(visible.contains("Enrollment failed"), code != 0);
+        assert_eq!(peers.calls()?[0]["args"], json!(["-n", helper]));
+
+        child.0.stdin.take().unwrap().write_all(b"\n")?;
+        let mut status = None;
+        common::until(|| {
+            status = child.0.try_wait()?;
+            Ok(status.is_some())
+        })?;
+        assert_eq!(status.unwrap().code(), Some(code));
+    }
+    Ok(())
+}
 
 /// Provide explicitly inert network executables while leaving all protocol and shell decisions in the real script.
 fn fixture(config: Value) -> Result<tempfile::TempDir> {
