@@ -211,8 +211,6 @@ fn usb_lab_network_and_development_access_body(captures: Bindings) -> NixValue {
     let lab_gui = captures.get("lab_gui");
     let policy = captures.get("policy");
     let retired_policy = captures.get("retired_policy");
-    let tailscale_desktop = captures.get("tailscale_desktop");
-    let tailscale_launcher = captures.get("tailscale_launcher");
 
     {
         let assistant_package = |name: &str| {
@@ -239,11 +237,6 @@ fn usb_lab_network_and_development_access_body(captures: Bindings) -> NixValue {
         let assistant_desktop = NixValue::builtin("readFile").call(NixValue::concat_text([
             assistant_package("airlock-tailscale.desktop").to_text(),
             "/share/applications/airlock-tailscale.desktop".into(),
-        ]));
-
-        let field_tailscale_desktop = NixValue::builtin("readFile").call(NixValue::concat_text([
-            tailscale_desktop.clone().to_text(),
-            NixValue::from("/share/applications/airlock-start-usr-assistant-tailscale.desktop"),
         ]));
 
         let field_tailscale_policy = NixValue::builtin("readFile").call(NixValue::concat_text([
@@ -762,14 +755,6 @@ fn usb_lab_network_and_development_access_body(captures: Bindings) -> NixValue {
                     .clone()
                     .select_segments(["airlock", "devDom0Terminal", "guest", "enable"]),
             ),
-            (
-                "tailscaleLauncher",
-                native_contract(NixValue::concat_text([
-                    tailscale_launcher.clone().to_text(),
-                    NixValue::from("/bin/airlock-start-usr-assistant-tailscale"),
-                ])),
-            ),
-            ("tailscaleDesktop", field_tailscale_desktop),
             ("tailscaleAssistantDesktop", assistant_desktop),
             ("tailscaleWindow", assistant_window),
             ("tailscaleLocalHelper", local_enrollment.clone()),
@@ -905,8 +890,6 @@ fn usb_lab_network_and_development_access_2(policy: NixValue, captures: Bindings
     let gui = captures.get("gui");
     let host = captures.get("host");
     let lab_gui = captures.get("lab_gui");
-    let tailscale_desktop = captures.get("tailscale_desktop");
-    let tailscale_launcher = captures.get("tailscale_launcher");
 
     {
         let receiver = NixValue::builtin("head").call(
@@ -932,17 +915,13 @@ fn usb_lab_network_and_development_access_2(policy: NixValue, captures: Bindings
                 ("lab_gui", lab_gui.clone()),
                 ("policy", policy.clone()),
                 ("retired_policy", retired_policy.clone()),
-                ("tailscale_desktop", tailscale_desktop.clone()),
-                ("tailscale_launcher", tailscale_launcher.clone()),
             ]))
         })
     }
 }
 
-/// Build the usb lab test usb lab routes usr assistant through firewall and retains development
-/// access contribution using the caller supplied deferred values.
+/// Bind the development terminal policy for the shared lab report.
 fn usb_lab_network_and_development_access_3(
-    tailscale_launcher: NixValue,
     ctrl: NixValue,
     dev: NixValue,
     gui: NixValue,
@@ -954,52 +933,29 @@ fn usb_lab_network_and_development_access_3(
             NixValue::builtin("filter")
                 .call(NixValue::function(|package| {
                     package
-                        .clone()
-                        .attr_or("pname", package.clone().select_segments(["name"]))
-                        .equals(NixValue::from(
-                            "airlock-start-usr-assistant-tailscale.desktop",
-                        ))
+                        .attr_or("name", "")
+                        .equals("airlock-dev-dom0-terminal-policy")
                 }))
                 .call(
-                    lab_gui
-                        .clone()
-                        .select_segments(["environment", "systemPackages"]),
+                    host.clone()
+                        .select_segments(["virtualisation", "qubes", "packages"]),
                 ),
         )
-        .bind(|tailscale_desktop| {
-            NixValue::builtin("head")
-                .call(
-                    NixValue::builtin("filter")
-                        .call(NixValue::function(|p| {
-                            p.clone()
-                                .attr_or("name", NixValue::from(""))
-                                .equals(NixValue::from("airlock-dev-dom0-terminal-policy"))
-                        }))
-                        .call(host.clone().select_segments([
-                            "virtualisation",
-                            "qubes",
-                            "packages",
-                        ])),
-                )
-                .bind(|policy| {
-                    usb_lab_network_and_development_access_2(
-                        policy,
-                        Bindings::new([
-                            ("ctrl", ctrl.clone()),
-                            ("dev", dev.clone()),
-                            ("gui", gui.clone()),
-                            ("host", host.clone()),
-                            ("lab_gui", lab_gui.clone()),
-                            ("tailscale_desktop", tailscale_desktop.clone()),
-                            ("tailscale_launcher", tailscale_launcher.clone()),
-                        ]),
-                    )
-                })
+        .bind(|policy| {
+            usb_lab_network_and_development_access_2(
+                policy,
+                Bindings::new([
+                    ("ctrl", ctrl.clone()),
+                    ("dev", dev.clone()),
+                    ("gui", gui.clone()),
+                    ("host", host.clone()),
+                    ("lab_gui", lab_gui.clone()),
+                ]),
+            )
         })
 }
 
-/// Build the usb lab test usb lab routes usr assistant through firewall and retains development
-/// access contribution using the caller supplied deferred values.
+/// Bind the lab GUI configuration for the shared network and development report.
 fn usb_lab_network_and_development_access_4(
     gui: NixValue,
     ctrl: NixValue,
@@ -1007,39 +963,20 @@ fn usb_lab_network_and_development_access_4(
     f: NixValue,
     host: NixValue,
 ) -> NixValue {
-    f.clone()
-        .select_segments([
-            "nixosConfigurations",
-            "airlock-domain-sys-gui-usb-lab",
-            "config",
-        ])
-        .bind(|lab_gui| {
-            NixValue::builtin("head")
-                .call(
-                    NixValue::builtin("filter")
-                        .call(NixValue::function(|package| {
-                            package
-                                .clone()
-                                .attr_or("pname", package.clone().select_segments(["name"]))
-                                .equals(NixValue::from("airlock-start-usr-assistant-tailscale"))
-                        }))
-                        .call(
-                            lab_gui
-                                .clone()
-                                .select_segments(["environment", "systemPackages"]),
-                        ),
-                )
-                .bind(|tailscale_launcher| {
-                    usb_lab_network_and_development_access_3(
-                        tailscale_launcher,
-                        ctrl.clone(),
-                        dev.clone(),
-                        gui.clone(),
-                        host.clone(),
-                        lab_gui.clone(),
-                    )
-                })
-        })
+    f.select_segments([
+        "nixosConfigurations",
+        "airlock-domain-sys-gui-usb-lab",
+        "config",
+    ])
+    .bind(|lab_gui| {
+        usb_lab_network_and_development_access_3(
+            ctrl.clone(),
+            dev.clone(),
+            gui.clone(),
+            host.clone(),
+            lab_gui,
+        )
+    })
 }
 
 /// Build the usb lab test usb lab routes usr assistant through firewall and retains development

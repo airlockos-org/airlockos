@@ -183,9 +183,6 @@ fn configuration(display: Display) -> NixValue {
                     "sysGuiGuest": airlock.select("sysGuiGuest").merge_attrs(nix_record! {
                         "displayMode": "physical-amd-lab",
                         "physicalDesktopOnBoot": true,
-                        "usrAssistantTailscaleShortcut": nix_record! {
-                            "enable": false,
-                        },
                     }),
                 }),
                 "hardware": nix_record! {

@@ -180,9 +180,6 @@ pub(crate) fn physical_gui(inputs: &Inputs, vm: &VmSnapshot) -> Vec<NixValue> {
                     "displayMode": "physical-amd-lab",
                     "physicalDesktopOnBoot": true,
                     "defaultApplicationVM": default_application.as_str(),
-                    "usrAssistantTailscaleShortcut": nix_record! {
-                        "enable": true,
-                    },
                 },
                 "devDom0Terminal": nix_record! {
                     "guest": nix_record! {

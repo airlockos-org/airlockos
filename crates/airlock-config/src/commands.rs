@@ -247,11 +247,6 @@ pub(crate) fn contract<const N: usize>(
             &["runtime", "store-check"],
             false,
         ),
-        "usr-assistant-tailscale-enrollment" => (
-            "@service@/bin/airlock-sys-gui-service",
-            &["tailscale-enrollment"],
-            false,
-        ),
         "usr-assistant-tailscale-window" => (
             "@xterm@/bin/xterm",
             &[

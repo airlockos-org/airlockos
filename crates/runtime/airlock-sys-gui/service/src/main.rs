@@ -15,8 +15,6 @@ mod notifications;
 
 mod startup;
 
-mod enrollment;
-
 mod qubes;
 
 mod style;
@@ -73,21 +71,11 @@ enum Action {
         // Qubes VM whose supported RPC feature should be queried.
         name: airlock_nix_core::identity::GuestName,
     },
-    /// Wait for the network path and usr-assistant before requesting Tailscale enrollment.
-    #[command(name = command::TAILSCALE_ENROLLMENT)]
-    TailscaleEnrollment {
-        /// Maximum time to wait for the required VM readiness reports, in seconds.
-        #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u64).range(1..=900))]
-        startup_timeout: u64,
-    },
 }
 
 fn run(args: Args) -> Result<ExitCode> {
     match args.command {
         Action::SyncAppmenus { name } => return launch::sync_menus(name).map(ExitCode::from),
-        Action::TailscaleEnrollment { startup_timeout } => {
-            return enrollment::execute(startup_timeout).map(ExitCode::from);
-        }
         Action::Launch(request) => return launch::execute(request).map(ExitCode::from),
         Action::Gpu(request) => gpu::execute(request),
         Action::Menus { action } => menus::execute(action),

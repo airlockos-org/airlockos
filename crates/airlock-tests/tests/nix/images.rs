@@ -671,13 +671,6 @@ fn package_usb_lab_keeps_network_dependencies_and_development_authority_explicit
         &report["tailscalePolicy"],
         "airlock.DevTailscaleUp * @anyvm @anyvm deny",
     );
-    assert!(
-        text(&report["tailscaleLauncher"]["program"]).ends_with("/bin/airlock-sys-gui-service")
-    );
-    assert_eq!(
-        report["tailscaleLauncher"]["args"],
-        json!(["tailscale-enrollment"])
-    );
     includes(
         &report["tailscaleAssistantDesktop"],
         "Name=Connect Tailscale",

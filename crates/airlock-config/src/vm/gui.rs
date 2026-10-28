@@ -145,9 +145,6 @@ impl Gui<'_> {
                             "usr-home".into(),
                             "VM handling web links; null selects local applications.",
                         ),
-                        "usrAssistantTailscaleShortcut": nix_record! {
-                            "enable": enable("the development VM Tailscale enrollment shortcut"),
-                        },
                     },
                 },
             },
@@ -283,10 +280,6 @@ impl Gui<'_> {
                     .equals(NixValue::null())
                     .equals(false),
                 self.web_links(&launcher),
-            ),
-            self.optional(
-                self.setting("usrAssistantTailscaleShortcut.enable"),
-                self.enrollment(&service),
             ),
         ]);
         let qubes_gui = self.optional(hybrid.clone(), strings(&["qubes-gui-agent.service"]));
@@ -515,29 +508,6 @@ impl Gui<'_> {
         });
 
         NixValue::list([command, desktop])
-    }
-
-    /// Keep bootstrap readiness on the GUI side while the assistant owns the enrollment window.
-    fn enrollment(&self, service: &NixValue) -> NixValue {
-        let launcher = self.script(
-            "airlock-start-usr-assistant-tailscale",
-            crate::commands::contract(
-                &self.context.pkgs,
-                "usr-assistant-tailscale-enrollment",
-                [("service", service.clone())],
-            ),
-            true,
-        );
-        let desktop = self.package("makeDesktopItem").call(nix_record! {
-            "name": "airlock-start-usr-assistant-tailscale",
-            "desktopName": "Start usr-assistant Tailscale",
-            "comment": "Enroll usr-assistant in Tailscale and display the login URL",
-            "exec": "airlock-start-usr-assistant-tailscale",
-            "icon": airlock_build::desktop::ICON_NAME,
-            "categories": strings(&["System", "Network"]),
-        });
-
-        NixValue::list([launcher, desktop])
     }
 
     /// Supply the icon receiver's Admin API imports at the session boundary.
