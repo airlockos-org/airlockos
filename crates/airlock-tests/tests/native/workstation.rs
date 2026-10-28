@@ -730,8 +730,13 @@ fn development_recovery_and_build_select_exact_source() -> Result<()> {
 #[test]
 fn local_nix_keeps_prepared_source_leased_until_exit() -> Result<()> {
     let fixture = Repository::new()?;
-    let revision = fixture.advance_machine()?;
     let machine = fixture.root.join("airlock-machine");
+    fs::create_dir(machine.join("vms"))?;
+    let module = r#"{ test.payload = builtins.readFile ./payload.txt; }"#;
+    fs::write(machine.join("vms/usr-home.nix"), module)?;
+    fs::write(machine.join("vms/payload.txt"), "reviewed user data")?;
+    git(&machine, &["add", "vms"])?;
+    let revision = fixture.advance_machine()?;
     let refs = git(&machine, &["show-ref"])?;
     fixture.configure(json!({"prune": true, "nix_exit": 7}))?;
     let mut command = fixture.command(&["nix", "--", "build", ".#image"]);
@@ -760,6 +765,14 @@ fn local_nix_keeps_prepared_source_leased_until_exit() -> Result<()> {
     );
     assert!(!prepared.join(".git").exists());
     assert!(!prepared.join("target").exists());
+    assert_eq!(
+        fs::read_to_string(prepared.join("airlock-machine/vms/usr-home.nix"))?,
+        module
+    );
+    assert_eq!(
+        fs::read_to_string(prepared.join("airlock-machine/vms/payload.txt"))?,
+        "reviewed user data"
+    );
     assert!(prepared.join("flake.nix").is_file());
     let pruning: Value = serde_json::from_slice(&fs::read(fixture.path("pruning.json"))?)?;
     assert_eq!(pruning["candidates"], json!([]));

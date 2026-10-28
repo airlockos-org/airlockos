@@ -70,6 +70,7 @@ pub(crate) fn builders() -> PackageFunction {
             vec![
                 ("networkDebug", false.into()),
                 ("modulesDirectory", NixValue::null()),
+                ("userModulesDirectory", NixValue::null()),
                 ("airlockApps", NixValue::null()),
                 ("extraVmSpecialArgs", nix_record! {}),
             ],
@@ -90,6 +91,7 @@ fn request(inputs: &args::Inputs, base: NixValue, display: Display) -> NixValue 
     }
 
     modules.push(configuration(display));
+    modules.push(lowering::user_configuration(inputs, "sys-gui"));
 
     let request = base.clone().merge_attrs(nix_record! {
         "configurationName": display.configuration_name(),

@@ -56,6 +56,7 @@ pub(crate) fn entry_points(machine: &MachineSnapshot) -> Result<PackageFunction,
             "airlockSupport",
             "airlockApps",
             "modulesDirectory",
+            "userModulesDirectory",
             "kernelPackage",
             "dom0Module",
             "hybridGui",
@@ -76,6 +77,7 @@ pub(crate) fn entry_points(machine: &MachineSnapshot) -> Result<PackageFunction,
                             "airlockSupport": inputs.clone().select("airlockSupport"),
                             "airlockApps": inputs.clone().select("airlockApps"),
                             "modulesDirectory": inputs.clone().select("modulesDirectory"),
+                            "userModulesDirectory": inputs.clone().select("userModulesDirectory"),
                             "extraVmSpecialArgs": extra,
                         });
                     let normal = factories.bind(|factories| {
@@ -110,7 +112,7 @@ pub(crate) fn entry_points(machine: &MachineSnapshot) -> Result<PackageFunction,
                 }
             });
 
-            (Vec::<(&str, NixValue)>::new(), result)
+            (vec![("userModulesDirectory", NixValue::null())], result)
         },
     ))
 }

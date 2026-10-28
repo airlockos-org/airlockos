@@ -132,6 +132,9 @@ impl Repository {
         ));
         command.env("PATH", std::env::join_paths(paths).unwrap());
         command.env("AIRLOCK_TEST_WORKSTATION", self.temporary.path());
+        // Preparation now maintains a real compiler mirror even with an inert
+        // Cargo peer. Keep that output outside both committed fixture checkouts.
+        command.env("CARGO_TARGET_DIR", self.path("cargo-target"));
         command.env("AIRLOCK_NIX_CONFIGURED", "1");
         command.env(
             "NIX_CONFIG",

@@ -1,4 +1,4 @@
-//! Snapshot Rust source and emit a complete, inspectable Nix input in an ignored build directory.
+//! Snapshot machine source and emit a complete, inspectable Nix input in an ignored build directory.
 //! Preparation never evaluates Nix or authorizes a build or deployment.
 
 pub mod cache;
@@ -279,6 +279,8 @@ pub fn inspection(directory: &Path) -> Result<()> {
 
 /// Compile a machine-owned program against explicitly supplied application sources and vendor tree.
 /// Cargo build output stays outside the prepared tree; its resulting program receives the export path.
+/// A locked, stable source mirror preserves Cargo fingerprints across Nix-only edits and new snapshots.
+/// Cargo still tracks real compiler inputs, including files explicitly embedded by Rust code.
 pub fn compile(source: &Path, applications: &Path, destination: &Path) -> Result<()> {
     let vendor = std::env::var("AIRLOCK_CARGO_VENDOR").unwrap_or_else(|_| {
         applications
@@ -291,6 +293,92 @@ pub fn compile(source: &Path, applications: &Path, destination: &Path) -> Result
     let target = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| applications.join("target"));
+    compile_in(source, applications, destination, &target, &vendor)
+}
+
+/// Mirror captured sources without touching unchanged files or following source symlinks.
+/// Removing stale inputs lets Cargo observe deletions as well as additions and edits.
+fn mirror(source: &Path, destination: &Path) -> Result<()> {
+    if let Ok(existing) = fs::symlink_metadata(destination)
+        && !existing.is_dir()
+    {
+        remove(destination)?;
+    }
+    fs::create_dir_all(destination)?;
+    for entry in fs::read_dir(destination)? {
+        let entry = entry?;
+        match fs::symlink_metadata(source.join(entry.file_name())) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => remove(&entry.path())?,
+            Err(error) => return Err(error.into()),
+            Ok(_) => {}
+        }
+    }
+
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = destination.join(entry.file_name());
+        let metadata = fs::symlink_metadata(&from)?;
+        if metadata.is_dir() {
+            if let Ok(existing) = fs::symlink_metadata(&to)
+                && !existing.is_dir()
+            {
+                remove(&to)?;
+            }
+            mirror(&from, &to)?;
+        } else {
+            if fs::symlink_metadata(&to).is_ok_and(|m| !m.is_dir())
+                && digest(&from)? == digest(&to)?
+            {
+                continue;
+            }
+            if fs::symlink_metadata(&to).is_ok() {
+                remove(&to)?;
+            }
+            if metadata.file_type().is_symlink() {
+                std::os::unix::fs::symlink(fs::read_link(&from)?, &to)?;
+            } else {
+                fs::copy(&from, &to)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Delete one mirror entry without following a symlink to an external directory.
+fn remove(path: &Path) -> Result<()> {
+    if fs::symlink_metadata(path)?.is_dir() {
+        fs::remove_dir_all(path)?;
+    } else {
+        fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+/// Serialize compiler mirror updates and execution while keeping emission tied to the fresh snapshot.
+fn compile_in(
+    source: &Path,
+    applications: &Path,
+    destination: &Path,
+    target: &Path,
+    vendor: &str,
+) -> Result<()> {
+    fs::create_dir_all(target)?;
+    let target = fs::canonicalize(target)?;
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(target.join("airlock-machine-source.lock"))?;
+    lock.lock()?;
+    let compiler_source = target.join("airlock-machine-source");
+    if compiler_source.starts_with(fs::canonicalize(source)?) {
+        return Err("compiler mirror must be outside the captured source".into());
+    }
+    mirror(source, &compiler_source)?;
+
     let status = Command::new("cargo")
         .current_dir(source)
         .args([
@@ -310,11 +398,11 @@ pub fn compile(source: &Path, applications: &Path, destination: &Path) -> Result
                 )
             ),
             "run",
-            "--locked",
-            "--offline",
-            "--target-dir",
+            "--manifest-path",
         ])
-        .arg(target)
+        .arg(compiler_source.join("Cargo.toml"))
+        .args(["--locked", "--offline", "--target-dir"])
+        .arg(&target)
         .args(["--", "--emit"])
         .arg(destination)
         .stdout(Stdio::null())
@@ -377,4 +465,153 @@ pub fn development_leased(source: &Path, cache: &Path) -> Result<(PathBuf, cache
 
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Mirroring new snapshots preserves compiler input timestamps and tracks changed or deleted user files.
+    #[test]
+    fn mirror_preserves_unchanged_inputs_and_replaces_stale_entries() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let source = temporary.path().join("source");
+        let destination = temporary.path().join("compiler");
+        fs::create_dir_all(source.join("vms"))?;
+        fs::write(source.join("main.rs"), "fn main() {}")?;
+        fs::write(source.join("vms/home.nix"), "{}")?;
+        mirror(&source, &destination)?;
+        let modified = fs::metadata(destination.join("main.rs"))?.modified()?;
+
+        fs::write(
+            source.join("vms/home.nix"),
+            "{ imports = [ ./shared.nix ]; }",
+        )?;
+        fs::write(source.join("vms/shared.nix"), "{}")?;
+        fs::write(destination.join("stale.rs"), "old input")?;
+        mirror(&source, &destination)?;
+        assert_eq!(
+            fs::metadata(destination.join("main.rs"))?.modified()?,
+            modified
+        );
+        assert_eq!(
+            fs::read(source.join("vms/home.nix"))?,
+            fs::read(destination.join("vms/home.nix"))?
+        );
+        assert!(destination.join("vms/shared.nix").is_file());
+        assert!(!destination.join("stale.rs").exists());
+
+        // A cached directory must not redirect synchronization outside the mirror.
+        fs::remove_dir_all(destination.join("vms"))?;
+        let external = temporary.path().join("external");
+        fs::create_dir(&external)?;
+        std::os::unix::fs::symlink(&external, destination.join("vms"))?;
+        mirror(&source, &destination)?;
+        assert!(destination.join("vms/home.nix").is_file());
+        assert!(!external.join("home.nix").exists());
+        Ok(())
+    }
+
+    /// Real Cargo reuses the compiler across snapshot paths while emission sees fresh Nix files.
+    #[test]
+    #[ignore = "requires explicitly prepared Cargo"]
+    fn external_tool_nix_only_snapshots_reuse_rust_compiler() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let first = temporary.path().join("first");
+        let second = temporary.path().join("second");
+        let apps = temporary.path().join("apps");
+        let target = temporary.path().join("target");
+        let vendor = temporary.path().join("vendor");
+        fs::create_dir_all(first.join("src"))?;
+        fs::create_dir_all(first.join("vms"))?;
+        fs::create_dir_all(apps.join("airlock-config/src"))?;
+        fs::create_dir(&vendor)?;
+        fs::write(
+            apps.join("airlock-config/Cargo.toml"),
+            r#"
+            [package]
+            name = "airlock-config"
+            version = "0.1.0"
+            edition = "2024"
+            publish = false
+        "#,
+        )?;
+        fs::write(apps.join("airlock-config/src/lib.rs"), "")?;
+        fs::write(
+            first.join("Cargo.toml"),
+            r#"
+            [package]
+            name = "compiler-fixture"
+            version = "0.1.0"
+            edition = "2024"
+            publish = false
+        "#,
+        )?;
+        let program = r#"
+            /// Export the current snapshot's module, leaving its contents outside compiler inputs.
+            fn main() -> std::io::Result<()> {
+                let destination = std::env::args_os().nth(2).unwrap();
+                std::fs::create_dir_all(&destination)?;
+
+                std::fs::write(
+                    std::path::Path::new(&destination).join("result"),
+                    std::fs::read("vms/home.nix")?,
+                )
+            }
+        "#;
+        fs::write(first.join("src/main.rs"), program)?;
+        fs::write(first.join("vms/home.nix"), "first module")?;
+        let patch = format!(
+            "patch.crates-io.airlock-config.path={path:?}",
+            path = apps.join("airlock-config")
+        );
+        assert!(
+            Command::new("cargo")
+                .current_dir(&first)
+                .args(["--config", &patch, "generate-lockfile", "--offline"])
+                .status()?
+                .success()
+        );
+        compile_in(
+            &first,
+            &apps,
+            &temporary.path().join("out-first"),
+            &target,
+            vendor.to_str().unwrap(),
+        )?;
+        let executable = target.join("debug/compiler-fixture");
+        let modified = fs::metadata(&executable)?.modified()?;
+        let bytes = fs::read(&executable)?;
+
+        mirror(&first, &second)?;
+        fs::write(second.join("vms/home.nix"), "second module")?;
+        compile_in(
+            &second,
+            &apps,
+            &temporary.path().join("out-second"),
+            &target,
+            vendor.to_str().unwrap(),
+        )?;
+        assert_eq!(fs::metadata(&executable)?.modified()?, modified);
+        assert_eq!(fs::read(&executable)?, bytes);
+        assert_eq!(
+            fs::read_to_string(temporary.path().join("out-second/result"))?,
+            "second module"
+        );
+
+        fs::write(
+            second.join("src/main.rs"),
+            program.replace("\"result\"", "\"changed-result\""),
+        )?;
+        compile_in(
+            &second,
+            &apps,
+            &temporary.path().join("out-third"),
+            &target,
+            vendor.to_str().unwrap(),
+        )?;
+        assert_ne!(fs::read(&executable)?, bytes);
+        assert!(temporary.path().join("out-third/changed-result").is_file());
+        Ok(())
+    }
 }

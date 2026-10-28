@@ -139,6 +139,7 @@ impl Build {
                     .call(path.to_text());
                 [
                     "assets",
+                    "vms",
                     "bootstrap",
                     "scripts",
                     "patches",
@@ -331,7 +332,9 @@ pub(super) fn outputs() -> NixValue {
                                 "modulesDirectory": source.join_relative("generated/bootstrap").unwrap(),
                             })),
                         "displays": crate::displays::builders().as_expression()
-                            .call(factory_inputs.clone()),
+                            .call(factory_inputs.clone().merge_attrs(nix_record! {
+                                "userModulesDirectory": source.join_relative("vms").unwrap(),
+                            })),
                     };
 
                     factories.bind(|shared| {
@@ -352,6 +355,7 @@ pub(super) fn outputs() -> NixValue {
                             .call(
                                 factory_inputs.merge_attrs(nix_record! {
                                     "modulesDirectory": source.join_relative("generated/machine").unwrap(),
+                                    "userModulesDirectory": source.join_relative("vms").unwrap(),
                                     "kernelPackage": build.kernel("x86_64-linux".into()).select("package"),
                                     "dom0Module": build.output("nixosModules.dom0"),
                                     "hybridGui": build.shared.clone().select("displays.hybrid"),

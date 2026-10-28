@@ -8,6 +8,9 @@
   Generated Nix remains the build interface to upstream NixOS and Qubes.
   Keep it outside Git in prepared source artifacts; commit Rust and locks. Keep
   existing Qubes runtime state such as `qubes.xml` where its architecture requires it.
+- User-owned NixOS customization belongs in the machine repository's `vms/VM.nix`
+  modules. Keep these editable source files in Git and include them in reviewed
+  snapshots; Rust/Rusix owns the surrounding machine structure and integration.
 - For physical lab development, read `docs/development-operations.md` first. Change
   and commit this repo, then use `make machine-plan` / `make machine-apply`
   with `DEPLOY_TARGET=...`; verify the resulting whole-machine generation.
@@ -47,7 +50,8 @@
   use passing-test counts as a measure of coverage quality.
 - Routine package-list additions/removals do not require documentation updates
   unless they change documented behavior, instructions or supported capabilities.
-  Keep package selections in their Rust component; link there rather than maintain
+  Keep first-party package selections in their Rust component and user VM selections
+  in their NixOS module; link there rather than maintain
   package inventories or installation/removal logs in docs. Git and deployment
   records provide the change history. Preserve dated validation evidence.
 - Keep `test-quick` free of Nix evaluations, builds and automatic tool provisioning.

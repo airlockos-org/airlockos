@@ -56,6 +56,9 @@ pub(super) fn configuration(candidate: &Candidate, sources: &Sources) -> NixValu
                 "modulesDirectory": NixPath::from_expression(inputs.clone().select("self"))
                     .join_relative("generated")
                     .unwrap(),
+                "userModulesDirectory": NixPath::from_expression(inputs.clone().select("self"))
+                    .join_relative("vms")
+                    .unwrap(),
                 "extraVmSpecialArgs": nix_record! {
                     "airlockConfigInputs": config_inputs.clone(),
                 },

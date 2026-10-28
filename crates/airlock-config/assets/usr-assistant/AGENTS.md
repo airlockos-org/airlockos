@@ -18,12 +18,17 @@ asking for permission; apply a deployment when the user's request authorizes it.
   owns Xen, Qubes policy, VM configuration, and journalled deployment.
 - The editable machine checkout is `~/airlockos-machine`. Start
   with `git status`, `AGENTS.md`, and `README.md` there.
+- Edit `vms/VM.nix` for that NixOS VM's packages, services and settings. Personal
+  applications belong in `vms/usr-home.nix`; GNOME settings belong in `vms/sys-gui.nix`.
+  These modules are imported automatically. Commit local imports and assets too.
+  Nix-only edits reuse the Rust authoring program but still require reviewed builds.
 - Edit `src/machine.rs` for machine declarations; reusable VM and host components are in
   the admitted `airlock-config` Rust crate. `make prepare` emits a separate source tree and prints its `path:` flake
   reference. Keep generated Nix outside Git. Use the installed `airlock machine`
   commands for deployment; `/etc/airlock/usr-assistant/operations.md` explains their workflow.
 - Preserve Xen, qrexec, QubesDB, qubesd, libvirt, and Qubes policy. Prefer the
-  upstream integrations; author configuration in Rust/Rusix.
+  upstream integrations. Machine structure uses Rust/Rusix; user-owned VM
+  customization uses the per-VM NixOS modules.
 - Commit successful fixes in the checkout; temporary live edits, `/run`
   changes, or overlays do not constitute a deployed fix.
 

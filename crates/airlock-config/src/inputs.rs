@@ -20,6 +20,8 @@ pub(crate) mod args {
         network_debug: bool,
         /// Directory containing the separately compiled Rust-authored VM modules.
         modules_directory: NixPath,
+        /// Optional user-owned NixOS modules, selected by VM name from the reviewed source.
+        user_modules_directory: NixPath,
         /// Source of the existing controller and CLI packages.
         airlock_apps: NixPath,
         /// Build-worker inputs forwarded to controller and assistant systems.

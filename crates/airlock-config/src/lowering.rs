@@ -121,6 +121,7 @@ pub(crate) fn builders(machine: &MachineSnapshot) -> PackageFunction {
             vec![
                 ("networkDebug", false.into()),
                 ("modulesDirectory", NixValue::null()),
+                ("userModulesDirectory", NixValue::null()),
                 ("airlockApps", NixValue::null()),
                 ("extraVmSpecialArgs", nix_record! {}),
             ],
@@ -251,6 +252,7 @@ pub(crate) fn domain(inputs: &Inputs, vm: &VmSnapshot) -> DomainArguments {
     }
 
     modules.extend(physical_settings);
+    modules.push(user_configuration(inputs, &name));
 
     DomainArguments {
         name: name.clone(),
@@ -324,6 +326,25 @@ pub(crate) fn domain(inputs: &Inputs, vm: &VmSnapshot) -> DomainArguments {
             })
         },
     }
+}
+
+/// Import the VM's optional user module through ordinary NixOS module merging.
+/// The path remains a Nix input: Rust never reads or embeds the module contents.
+pub(crate) fn user_configuration(inputs: &Inputs, name: &str) -> NixValue {
+    let directory = inputs.user_modules_directory();
+    let path = directory
+        .join_relative(&format!("{name}.nix"))
+        .expect("validated VM name");
+    let imports = NixValue::if_else(
+        directory.as_expression().equals(NixValue::null()),
+        NixValue::list([]),
+        NixValue::if_else(
+            NixValue::builtin("pathExists").call(path.clone()),
+            NixValue::list([path.as_expression()]),
+            NixValue::list([]),
+        ),
+    );
+    nix_record! { "imports": imports }
 }
 
 /// Preserve the common reference type's omission, null, empty and named Nix values.
