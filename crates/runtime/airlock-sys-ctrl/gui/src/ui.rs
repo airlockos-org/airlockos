@@ -193,7 +193,7 @@ impl Controller {
     fn blocker(&self) -> Option<&str> {
         if let Some(session) = &self.approval {
             if session.scope().is_none() {
-                return Some("Enter valid permitted VM names in Deployment plan.");
+                return Some("Enter valid permitted VM names in Deployment scope.");
             }
             if self.review.files.iter().any(|file| file.opaque.is_some()) {
                 return Some("Some changed files cannot be displayed. Approval is disabled.");
@@ -239,7 +239,12 @@ impl eframe::App for Controller {
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut self.tab, Tab::Source, "Source changes");
-                    ui.selectable_value(&mut self.tab, Tab::Plan, "Deployment plan");
+                    let deployment_label = if self.approval.is_some() {
+                        "Deployment scope"
+                    } else {
+                        "Deployment plan"
+                    };
+                    ui.selectable_value(&mut self.tab, Tab::Plan, deployment_label);
                     ui.selectable_value(&mut self.tab, Tab::Record, "Review record");
                     let show_copy_label = ui.available_width() >= 130.0;
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

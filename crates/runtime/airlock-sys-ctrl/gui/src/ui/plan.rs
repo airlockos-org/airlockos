@@ -5,7 +5,7 @@ use super::*;
 impl Controller {
     pub(super) fn plan(&mut self, ui: &mut egui::Ui) {
         if let Some(session) = &mut self.approval {
-            ui.heading("Deployment impact");
+            ui.heading("Deployment scope");
             ui.label(RichText::new("The final deployment plan will be computed after building. Deployment stops if it exceeds the permitted VM impact. Approve includes changes that require a reboot.").color(MUTED));
             ui.add_space(16.0);
             ui.label("VMs allowed to change, start, stop or restart");
