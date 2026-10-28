@@ -1,15 +1,10 @@
-//! Typed Xen framing for the Airlock clipboard, separate from its pure policy.
+//! Typed Xen framing and the Hermit service for the shared Airlock clipboard.
 //!
-//! The laboratory authority is feature gated and trusts only the provisioned dom0
-//! endpoint. A production adapter must obtain decisions from Qubes GUI policy.
+//! The boot-provisioned GUI authority admits participants to direct Xen channels.
+//! Clipboard ownership and transfer policy live in `airlock-clipboard-core`.
 #![warn(missing_docs)]
-
-pub mod protocol;
 
 pub mod shared;
 
 #[cfg(target_os = "hermit")]
 pub mod service;
-
-#[cfg(feature = "lab-authority")]
-pub mod laboratory;

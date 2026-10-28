@@ -5,12 +5,7 @@ edition = "2024"
 rust-version = "1.89"
 publish = false
 license = "MIT"
-description = "Hermit clipboard transport adapter and controlled Xen laboratory peer"
-
-[features]
-default = []
-lab-authority = []
-linux-peer = ["lab-authority", "xen-transport/linux"]
+description = "Hermit shared clipboard service and Xen transport protocol"
 
 [dependencies]
 airlock-clipboard-core = { path = "../../airlock-common/clipboard" }
@@ -24,8 +19,3 @@ xen-transport = { git = "https://github.com/airlockos-org/hermit-xen", rev = "03
 [[bin]]
 name = "sys-clipboard"
 path = "src/bin/hermit.rs"
-
-[[bin]]
-name = "clipboard-peer"
-path = "src/bin/peer.rs"
-required-features = ["linux-peer"]

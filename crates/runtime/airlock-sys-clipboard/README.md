@@ -19,7 +19,6 @@ The shared core keeps source identity, connection epoch and generation separate
 from desktop format handling. Its access boundary currently permits every admitted
 participant to read and replace the clipboard. This is the extension point for
 future modes; no protected mode or user-gesture authorization is implemented.
-The older approval-based laboratory fixture is separate from production behavior.
 
 The desktop adapter uses the existing Qubes X servers and sys-gui's Xwayland
 selection bridge. It handles binary representations and incremental transfers,

@@ -12,10 +12,6 @@ description = "Airlock development workstation operations"
 name = "airlock-dev"
 path = "src/main.rs"
 
-[[bin]]
-name = "clipboard-lab"
-path = "src/bin/clipboard-lab.rs"
-
 [dependencies]
 airlock-config = { path = "../../airlock-config" }
 airlock-image = { path = "../airlock-image", default-features = false }
