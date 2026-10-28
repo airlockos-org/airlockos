@@ -889,6 +889,47 @@ fn namespace_foreground_boot_respects_clipboard_gui_authority() -> Result<()> {
         .unwrap()
         .push(json!("sys-gui"));
     machine.persist()?;
+    machine.data["reported_systems"] =
+        json!({"sys-gui":"/nix/store/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-other-gui"});
+    machine.persist()?;
+    error(
+        &machine.run(&["boot-foreground"], None, false)?,
+        "GUI running generation differs",
+    );
+    machine.reload()?;
+    machine.data["reported_systems"] = json!({});
+    machine.data["xid_observations"] = json!({"sys-gui":[1,2]});
+    machine.persist()?;
+    error(
+        &machine.run(&["boot-foreground"], None, false)?,
+        "GUI restarted during startup readiness",
+    );
+    machine.reload()?;
+    machine.data["xid_observations"] = json!({"sys-gui":[1]});
+    machine.data["restart_gui_after_start"] = json!("sys-clipboard");
+    machine.persist()?;
+    error(
+        &machine.run(&["boot-foreground"], None, false)?,
+        "GUI restarted during foreground startup",
+    );
+    let partial = machine
+        .calls()?
+        .into_iter()
+        .filter(|call| call[0] == "airlock-start-qube-ready")
+        .map(|call| call[1].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        partial,
+        [json!("sys-net"), json!("sys-clipboard")],
+        "a restarted GUI must prevent home startup"
+    );
+    machine.reload()?;
+    machine
+        .data
+        .as_object_mut()
+        .unwrap()
+        .remove("restart_gui_after_start");
+    machine.persist()?;
     let after = machine.run(&["boot-foreground"], None, true)?;
     assert_eq!(after["started"], json!(["sys-clipboard", "usr-home"]));
     let starts = machine
@@ -899,7 +940,20 @@ fn namespace_foreground_boot_respects_clipboard_gui_authority() -> Result<()> {
         .collect::<Vec<_>>();
     assert_eq!(
         starts,
-        [json!("sys-net"), json!("sys-clipboard"), json!("usr-home")]
+        [
+            json!("sys-net"),
+            json!("sys-clipboard"),
+            json!("sys-clipboard"),
+            json!("usr-home")
+        ]
+    );
+    machine.reload()?;
+    machine.data["reported_systems"] =
+        json!({"sys-gui":"/nix/store/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-other-gui"});
+    machine.persist()?;
+    error(
+        &machine.run(&["boot-foreground"], Some(after), false)?,
+        "GUI running generation differs",
     );
     Ok(())
 }

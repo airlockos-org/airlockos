@@ -84,7 +84,19 @@ pub fn execute(root: &Path, program: &str, original: &[String]) -> Result<()> {
             );
         }
         "qvm-ls" => {
-            if arguments.iter().any(|value| value == "--raw-list") {
+            if option(arguments, "--fields").ok() == Some("XID") {
+                let name = last()?;
+                let xid = if let Some(values) = data["xid_observations"][name].as_array_mut() {
+                    let value = values.first().context("fixture Xen identity")?.clone();
+                    if values.len() > 1 {
+                        values.remove(0);
+                    }
+                    value.as_u64().context("fixture Xen identity number")?
+                } else {
+                    1
+                };
+                println!("{xid}");
+            } else if arguments.iter().any(|value| value == "--raw-list") {
                 println!("dom0");
                 for name in data["selected"].as_object().unwrap().keys() {
                     println!("{name}");
@@ -419,9 +431,11 @@ pub fn execute(root: &Path, program: &str, original: &[String]) -> Result<()> {
             let generation = &data["selected"][name];
             println!(
                 "{system}",
-                system = data["generations"][format!("{name}:{generation}")]["system"]
-                    .as_str()
-                    .unwrap()
+                system = data["reported_systems"][name].as_str().unwrap_or_else(|| {
+                    data["generations"][format!("{name}:{generation}")]["system"]
+                        .as_str()
+                        .unwrap()
+                })
             );
         }
         "airlock-setup-config" => {
@@ -633,6 +647,9 @@ pub fn execute(root: &Path, program: &str, original: &[String]) -> Result<()> {
                     data["running"].as_array().unwrap().contains(&json!(gui)),
                     "clipboard GUI authority must be running"
                 );
+            }
+            if data["restart_gui_after_start"] == arguments[0] {
+                data["xid_observations"] = json!({"sys-gui":[2]});
             }
         }
         "nix-env" => {}

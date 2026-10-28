@@ -1,7 +1,9 @@
 //! Supervise boot stages without allowing a failed hardware check to become a successful boot.
 
 use airlock_build::{Workspace, script::substitute, tools::Tool};
-use airlock_machine_core::boot::{BOOT_UNIT_OVERHEAD_SECONDS, GUEST_HELPER_SECONDS};
+use airlock_machine_core::boot::{
+    BOOT_UNIT_OVERHEAD_SECONDS, GUEST_HELPER_SECONDS, GUI_OBSERVATION_SECONDS,
+};
 use rusix::{
     interop::{
         NixExpression, NixPath,
@@ -125,8 +127,16 @@ fn configuration(context: &ModuleContext, service: NixValue, start_ready: NixVal
         .call(BOOT_UNIT_OVERHEAD_SECONDS as i64)
         .call(
             NixValue::builtin("mul")
-                .call(domains)
+                .call(domains.clone())
                 .call(GUEST_HELPER_SECONDS as i64),
+        );
+    // One GUI observation admits the phase; every deferred guest is bracketed by two more.
+    let gui_budget = NixValue::builtin("add")
+        .call((BOOT_UNIT_OVERHEAD_SECONDS + GUI_OBSERVATION_SECONDS) as i64)
+        .call(
+            NixValue::builtin("mul")
+                .call(domains)
+                .call((GUEST_HELPER_SECONDS + 2 * GUI_OBSERVATION_SECONDS) as i64),
         );
     let mut services = vec![
         (
@@ -300,7 +310,7 @@ fn configuration(context: &ModuleContext, service: NixValue, start_ready: NixVal
         ),
         (
             "airlock-start-gui-gpu",
-            guarded(failure.clone(), sequential_budget.clone()),
+            guarded(failure.clone(), gui_budget),
         ),
         (
             "airlock-input-boot-guard",

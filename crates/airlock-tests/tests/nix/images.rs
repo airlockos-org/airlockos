@@ -448,6 +448,22 @@ fn usb_startup_gates_are_acyclic_and_preserve_health_budgets() -> Result<()> {
         &units["airlock-start-gui-gpu.service"]["post"][0],
         "boot-foreground --topology /run/airlock/startup/topology.json",
     );
+    includes(
+        &units["airlock-setup-config.service"]["start"],
+        "boot-setup --gui",
+    );
+    includes(
+        &units["airlock-start-gui-gpu.service"]["requires"],
+        "airlock-setup-config.service",
+    );
+    includes(
+        &units["airlock-start-gui-gpu.service"]["after"],
+        "airlock-setup-config.service",
+    );
+    includes(
+        &units["airlock-start-gui-gpu.service"]["start"],
+        "airlock-start-qube-ready sys-gui /run/airlock/startup/topology.json",
+    );
     assert!(
         !units["airlock-setup-config-deferred.service"]["pre"]
             .to_string()
@@ -457,7 +473,15 @@ fn usb_startup_gates_are_acyclic_and_preserve_health_budgets() -> Result<()> {
     let guest_budget = units["airlock-start-gui-gpu.service"]["timeout"]
         .as_u64()
         .unwrap();
-    assert!(guest_budget >= 240 + 180 + 120);
+    let guests = report["domains"].as_array().unwrap().len() as u64;
+    assert!(
+        guest_budget
+            >= guests
+                * (airlock_machine_core::boot::GUEST_HELPER_SECONDS
+                    + 2 * airlock_machine_core::boot::GUI_OBSERVATION_SECONDS)
+                + airlock_machine_core::boot::GUI_OBSERVATION_SECONDS
+                + airlock_machine_core::boot::BOOT_UNIT_OVERHEAD_SECONDS
+    );
     for name in [
         "airlock-start-gui-gpu.service",
         "airlock-start-network-providers.service",
