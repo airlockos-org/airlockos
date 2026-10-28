@@ -2,6 +2,41 @@
 
 use airlock_deployment_core::boot::{DomainState, Handoff, Reuse, Selection};
 
+/// All canonical guests appear once, and every hard edge respects the GUI phase boundary.
+#[test]
+fn foreground_schedule_checks_complete_partition_and_every_hard_edge() {
+    use airlock_deployment_core::boot::startup::{Phase, Plan};
+    let parents = vec![vec![], vec![], vec![1], vec![0, 2], vec![0]];
+    let stages = vec![
+        Phase::BeforeGui,
+        Phase::Gui,
+        Phase::AfterGui,
+        Phase::AfterGui,
+        Phase::BeforeGui,
+    ];
+    let plan = Plan::check(&parents, 1, stages.clone()).unwrap();
+    for (i, phase) in stages.iter().enumerate() {
+        assert!(plan.phase(i) == Some(*phase));
+    }
+    assert!(plan.phase(stages.len()).is_none());
+    assert!(Plan::check(&parents, 1, stages[..4].to_vec()).is_none());
+    let mut invalid = stages.clone();
+    invalid[2] = Phase::BeforeGui;
+    assert!(
+        Plan::check(&parents, 1, invalid).is_none(),
+        "clipboard cannot precede GUI authority"
+    );
+    let mut invalid = stages.clone();
+    invalid[4] = Phase::Gui;
+    assert!(
+        Plan::check(&parents, 1, invalid).is_none(),
+        "GUI handoff cannot occur twice"
+    );
+    let mut cyclic = parents;
+    cyclic[1] = vec![2];
+    assert!(Plan::check(&cyclic, 1, stages).is_none());
+}
+
 /// A mixed image needs a host kernel and a Hermit executable, while Linux payloads stay separate.
 fn image_requirements() -> airlock_deployment_core::boot::artifacts::Requirements {
     use airlock_deployment_core::boot::artifacts::{Guest, Requirements};

@@ -8,6 +8,8 @@ pub mod acceptance;
 
 pub mod artifacts;
 
+pub mod startup;
+
 mod selection;
 
 pub use selection::{Argument, BootField, RootRequest, SelectedGeneration, SetupRequest};

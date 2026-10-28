@@ -10,6 +10,8 @@ use std::collections::BTreeSet;
 
 pub mod artifacts;
 
+pub mod startup;
+
 /// Default budget for Qubes to start one guest, before readiness polling begins.
 pub const GUEST_START_SECONDS: u64 = 240;
 
@@ -21,6 +23,12 @@ pub const GUEST_HELPER_SECONDS: u64 = GUEST_START_SECONDS + GUEST_READY_SECONDS 
 
 /// Additional time for systemd pre/post commands surrounding the native helper.
 pub const BOOT_UNIT_OVERHEAD_SECONDS: u64 = 120;
+
+/// Maximum duration of one fixed Qubes query used to bind GUI readiness.
+pub const GUI_PROBE_SECONDS: u64 = 15;
+
+/// Two power checks, two Xen-identity queries and one generation query per observation.
+pub const GUI_OBSERVATION_SECONDS: u64 = 5 * GUI_PROBE_SECONDS;
 
 /// Select the GUI, explicitly foreground guests and their local dependency closure.
 /// These VMs must be configured and usable before desktop readiness completes startup.
