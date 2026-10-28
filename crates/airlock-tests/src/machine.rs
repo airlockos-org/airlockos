@@ -621,7 +621,21 @@ pub fn execute(root: &Path, program: &str, original: &[String]) -> Result<()> {
                 }
             }
         }
-        "nix-env" | "airlock-start-qube-ready" => {}
+        "airlock-start-qube-ready" => {
+            let topology: Value =
+                serde_json::from_slice(&fs::read(arguments.get(1).context("boot topology")?)?)?;
+            let domain = &topology["domains"][&arguments[0]];
+            if domain["backend"]["artifact"]["authority"] == "normal" {
+                let gui = domain["features"]["airlock-clipboard-authority"]
+                    .as_str()
+                    .context("clipboard GUI authority")?;
+                ensure!(
+                    data["running"].as_array().unwrap().contains(&json!(gui)),
+                    "clipboard GUI authority must be running"
+                );
+            }
+        }
+        "nix-env" => {}
         _ => bail!("unexpected machine peer {program}"),
     }
     // The concurrent validation driver must not overwrite data its child updated.

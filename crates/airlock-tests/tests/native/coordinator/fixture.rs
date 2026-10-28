@@ -455,7 +455,11 @@ impl Machine {
     pub fn configure_boot(&mut self, foreign_alias: bool) -> Result<()> {
         let baseline = self.physical(&self.baseline);
         let mut topology = read(baseline.join("topology.json"))?;
-        topology["domains"]["sys-gui"] = declaration("sys-gui", 1);
+        topology["domains"]
+            .as_object_mut()
+            .unwrap()
+            .entry("sys-gui")
+            .or_insert_with(|| declaration("sys-gui", 1));
         save(self.path("etc/qubes-topology.json"), &topology)?;
         save(baseline.join("topology.json"), &topology)?;
         self.data["running"]

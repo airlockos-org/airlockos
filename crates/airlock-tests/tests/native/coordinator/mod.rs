@@ -846,6 +846,64 @@ fn namespace_boot_cache_checks_persistent_disks_before_reuse() -> Result<()> {
     Ok(())
 }
 
+/// GUI authority and its transitive clients start after the guarded handoff; network providers can start first.
+#[test]
+#[ignore = "requires explicitly prepared bubblewrap and unprivileged user namespaces"]
+fn namespace_foreground_boot_respects_clipboard_gui_authority() -> Result<()> {
+    let mut machine = hermit::mixed()?;
+    let path = machine.physical(&machine.baseline).join("topology.json");
+    let mut topology = read(&path)?;
+    topology["domains"]["sys-gui"] = declaration("sys-gui", 1);
+    topology["domains"]["sys-gui"]["services"]["guivm"] = json!(true);
+    topology["domains"]["sys-net"] = declaration("sys-net", 1);
+    topology["domains"]["usr-home"]["netvm"] = json!("sys-net");
+    topology["domains"]["usr-home"]["features"]["airlock-boot-foreground"] = json!("1");
+    topology["domains"]["usr-home"]["features"]["airlock-clipboard-service"] =
+        json!("sys-clipboard");
+    topology["domains"]["sys-clipboard"]["features"]["airlock-clipboard-authority"] =
+        json!("sys-gui");
+    topology["domains"]["sys-clipboard"]["prefs"]["memory"] = json!(128);
+    topology["domains"]["sys-clipboard"]["prefs"]["maxmem"] = json!(128);
+    topology["domains"]["sys-clipboard"]["backend"]["artifact"]["authority"] = json!("normal");
+    save(path, &topology)?;
+    machine.configure_boot(false)?;
+    machine.data["running"] = json!([]);
+    machine.persist()?;
+
+    machine.run(&["boot-setup", "--gui", SETUP, "--apply"], None, true)?;
+    let before = machine
+        .calls()?
+        .into_iter()
+        .filter(|call| call[0] == "airlock-start-qube-ready")
+        .map(|call| call[1].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(before, [json!("sys-net")]);
+    error(
+        &machine.run(&["boot-foreground"], None, false)?,
+        "sys-gui must be running",
+    );
+
+    machine.reload()?;
+    machine.data["running"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("sys-gui"));
+    machine.persist()?;
+    let after = machine.run(&["boot-foreground"], None, true)?;
+    assert_eq!(after["started"], json!(["sys-clipboard", "usr-home"]));
+    let starts = machine
+        .calls()?
+        .into_iter()
+        .filter(|call| call[0] == "airlock-start-qube-ready")
+        .map(|call| call[1].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        starts,
+        [json!("sys-net"), json!("sys-clipboard"), json!("usr-home")]
+    );
+    Ok(())
+}
+
 /// Pruning requires exact confirmation and rechecks selected and manually retained recovery references.
 #[test]
 #[ignore = "requires explicitly prepared bubblewrap and unprivileged user namespaces"]

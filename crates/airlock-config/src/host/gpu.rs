@@ -235,7 +235,7 @@ fn reservation(
         "/var/lib/airlock/system/current-topology.json",
     );
     let network = NixValue::if_else(
-        split.equals(false).and(
+        split.clone().equals(false).and(
             context
                 .config
                 .clone()
@@ -252,6 +252,12 @@ fn reservation(
     let sync: NixValue = nix_text!(
         "{systemd}/bin/journalctl --sync",
         systemd = context.pkgs.clone().select("systemd"),
+    )
+    .into();
+    let foreground: NixValue = nix_text!(
+        "{executable} boot-foreground --topology {topology}",
+        executable = executable.clone(),
+        topology = topology.clone(),
     )
     .into();
     let service_config = nix_record! {
@@ -293,7 +299,14 @@ fn reservation(
             start = start,
             topology = topology,
         ),
-        "ExecStartPost": sync,
+        "ExecStartPost": NixValue::concat_lists([
+            NixValue::if_else(
+                split.clone(),
+                NixValue::list([foreground]),
+                NixValue::list([]),
+            ),
+            NixValue::list([sync]),
+        ]),
         "Restart": "no",
     };
 

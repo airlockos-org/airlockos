@@ -131,6 +131,12 @@ enum Action {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<std::ffi::OsString>,
     },
+    /// Finish foreground startup after the guarded GUI has become ready.
+    BootForeground {
+        // Image topology used only without a selected machine deployment.
+        #[arg(long, default_value = "/etc/airlock/qubes-topology.json")]
+        topology: PathBuf,
+    },
     /// Start declared autostart VMs after setup and hardware guards.
     BootStart {
         // Default topology used only without a selected deployment.
@@ -345,6 +351,7 @@ fn run(args: Args) -> Result<Value> {
             gui,
             background,
         } => c.boot_setup(setup, args, gui, background)?,
+        Action::BootForeground { topology } => c.boot_foreground(&topology)?,
         Action::BootStart {
             topology,
             require_running,

@@ -300,10 +300,7 @@ fn configuration(context: &ModuleContext, service: NixValue, start_ready: NixVal
         ),
         (
             "airlock-start-gui-gpu",
-            guarded(
-                failure.clone(),
-                ((GUEST_HELPER_SECONDS + BOOT_UNIT_OVERHEAD_SECONDS) as i64).into(),
-            ),
+            guarded(failure.clone(), sequential_budget.clone()),
         ),
         (
             "airlock-input-boot-guard",

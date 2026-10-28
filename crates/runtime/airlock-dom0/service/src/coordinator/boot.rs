@@ -11,6 +11,21 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 /// Bound simultaneous guest boots to avoid exhausting memory during startup.
 const BOOT_START_CONCURRENCY: usize = 2;
 
+/// Defer hard GUI dependencies and their clients while allowing ordinary display links to reconnect.
+fn gui_dependent_guests(topology: &Topology) -> Result<BTreeSet<GuestName>> {
+    let dependencies = planning::dependencies(topology, true)?;
+    let mut deferred = BTreeSet::from(["sys-gui".parse()?]);
+    for name in planning::ordered(topology)? {
+        if dependencies
+            .get(&name)
+            .is_some_and(|providers| !providers.is_disjoint(&deferred))
+        {
+            deferred.insert(name);
+        }
+    }
+    Ok(deferred)
+}
+
 /// Start the ordinary assistant alongside home only when its headless providers are already ready.
 fn parallel_assistant(topology: &Topology, foreground: &[GuestName]) -> Result<Option<GuestName>> {
     let home: GuestName = "usr-home".parse()?;
@@ -670,62 +685,18 @@ impl Coordinator {
         }
         if gui {
             public_save(&runtime.join("gui-setup-result.json"), &result)?;
-            // Qubes updates running clients when their GUI provider starts. Boot their
-            // headless services now, keeping the physical startup screen visible until
-            // the home VM and network path are ready for the guarded GPU handoff.
-            for name in &gui_names {
-                if name.as_str() != "sys-gui" {
-                    if let Some(device) = std::env::var_os("AIRLOCK_SETUP_CONFIG_STATUS_DEVICE")
-                        .filter(|path| !path.is_empty())
-                    {
-                        let _ = fs::write(
-                            device,
-                            format!(
-                                "\x1b[H\x1b[J
-  Airlock | Startup
-
-  Starting and checking {name}…
-
-  Your desktop will appear when home and network services are ready.
-"
-                            ),
-                        );
-                    }
-                    if name.as_str() == "usr-home"
-                        && let Some(assistant) = &assistant
-                    {
-                        // systemd owns both bounded helpers across the GPU handoff. Join only
-                        // home here; background autostart joins the same assistant job later.
-                        self.runner
-                            .text("systemctl", &["start", "--no-block", &guest_unit(name)])?;
-                        if let Err(error) = self.runner.text(
-                            "systemctl",
-                            &["start", "--no-block", &guest_unit(assistant)],
-                        ) {
-                            eprintln!("could not schedule early {assistant}: {error:#}");
-                            crate::boot::guest_checkpoint(
-                                assistant,
-                                crate::boot::GuestState::Failed,
-                                &format!("could not schedule startup: {error:#}"),
-                            )?;
-                        }
-                        ensure!(
-                            self.join_boot_guest(name)?,
-                            "{name} startup was not scheduled"
-                        );
-                        continue;
-                    }
-                    self.runner.run(
-                        "airlock-start-qube-ready",
-                        &[
-                            name.as_str().into(),
-                            runtime.join("topology.json").into_os_string(),
-                        ],
-                        Duration::from_secs(airlock_machine_core::boot::GUEST_HELPER_SECONDS),
-                        &[],
-                    )?;
-                }
-            }
+            // Headless providers may run before GPU handoff. A clipboard authority
+            // and its transitive clients must wait until the guarded GUI is running.
+            let deferred = gui_dependent_guests(selected.inputs.topology())?;
+            let early = gui_names
+                .iter()
+                .filter(|name| !deferred.contains(*name))
+                .cloned()
+                .collect::<Vec<_>>();
+            self.start_foreground_guests(
+                &early,
+                assistant.as_ref().filter(|name| !deferred.contains(*name)),
+            )?;
         } else {
             self.boot_record(
                 &selected,
@@ -810,6 +781,108 @@ impl Coordinator {
             ensure!(Instant::now() < deadline, "{name} startup unit timed out");
             std::thread::sleep(Duration::from_millis(100));
         }
+    }
+
+    /// Start an ordered foreground phase, preserving the existing bounded home/assistant overlap.
+    fn start_foreground_guests(
+        &self,
+        names: &[GuestName],
+        assistant: Option<&GuestName>,
+    ) -> Result<()> {
+        let runtime = runtime()?;
+        for name in names {
+            if name.as_str() != "sys-gui" {
+                if let Some(device) = std::env::var_os("AIRLOCK_SETUP_CONFIG_STATUS_DEVICE")
+                    .filter(|path| !path.is_empty())
+                {
+                    let _ = fs::write(
+                        device,
+                        format!(
+                            "\x1b[H\x1b[J
+  Airlock | Startup
+
+  Starting and checking {name}…
+
+  Your desktop will appear when home and network services are ready.
+"
+                        ),
+                    );
+                }
+                if name.as_str() == "usr-home"
+                    && let Some(assistant) = assistant
+                {
+                    // systemd owns both bounded helpers across the GPU handoff. Join only
+                    // home here; background autostart joins the same assistant job later.
+                    self.runner
+                        .text("systemctl", &["start", "--no-block", &guest_unit(name)])?;
+                    if let Err(error) = self.runner.text(
+                        "systemctl",
+                        &["start", "--no-block", &guest_unit(assistant)],
+                    ) {
+                        eprintln!("could not schedule early {assistant}: {error:#}");
+                        crate::boot::guest_checkpoint(
+                            assistant,
+                            crate::boot::GuestState::Failed,
+                            &format!("could not schedule startup: {error:#}"),
+                        )?;
+                    }
+                    ensure!(
+                        self.join_boot_guest(name)?,
+                        "{name} startup was not scheduled"
+                    );
+                    continue;
+                }
+                self.runner.run(
+                    "airlock-start-qube-ready",
+                    &[
+                        name.as_str().into(),
+                        runtime.join("topology.json").into_os_string(),
+                    ],
+                    Duration::from_secs(airlock_machine_core::boot::GUEST_HELPER_SECONDS),
+                    &[],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Start GUI-dependent foreground guests only after the selected configuration and GUI are ready.
+    pub fn boot_foreground(&self, topology: &Path) -> Result<Value> {
+        let _guard = MachineLock::acquire(
+            &self.state,
+            "Machine startup",
+            "Start foreground services after the guarded GUI",
+            MachineOperation::Boot,
+        )?;
+        self.ensure_no_pruning()?;
+        let setup: StoreFile = fs::canonicalize("/run/current-system/sw/bin/airlock-setup-config")?
+            .to_str()
+            .context("invalid setup path")?
+            .parse()?;
+        let selected = self.boot_selection(setup, topology)?;
+        ensure!(
+            self.running()?.contains(&"sys-gui".parse()?),
+            "sys-gui must be running before GUI-dependent foreground startup"
+        );
+        let foreground = airlock_machine_core::boot::foreground_guests(selected.inputs.topology())?;
+        let assistant = parallel_assistant(selected.inputs.topology(), &foreground)?;
+        let mut configured = foreground.clone();
+        configured.extend(assistant.iter().cloned());
+        ensure!(
+            self.boot_cached(&selected, &configured)?,
+            "foreground configuration changed before GUI handoff; repair in recovery"
+        );
+
+        let deferred = gui_dependent_guests(selected.inputs.topology())?;
+        let names = foreground
+            .into_iter()
+            .filter(|name| name.as_str() != "sys-gui" && deferred.contains(name))
+            .collect::<Vec<_>>();
+        self.start_foreground_guests(&names, assistant.as_ref())?;
+        let report =
+            json!({"schema":"airlock.foreground-boot.v1","status":"passed","started":names});
+        public_save(&runtime()?.join("gui-foreground-result.json"), &report)?;
+        Ok(report)
     }
 
     /// Observe the original selected boot inputs and keep machine mutation excluded until publication.

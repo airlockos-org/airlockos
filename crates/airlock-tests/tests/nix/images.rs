@@ -336,6 +336,10 @@ fn usb_startup_gates_are_acyclic_and_preserve_health_budgets() -> Result<()> {
         &units["airlock-desktop-ready.service"]["failure"],
         "airlock-boot-failure@%n.service",
     );
+    includes(
+        &units["airlock-start-gui-gpu.service"]["post"][0],
+        "boot-foreground --topology /run/airlock/startup/topology.json",
+    );
     assert!(
         !units["airlock-setup-config-deferred.service"]["pre"]
             .to_string()
@@ -347,6 +351,7 @@ fn usb_startup_gates_are_acyclic_and_preserve_health_budgets() -> Result<()> {
         .unwrap();
     assert!(guest_budget >= 240 + 180 + 120);
     for name in [
+        "airlock-start-gui-gpu.service",
         "airlock-start-network-providers.service",
         "airlock-machine-autostart.service",
     ] {

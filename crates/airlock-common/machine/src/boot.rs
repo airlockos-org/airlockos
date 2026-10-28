@@ -21,7 +21,7 @@ pub const GUEST_HELPER_SECONDS: u64 = GUEST_START_SECONDS + GUEST_READY_SECONDS 
 pub const BOOT_UNIT_OVERHEAD_SECONDS: u64 = 120;
 
 /// Select the GUI, explicitly foreground guests and their local dependency closure.
-/// These VMs must be configured and usable before the physical display leaves startup.
+/// These VMs must be configured and usable before desktop readiness completes startup.
 pub fn foreground_guests(topology: &Topology) -> Result<Vec<GuestName>> {
     let gui: GuestName = "sys-gui".parse()?;
     ensure!(
