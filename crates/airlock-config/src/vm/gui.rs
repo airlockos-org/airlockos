@@ -288,6 +288,26 @@ impl Gui<'_> {
             .equals(false)
             .and(self.setting("physicalDesktopOnBoot"));
 
+        let login_gate = physical_boot.clone().and(
+            self.context
+                .config
+                .clone()
+                .select("airlock.inputProxy.receiver.enable"),
+        );
+        let login_wait = self.script(
+            "airlock-wait-input-login",
+            crate::commands::contract(
+                &self.context.pkgs,
+                "input-login-wait",
+                [("service", vm_service.clone())],
+            ),
+            false,
+        );
+        let input_dependency = self.optional(
+            login_gate.clone(),
+            strings(&["airlock-input-login-ready.service"]),
+        );
+
         nix_record! {
             "airlock": nix_record! {
                 "inputProxy": nix_record! {
@@ -365,16 +385,35 @@ impl Gui<'_> {
                 ),
                 "packages": NixValue::list([agent]),
                 "services": nix_record! {
+                    // Reserve tty1 for startup progress and the greeter; other VTs keep recovery consoles.
+                    "getty@tty1": nix_record! {
+                        "enable": self.when(login_gate.clone(), false.into()),
+                    },
+                    "airlock-input-login-ready": self.when(login_gate, nix_record! {
+                        "description": "Keep startup visible until forwarded typing input is ready",
+                        "before": strings(&["display-manager.service"]),
+                        "after": strings(&["systemd-udev-trigger.service"]),
+                        "partOf": strings(&["display-manager.service"]),
+                        "serviceConfig": nix_record! {
+                            "Type": "oneshot",
+                            "RemainAfterExit": true,
+                            "ExecStartPre": nix_text!("-{kbd}/bin/chvt 1", kbd = self.package("kbd")),
+                            "ExecStart": login_wait.to_text(),
+                            "TimeoutStartSec": (airlock_machine_core::input::LOGIN_WAIT_SECONDS + 15) as i64,
+                        },
+                    }),
                     "display-manager": nix_record! {
                         "wantedBy": self
                             .force(self.optional(physical_boot, strings(&["graphical.target"]))),
                         "requires": NixValue::concat_lists([
                             strings(&["airlock-qubes-rw-init.service", "systemd-user-sessions.service"]),
                             qubes_gui.clone(),
+                            input_dependency.clone(),
                         ]),
                         "after": NixValue::concat_lists([
                             strings(&["airlock-qubes-rw-init.service"]),
                             qubes_gui,
+                            input_dependency,
                         ]),
                         "serviceConfig": nix_record! {
                             "ExecStartPre": nix_text!(

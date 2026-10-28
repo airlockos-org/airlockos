@@ -131,7 +131,7 @@ fn configuration(context: &ModuleContext, service: NixValue, start_ready: NixVal
                 .call(GUEST_HELPER_SECONDS as i64),
         );
     // One GUI observation admits the phase; every deferred guest is bracketed by two more.
-    let gui_budget = NixValue::builtin("add")
+    let foreground_budget = NixValue::builtin("add")
         .call((BOOT_UNIT_OVERHEAD_SECONDS + GUI_OBSERVATION_SECONDS) as i64)
         .call(
             NixValue::builtin("mul")
@@ -310,7 +310,32 @@ fn configuration(context: &ModuleContext, service: NixValue, start_ready: NixVal
         ),
         (
             "airlock-start-gui-gpu",
-            guarded(failure.clone(), gui_budget),
+            guarded(
+                failure.clone(),
+                ((GUEST_HELPER_SECONDS + BOOT_UNIT_OVERHEAD_SECONDS) as i64).into(),
+            ),
+        ),
+        (
+            "airlock-foreground-ready",
+            when(
+                split.clone(),
+                nix_record! {
+                    "description": "Start foreground guests after the GUI generation is ready",
+                    "unitConfig": nix_record! { "OnFailure": failure.clone() },
+                    "requires": strings(&["airlock-start-gui-gpu.service"]),
+                    "after": strings(&["airlock-start-gui-gpu.service"]),
+                    "serviceConfig": nix_record! {
+                        "Type": "oneshot",
+                        "RemainAfterExit": true,
+                        "ExecCondition": NixValue::list([gate.clone()]),
+                        "TimeoutStartSec": foreground_budget,
+                        "ExecStart": nix_text!(
+                            "{service}/bin/airlock-dom0-service boot-foreground --topology /run/airlock/startup/topology.json",
+                            service = service.clone(),
+                        ),
+                    },
+                },
+            ),
         ),
         (
             "airlock-input-boot-guard",

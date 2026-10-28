@@ -346,39 +346,10 @@ fn package_store_cache_reuses_unchanged_fragments_and_indexes() -> Result<()> {
     Ok(())
 }
 
-/// The real unit graph keeps transient input jobs outside boot prerequisites and gates completion on health.
-#[test]
-#[ignore = "requires explicitly prepared offline Nix sources"]
-fn usb_startup_gates_are_acyclic_and_preserve_health_budgets() -> Result<()> {
+/// Check ordering edges after the caller has selected one machine's evaluated unit graph.
+fn startup_units_are_acyclic(units: &serde_json::Map<String, Value>) -> Result<()> {
     use std::collections::{BTreeMap, BTreeSet};
 
-    let nix = context()?;
-    let report = inspect(
-        &nix,
-        "usb_lab/startup_contract",
-        json!({"root":nix.prepared}),
-    )?;
-    assert_eq!(
-        report["readiness"],
-        json!({
-            "schema":"airlock.boot-readiness.v1", "desktop":true, "input_target":"sys-gui"
-        })
-    );
-    let units = report["units"].as_object().unwrap();
-    let guest = &units["airlock-boot-guest@.service"];
-    assert_eq!(guest["type"], "oneshot");
-    assert_eq!(guest["remain"], true);
-    assert_eq!(guest["wantedBy"], json!([]));
-    assert_eq!(guest["failure"], json!([]));
-    includes(
-        &guest["start"],
-        "airlock-start-qube-ready %i /run/airlock/startup/topology.json",
-    );
-    assert!(guest["timeout"].as_u64().unwrap() >= airlock_machine_core::boot::GUEST_HELPER_SECONDS);
-    includes(
-        &guest["condition"][0],
-        "test ! -e /run/airlock/boot-supervisor/recovery-required.json",
-    );
     let mut edges: BTreeMap<&str, BTreeSet<&str>> = units
         .keys()
         .map(|name| (name.as_str(), BTreeSet::new()))
@@ -409,6 +380,86 @@ fn usb_startup_gates_are_acyclic_and_preserve_health_budgets() -> Result<()> {
             dependencies.retain(|name| !ready.contains(name));
         }
     }
+    Ok(())
+}
+
+/// The real unit graph keeps transient input jobs outside boot prerequisites and gates completion on health.
+#[test]
+#[ignore = "requires explicitly prepared offline Nix sources"]
+fn usb_startup_gates_are_acyclic_and_preserve_health_budgets() -> Result<()> {
+    use std::collections::BTreeSet;
+
+    let nix = context()?;
+    let report = inspect(
+        &nix,
+        "usb_lab/startup_contract",
+        json!({"root":nix.prepared}),
+    )?;
+    assert_eq!(
+        report["readiness"],
+        json!({
+            "schema":"airlock.boot-readiness.v1", "desktop":true, "input_target":"sys-gui"
+        })
+    );
+    let units = report["units"].as_object().unwrap();
+    let guest = &units["airlock-boot-guest@.service"];
+    assert_eq!(guest["type"], "oneshot");
+    assert_eq!(guest["remain"], true);
+    assert_eq!(guest["wantedBy"], json!([]));
+    assert_eq!(guest["failure"], json!([]));
+    includes(
+        &guest["start"],
+        "airlock-start-qube-ready %i /run/airlock/startup/topology.json",
+    );
+    assert!(guest["timeout"].as_u64().unwrap() >= airlock_machine_core::boot::GUEST_HELPER_SECONDS);
+    includes(
+        &guest["condition"][0],
+        "test ! -e /run/airlock/boot-supervisor/recovery-required.json",
+    );
+    startup_units_are_acyclic(units)?;
+    let gui_units = report["guiUnits"].as_object().unwrap();
+    startup_units_are_acyclic(gui_units)?;
+    let login_gate = &gui_units["airlock-input-login-ready.service"];
+    includes(
+        &gui_units["display-manager.service"]["requires"],
+        "airlock-input-login-ready.service",
+    );
+    includes(
+        &gui_units["display-manager.service"]["after"],
+        "airlock-input-login-ready.service",
+    );
+    includes(&login_gate["before"], "display-manager.service");
+    includes(&login_gate["start"], "airlock-wait-input-login");
+    assert!(
+        !login_gate["after"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("display-manager.service"))
+    );
+    assert!(
+        !login_gate["after"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("graphical.target"))
+    );
+    assert!(
+        login_gate["timeout"].as_u64().unwrap() > airlock_machine_core::input::LOGIN_WAIT_SECONDS
+    );
+    assert_eq!(report["guiConsoleLogin"], false);
+    assert!(
+        !units["airlock-gui-input-connect.service"]["after"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("airlock-foreground-ready.service"))
+    );
+    includes(
+        &units["airlock-foreground-ready.service"]["after"],
+        "airlock-start-gui-gpu.service",
+    );
+    includes(
+        &units["airlock-desktop-ready.service"]["requires"],
+        "airlock-foreground-ready.service",
+    );
 
     let mut pending = vec!["airlock-machine-autostart.service"];
     let mut required = BTreeSet::new();
@@ -445,7 +496,7 @@ fn usb_startup_gates_are_acyclic_and_preserve_health_budgets() -> Result<()> {
         "airlock-boot-failure@%n.service",
     );
     includes(
-        &units["airlock-start-gui-gpu.service"]["post"][0],
+        &units["airlock-foreground-ready.service"]["start"],
         "boot-foreground --topology /run/airlock/startup/topology.json",
     );
     includes(
@@ -470,7 +521,7 @@ fn usb_startup_gates_are_acyclic_and_preserve_health_budgets() -> Result<()> {
             .contains("desktop-ready")
     );
 
-    let guest_budget = units["airlock-start-gui-gpu.service"]["timeout"]
+    let guest_budget = units["airlock-foreground-ready.service"]["timeout"]
         .as_u64()
         .unwrap();
     let guests = report["domains"].as_array().unwrap().len() as u64;
@@ -482,8 +533,15 @@ fn usb_startup_gates_are_acyclic_and_preserve_health_budgets() -> Result<()> {
                 + airlock_machine_core::boot::GUI_OBSERVATION_SECONDS
                 + airlock_machine_core::boot::BOOT_UNIT_OVERHEAD_SECONDS
     );
+    assert!(
+        units["airlock-start-gui-gpu.service"]["timeout"]
+            .as_u64()
+            .unwrap()
+            >= airlock_machine_core::boot::GUEST_HELPER_SECONDS
+                + airlock_machine_core::boot::BOOT_UNIT_OVERHEAD_SECONDS
+    );
     for name in [
-        "airlock-start-gui-gpu.service",
+        "airlock-foreground-ready.service",
         "airlock-start-network-providers.service",
         "airlock-machine-autostart.service",
     ] {

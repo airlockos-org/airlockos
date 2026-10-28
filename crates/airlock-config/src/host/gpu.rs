@@ -254,12 +254,6 @@ fn reservation(
         systemd = context.pkgs.clone().select("systemd"),
     )
     .into();
-    let foreground: NixValue = nix_text!(
-        "{executable} boot-foreground --topology {topology}",
-        executable = executable.clone(),
-        topology = topology.clone(),
-    )
-    .into();
     let service_config = nix_record! {
         "Type": "oneshot",
         "RemainAfterExit": true,
@@ -299,14 +293,7 @@ fn reservation(
             start = start,
             topology = topology,
         ),
-        "ExecStartPost": NixValue::concat_lists([
-            NixValue::if_else(
-                split.clone(),
-                NixValue::list([foreground]),
-                NixValue::list([]),
-            ),
-            NixValue::list([sync]),
-        ]),
+        "ExecStartPost": sync,
         "Restart": "no",
     };
 

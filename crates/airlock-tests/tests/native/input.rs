@@ -429,6 +429,104 @@ fn input_receiver_readiness_enforces_caller_device_and_handler_guards() -> Resul
     Ok(())
 }
 
+/// Build a local input observation and gate using inert character devices and kernel metadata.
+fn login_fixture(name: &str, keys: &str) -> Result<(Peers, Command)> {
+    let peers = Peers::new()?;
+    let device = peers.path("sys-input/event1/device");
+    fs::create_dir_all(device.join("capabilities"))?;
+    fs::create_dir(peers.path("dev-input"))?;
+    fs::write(device.join("name"), name)?;
+    fs::write(device.join("capabilities/key"), keys)?;
+    for kind in ["rel", "abs"] {
+        fs::write(device.join(format!("capabilities/{kind}")), "0")?;
+    }
+    let handler = peers.path("handler");
+    fs::write(&handler, "not executed")?;
+    fs::set_permissions(&handler, fs::Permissions::from_mode(0o755))?;
+
+    let mut command = peers.command(common::binary("AIRLOCK_VM_BIN", "airlock-vm-service"))?;
+    command
+        .arg("wait-input-login")
+        .arg("--uinput")
+        .arg("/dev/null")
+        .arg("--sys-input")
+        .arg(peers.path("sys-input"))
+        .arg("--dev-input")
+        .arg(peers.path("dev-input"))
+        .arg("--status-device")
+        .arg(peers.path("status"))
+        .arg("--handler")
+        .arg(handler);
+    Ok((peers, command))
+}
+
+/// Local keyboards, multimedia buttons and non-device files must never release the greeter.
+#[test]
+fn login_gate_requires_an_openable_forwarded_typing_device() -> Result<()> {
+    for state in ["ready", "local", "multimedia", "regular-node"] {
+        let (peers, mut command) = login_fixture(
+            if state == "local" {
+                "Local Keyboard"
+            } else {
+                "dom0: Keyboard"
+            },
+            if state == "multimedia" {
+                "1"
+            } else {
+                "100050000000"
+            },
+        )?;
+        let node = peers.path("dev-input/event1");
+        if state == "regular-node" {
+            fs::write(node, "not an input device")?;
+        } else {
+            std::os::unix::fs::symlink("/dev/null", node)?;
+        }
+        let output = common::run(command.args(["--timeout", "1"]), None)?;
+        assert_eq!(
+            output.status.success(),
+            state == "ready",
+            "{state}: {error}",
+            error = String::from_utf8_lossy(&output.stderr)
+        );
+        let status = fs::read_to_string(peers.path("status"))?;
+        assert!(status.contains(if state == "ready" {
+            "Opening login"
+        } else {
+            "Login is paused"
+        }));
+        assert!(
+            peers.calls()?.is_empty(),
+            "the gate must not start services or send input"
+        );
+    }
+    Ok(())
+}
+
+/// A registered keyboard is insufficient until its event node appears; progress stays visible meanwhile.
+#[test]
+fn login_gate_keeps_startup_visible_until_device_publication() -> Result<()> {
+    let (peers, mut command) = login_fixture("dom0: Keyboard", "100050000000")?;
+    let mut child = command
+        .args(["--timeout", "5"])
+        .stdout(Stdio::null())
+        .stderr(File::create(peers.path("gate.stderr"))?)
+        .spawn()?;
+    common::until(|| {
+        Ok(fs::read_to_string(peers.path("status"))
+            .is_ok_and(|text| text.contains("Connecting your keyboard")))
+    })?;
+    assert!(
+        child.try_wait()?.is_none(),
+        "a kernel registration without a usable node must keep login stopped"
+    );
+    std::os::unix::fs::symlink("/dev/null", peers.path("dev-input/event1"))?;
+    assert!(child.wait()?.success());
+    assert!(fs::read_to_string(peers.path("status"))?.contains("Opening login"));
+    assert!(peers.calls()?.is_empty());
+    Ok(())
+}
+
 /// Read-only resampling rejects missing, partial or malformed receiver observations without starting services.
 #[test]
 fn input_check_requires_registered_physical_interfaces() -> Result<()> {

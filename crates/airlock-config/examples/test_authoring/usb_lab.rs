@@ -2,71 +2,60 @@
 
 use super::*;
 
-/// Inspect startup ordering and deadlines without realizing service packages or reading their scripts.
+/// Inspect merged ordering and deadlines without realizing service packages.
+fn startup_units(config: NixValue, names: &[&str]) -> NixValue {
+    let services = config.select("systemd.services");
+    NixValue::record(names.iter().map(|name| {
+        let unit = services.clone().select(name);
+        let service = unit.clone().select("serviceConfig");
+        (
+            format!("{name}.service"),
+            NixValue::record([
+                ("after", unit.clone().select("after")),
+                ("before", unit.clone().select("before")),
+                ("requires", unit.clone().select("requires")),
+                ("wantedBy", unit.clone().select("wantedBy")),
+                (
+                    "failure",
+                    unit.select("unitConfig")
+                        .attr_or("OnFailure", NixValue::list([])),
+                ),
+                (
+                    "start",
+                    service.clone().attr_or("ExecStart", NixValue::null()),
+                ),
+                ("type", service.clone().attr_or("Type", NixValue::null())),
+                ("remain", service.clone().attr_or("RemainAfterExit", false)),
+                (
+                    "condition",
+                    service.clone().attr_or("ExecCondition", NixValue::list([])),
+                ),
+                (
+                    "pre",
+                    service.clone().attr_or("ExecStartPre", NixValue::list([])),
+                ),
+                (
+                    "post",
+                    service.clone().attr_or("ExecStartPost", NixValue::list([])),
+                ),
+                (
+                    "timeout",
+                    service.attr_or("TimeoutStartSec", NixValue::null()),
+                ),
+            ]),
+        )
+    }))
+}
+
+/// Inspect both sides of the login handoff, including the guest-local input gate.
 pub(super) fn startup_contract(inputs: NixValue) -> NixValue {
     NixValue::builtin("getFlake")
         .call(inputs.select("root"))
-        .select_segments([
-            "nixosConfigurations",
-            "usb-dev",
-            "config",
-            "specialisation",
-            "usb-lab",
-            "configuration",
-        ])
-        .bind(|host| {
-            let services = host.clone().select_segments(["systemd", "services"]);
-            let units = [
-                "airlock-setup-config",
-                "airlock-boot-guest@",
-                "airlock-input-boot-guard",
-                "airlock-start-gui-gpu",
-                "airlock-gui-input-events",
-                "airlock-gui-input-connect",
-                "airlock-gui-input-boot-ready",
-                "airlock-desktop-ready",
-                "airlock-setup-config-deferred",
-                "airlock-start-network-providers",
-                "airlock-machine-autostart",
-            ]
-            .into_iter()
-            .map(|name| {
-                let unit = services.clone().select(name);
-                let config = unit.clone().select("serviceConfig");
-                (
-                    format!("{name}.service"),
-                    NixValue::record([
-                        ("after", unit.clone().select("after")),
-                        ("before", unit.clone().select("before")),
-                        ("requires", unit.clone().select("requires")),
-                        ("wantedBy", unit.clone().select("wantedBy")),
-                        (
-                            "failure",
-                            unit.select("unitConfig")
-                                .attr_or("OnFailure", NixValue::list([])),
-                        ),
-                        ("start", config.clone().select("ExecStart")),
-                        ("type", config.clone().attr_or("Type", NixValue::null())),
-                        ("remain", config.clone().attr_or("RemainAfterExit", false)),
-                        (
-                            "condition",
-                            config.clone().attr_or("ExecCondition", NixValue::list([])),
-                        ),
-                        (
-                            "pre",
-                            config.clone().attr_or("ExecStartPre", NixValue::list([])),
-                        ),
-                        (
-                            "post",
-                            config.clone().attr_or("ExecStartPost", NixValue::list([])),
-                        ),
-                        (
-                            "timeout",
-                            config.attr_or("TimeoutStartSec", NixValue::null()),
-                        ),
-                    ]),
-                )
-            });
+        .bind(|flake| {
+            let host = flake
+                .clone()
+                .select("nixosConfigurations.usb-dev.config.specialisation.usb-lab.configuration");
+            let gui = flake.select("nixosConfigurations.airlock-domain-sys-gui-usb-lab.config");
             NixValue::record([
                 (
                     "readiness",
@@ -77,11 +66,40 @@ pub(super) fn startup_contract(inputs: NixValue) -> NixValue {
                         "text",
                     ])),
                 ),
-                ("units", NixValue::record(units)),
+                (
+                    "units",
+                    startup_units(
+                        host.clone(),
+                        &[
+                            "airlock-setup-config",
+                            "airlock-boot-guest@",
+                            "airlock-input-boot-guard",
+                            "airlock-start-gui-gpu",
+                            "airlock-foreground-ready",
+                            "airlock-gui-input-events",
+                            "airlock-gui-input-connect",
+                            "airlock-gui-input-boot-ready",
+                            "airlock-desktop-ready",
+                            "airlock-setup-config-deferred",
+                            "airlock-start-network-providers",
+                            "airlock-machine-autostart",
+                        ],
+                    ),
+                ),
+                (
+                    "guiUnits",
+                    startup_units(
+                        gui.clone(),
+                        &["display-manager", "airlock-input-login-ready"],
+                    ),
+                ),
+                (
+                    "guiConsoleLogin",
+                    gui.select("systemd.services.getty@tty1.enable"),
+                ),
                 (
                     "domains",
-                    NixValue::builtin("attrNames")
-                        .call(host.select_segments(["airlock", "qubes", "domains"])),
+                    NixValue::builtin("attrNames").call(host.select("airlock.qubes.domains")),
                 ),
             ])
         })

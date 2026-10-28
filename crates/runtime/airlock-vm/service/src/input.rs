@@ -3,7 +3,13 @@
 use airlock_machine_core::input::{Device, Receiver, Schema};
 use anyhow::{Context, Result, ensure};
 use clap::Args;
-use std::{fs, os::unix::fs::FileTypeExt, path::PathBuf};
+use std::{
+    fs,
+    os::unix::fs::{FileTypeExt, OpenOptionsExt},
+    path::{Path, PathBuf},
+    thread,
+    time::{Duration, Instant},
+};
 
 /// Fixed local device and handler paths supplied by the installed input RPC wrapper.
 #[derive(Args)]
@@ -19,6 +25,86 @@ pub(crate) struct Request {
     handlers: Vec<PathBuf>,
 }
 
+/// Local display-manager gate; it observes the same receiver state without accepting an RPC caller.
+#[derive(Args)]
+pub(crate) struct LoginWait {
+    // Installed receiver paths, shared with the read-only readiness RPC.
+    #[command(flatten)]
+    receiver: Request,
+    // Device nodes must be usable as well as registered in the kernel.
+    #[arg(long, default_value = "/dev/input")]
+    dev_input: PathBuf,
+    // Guest-local boot console remains visible until the display manager can start.
+    #[arg(long, default_value = "/dev/tty1")]
+    status_device: PathBuf,
+    // Bound a failed boot without ever falling through to an unusable login screen.
+    #[arg(long, default_value_t = airlock_machine_core::input::LOGIN_WAIT_SECONDS, value_parser = clap::value_parser!(u64).range(1..=300))]
+    timeout: u64,
+}
+
+/// Display progress in the GUI VM; diagnostic details remain in its journal.
+fn progress(path: &Path, message: &str) {
+    let text = format!(
+        "\x1b[H\x1b[J
+  Airlock | Starting desktop
+
+  {message}
+"
+    );
+    if let Err(error) = fs::write(path, text) {
+        eprintln!("cannot update startup console: {error}");
+    }
+}
+
+/// Keep GNOME stopped until an authenticated dom0 receiver exposes a usable typing device.
+/// No input is injected, no service is started and no success receipt survives this observation.
+pub(crate) fn wait_login(request: LoginWait) -> Result<()> {
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(request.timeout);
+    let mut last_error = String::new();
+    let mut displayed = None;
+    loop {
+        let ready = observe(&request.receiver, Some(&request.dev_input)).and_then(|receiver| {
+            ensure!(
+                receiver.devices.iter().any(|device| device.keyboard),
+                "no forwarded typing keyboard is ready"
+            );
+            Ok(())
+        });
+        match ready {
+            Ok(()) => {
+                progress(&request.status_device, "Keyboard connected. Opening login…");
+                return Ok(());
+            }
+            Err(error) => {
+                let detail = format!("{error:#}");
+                if detail != last_error {
+                    eprintln!("Waiting for login input: {detail}");
+                    last_error = detail;
+                }
+            }
+        }
+        if Instant::now() >= deadline {
+            progress(
+                &request.status_device,
+                "Keyboard connection failed. Login is paused.",
+            );
+            anyhow::bail!("login input readiness timed out: {last_error}");
+        }
+        let elapsed = started.elapsed().as_secs();
+        if displayed != Some(elapsed) {
+            progress(
+                &request.status_device,
+                &format!("Connecting your keyboard… {elapsed}s"),
+            );
+            displayed = Some(elapsed);
+        }
+        thread::sleep(
+            Duration::from_millis(250).min(deadline.saturating_duration_since(Instant::now())),
+        );
+    }
+}
+
 /// Accept only dom0's argument-free readiness RPC and observe device/handler accessibility.
 pub(crate) fn ready(request: Request) -> Result<()> {
     ensure!(
@@ -30,6 +116,12 @@ pub(crate) fn ready(request: Request) -> Result<()> {
         "airlock.InputReceiverReady does not accept arguments"
     );
 
+    println!("{}", serde_json::to_string(&observe(&request, None)?)?);
+    Ok(())
+}
+
+/// Observe existing kernel receivers; the login gate also requires an openable event device.
+fn observe(request: &Request, dev_input: Option<&Path>) -> Result<Receiver> {
     ensure!(
         fs::metadata(&request.uinput).is_ok_and(|metadata| metadata.file_type().is_char_device())
             && rustix::fs::access(&request.uinput, rustix::fs::Access::WRITE_OK).is_ok(),
@@ -42,9 +134,9 @@ pub(crate) fn ready(request: Request) -> Result<()> {
         .write(true)
         .open(&request.uinput)
         .context("cannot open the input receiver device")?;
-    for handler in request.handlers {
+    for handler in &request.handlers {
         ensure!(
-            rustix::fs::access(&handler, rustix::fs::Access::EXEC_OK).is_ok(),
+            rustix::fs::access(handler, rustix::fs::Access::EXEC_OK).is_ok(),
             "input receiver is unavailable: {handler}",
             handler = handler.display()
         );
@@ -67,6 +159,18 @@ pub(crate) fn ready(request: Request) -> Result<()> {
         if !name.starts_with("dom0: ") {
             continue;
         }
+        if let Some(directory) = dev_input {
+            let node = directory.join(entry.file_name());
+            if !fs::metadata(&node).is_ok_and(|m| m.file_type().is_char_device())
+                || fs::OpenOptions::new()
+                    .read(true)
+                    .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
+                    .open(&node)
+                    .is_err()
+            {
+                continue;
+            }
+        }
         let keys = fs::read_to_string(path.join("capabilities/key"))?;
         let relative = fs::read_to_string(path.join("capabilities/rel"))?;
         let absolute = fs::read_to_string(path.join("capabilities/abs"))?;
@@ -81,14 +185,10 @@ pub(crate) fn ready(request: Request) -> Result<()> {
         });
         ensure!(devices.len() <= 1024, "too many forwarded input interfaces");
     }
-    println!(
-        "{}",
-        serde_json::to_string(&Receiver {
-            schema: Schema::V1,
-            devices
-        })?
-    );
-    Ok(())
+    Ok(Receiver {
+        schema: Schema::V1,
+        devices,
+    })
 }
 
 /// Linux prints the highest nonzero native unsigned-long bitmap word first on this x86_64 target.

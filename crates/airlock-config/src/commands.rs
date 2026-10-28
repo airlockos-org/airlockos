@@ -59,6 +59,22 @@ pub(crate) fn contract<const N: usize>(
             .call(NixValue::list(values))
             .call(template)
     };
+    // The local greeter gate and dom0 observer inspect the same installed receiver handlers.
+    let receiver_arguments = [
+        if kind == "input-login-wait" {
+            "wait-input-login"
+        } else {
+            "input-receiver-ready"
+        },
+        "--handler",
+        "/etc/qubes-rpc/airlock.InputDevice",
+        "--handler",
+        "/etc/qubes-rpc/qubes.InputKeyboard",
+        "--handler",
+        "/etc/qubes-rpc/qubes.InputMouse",
+        "--handler",
+        "/etc/qubes-rpc/qubes.InputTablet",
+    ];
     let (program, arguments, inherit): (&str, &[&str], bool) = match kind {
         "app-launcher" => ("@service@/bin/airlock-sys-gui-service", &["launch"], true),
         "session-ready" => ("@service@/bin/airlock-vm-service", &["session-ready"], true),
@@ -67,19 +83,9 @@ pub(crate) fn contract<const N: usize>(
             &["input", "connect", "--target", "@quotedTarget@"],
             false,
         ),
-        "receiver-ready" => (
+        "receiver-ready" | "input-login-wait" => (
             "@service@/bin/airlock-vm-service",
-            &[
-                "input-receiver-ready",
-                "--handler",
-                "/etc/qubes-rpc/airlock.InputDevice",
-                "--handler",
-                "/etc/qubes-rpc/qubes.InputKeyboard",
-                "--handler",
-                "/etc/qubes-rpc/qubes.InputMouse",
-                "--handler",
-                "/etc/qubes-rpc/qubes.InputTablet",
-            ],
+            &receiver_arguments,
             false,
         ),
         "device-receiver" => (

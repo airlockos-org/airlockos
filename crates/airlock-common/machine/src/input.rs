@@ -2,6 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Guest-local login gate budget; expiration leaves the startup console visible.
+pub const LOGIN_WAIT_SECONDS: u64 = 180;
+
 /// A physical keyboard/pointer interface or its registered counterpart in the guest.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

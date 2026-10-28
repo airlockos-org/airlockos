@@ -184,11 +184,11 @@ pub(super) fn configuration(
                         "airlock-desktop-ready": nix_record! {
                             "description": "Verify the GUI generation and active graphical login",
                             "requires": NixValue::concat_lists([
-                                strings(&["airlock-start-gui-gpu.service"]),
+                                strings(&["airlock-start-gui-gpu.service", "airlock-foreground-ready.service"]),
                                 input_dependency.clone(),
                             ]),
                             "after": NixValue::concat_lists([
-                                strings(&["airlock-start-gui-gpu.service"]),
+                                strings(&["airlock-start-gui-gpu.service", "airlock-foreground-ready.service"]),
                                 input_dependency.clone(),
                             ]),
                             "serviceConfig": nix_record! {
