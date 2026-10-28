@@ -156,6 +156,7 @@ impl Build {
                             "flake.lock".into(),
                             "Cargo.toml".into(),
                             "Cargo.lock".into(),
+                            "Makefile".into(),
                             "application-revision".into(),
                         ])),
                     |condition, directory| {

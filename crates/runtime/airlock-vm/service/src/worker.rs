@@ -3,7 +3,9 @@
 use airlock_nix_core::{
     admission::AdmissionReceipt,
     identity::{GitRevision, GuestName, SourceIdentity},
+    root_artifact::RootDescriptor,
     runtime::process,
+    store_path::{StoreArtifact, StoreFile, StorePath},
 };
 use anyhow::{Context, Result, ensure};
 use clap::{Args, Subcommand};
@@ -44,6 +46,12 @@ pub(crate) struct Request {
         default_value = "/run/airlock-builder/pool/.airlock-builder/flake-inputs.json"
     )]
     offline_inputs: PathBuf,
+    /// Immutable image-built compiler with checked source inputs; mismatches fall back to Cargo.
+    #[arg(
+        long,
+        default_value = "/etc/airlock/authoring/compiler/airlock-machine-config"
+    )]
+    compiler: PathBuf,
 }
 
 #[derive(Subcommand)]
@@ -462,16 +470,30 @@ fn preflight(request: &Request, offline: bool) -> Result<Prepared> {
         available >= 4 * 1024 * 1024 * 1024,
         "private Nix store needs at least 4 GiB free; available={available}"
     );
-    let source = text(
-        Command::new("make")
-            .args(["--silent", "-C"])
-            .arg(&request.repo)
-            .arg("prepare")
-            .arg(format!(
-                "AIRLOCK_PREPARED_CACHE={state}/prepared",
-                state = request.state.display()
-            )),
-    )?;
+    let installed = if request.compiler.is_file() {
+        text(
+            Command::new(&request.compiler)
+                .current_dir(&request.repo)
+                .arg("prepare-installed")
+                .arg(request.state.join("prepared")),
+        )?
+    } else {
+        String::new()
+    };
+    let source = if installed.is_empty() {
+        text(
+            Command::new("make")
+                .args(["--silent", "-C"])
+                .arg(&request.repo)
+                .arg("prepare")
+                .arg(format!(
+                    "AIRLOCK_PREPARED_CACHE={state}/prepared",
+                    state = request.state.display()
+                )),
+        )?
+    } else {
+        installed
+    };
     let mut prepared = Prepared {
         source,
         overrides: Vec::new(),
@@ -529,6 +551,29 @@ fn preflight(request: &Request, offline: bool) -> Result<Prepared> {
     Ok(prepared)
 }
 
+/// Immutable build outputs required for one bootable guest generation.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GuestArtifacts {
+    /// VM identity supplied by the selected configuration, not by the transport caller.
+    domain: GuestName,
+    /// NixOS system retained in the guest's runtime closure.
+    system: StorePath,
+    /// Immutable boot disk, transferred sparsely by the existing artifact protocol.
+    root_source: StoreFile,
+    /// Separate descriptor output produced alongside that disk.
+    root_metadata: StoreFile,
+    /// Nix-built closure inventory, retained as the generation's immutable source.
+    closure_source: StoreArtifact,
+    /// Qubes kernel paired with this configuration.
+    kernel_name: String,
+}
+
+/// Map validated logical store identities into the worker's private build store.
+fn physical(request: &Request, logical: &str) -> PathBuf {
+    request.store.join(logical.trim_start_matches('/'))
+}
+
 /// Build a local prepared-source installable and optionally admit its complete closure.
 fn build(request: &Request, action: &BuildAction) -> Result<()> {
     let (offline, installable, target) = match action {
@@ -567,58 +612,62 @@ fn build(request: &Request, action: &BuildAction) -> Result<()> {
         suffix.starts_with('#'),
         "installable must start with .# or #"
     );
+    let suffix = if target.is_some() {
+        let configuration = suffix
+            .strip_suffix(".config.system.build.toplevel")
+            .filter(|value| value.starts_with("#nixosConfigurations."))
+            .context("guest admission requires a NixOS configuration toplevel")?;
+        format!("{configuration}.config.system.build.airlockGuestArtifacts")
+    } else {
+        suffix.to_owned()
+    };
     let results: Value = serde_json::from_str(&text(
         nix("build", &prepared, offline)
             .arg(format!("{source}{suffix}", source = prepared.source))
             .args(["--no-link", "--json"]),
     )?)?;
-    let system = results[0]["outputs"]["out"]
+    let output: StorePath = results[0]["outputs"]["out"]
         .as_str()
-        .filter(|source| source.starts_with("/nix/store/"))
-        .context("build did not return a system output")?;
+        .context("build did not return an output")?
+        .parse()
+        .context("build returned an invalid store output")?;
     let Some(target) = target else {
-        println!("{system}");
+        println!("{output}");
         return Ok(());
     };
-    let closures = request.state.join("closures");
-    let admissions = request.state.join("admissions");
-    private(&closures)?;
-    private(&admissions)?;
-    let closure = tempfile::Builder::new()
-        .prefix("closure.")
-        .tempdir_in(&closures)?
-        .keep();
-    let paths: Value = serde_json::from_str(&text(Command::new("airlock-config-nix").args([
-        "path-info",
-        "--recursive",
-        "--json",
-        system,
-    ]))?)?;
-    let paths = if let Some(entries) = paths.as_array() {
-        entries
-            .iter()
-            .filter_map(|entry| entry["path"].as_str())
-            .map(str::to_owned)
-            .collect::<BTreeSet<_>>()
-    } else {
-        paths
-            .as_object()
-            .context("invalid closure metadata")?
-            .keys()
-            .cloned()
-            .collect()
-    };
+    let artifacts: GuestArtifacts =
+        serde_json::from_value(read(&physical(request, output.as_str()))?)
+            .context("guest build did not provide complete deployment artifacts")?;
     ensure!(
-        paths.contains(system),
+        artifacts.domain.as_str() == target,
+        "built guest differs from admission target"
+    );
+    ensure!(
+        !artifacts.kernel_name.is_empty(),
+        "guest build is missing its Qubes kernel identity"
+    );
+    let root: RootDescriptor =
+        serde_json::from_value(read(&physical(request, artifacts.root_metadata.as_str()))?)
+            .context("guest build is missing valid root-image metadata")?;
+    root.validate()?;
+    ensure!(
+        physical(request, artifacts.root_source.as_str()).is_file(),
+        "guest root image is missing"
+    );
+    let closure = physical(request, artifacts.closure_source.as_str());
+    let paths = fs::read_to_string(closure.join("store-paths"))
+        .context("guest build is missing its immutable closure inventory")?;
+    let paths = paths
+        .lines()
+        .map(str::parse::<StorePath>)
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    ensure!(
+        paths.contains(&artifacts.system),
         "built system is absent from closure metadata"
     );
-    fs::write(
-        closure.join("store-paths"),
-        format!(
-            "{paths}\n",
-            paths = paths.into_iter().collect::<Vec<_>>().join("\n")
-        ),
-    )?;
+
+    let admissions = request.state.join("admissions");
+    private(&admissions)?;
     let receipt: AdmissionReceipt = serde_json::from_str(&text(
         Command::new("airlock")
             .args(["artifact", "send", "--physical-store-root"])
@@ -629,11 +678,13 @@ fn build(request: &Request, action: &BuildAction) -> Result<()> {
                 "--domain",
                 target,
                 "--system",
-                system,
+                artifacts.system.as_str(),
                 "--closure-source",
-            ])
-            .arg(&closure)
-            .args([
+                artifacts.closure_source.as_str(),
+                "--root-source",
+                artifacts.root_source.as_str(),
+                "--kernel-name",
+                &artifacts.kernel_name,
                 "--source-revision",
                 &prepared.revision,
                 "--lock-hash",
@@ -646,6 +697,13 @@ fn build(request: &Request, action: &BuildAction) -> Result<()> {
         lock_hash: prepared.lock.parse()?,
     };
     receipt.check_transfer(&domain, &expected)?;
+    ensure!(
+        receipt.system == artifacts.system
+            && receipt.root_source == Path::new(artifacts.root_source.as_str())
+            && receipt.kernel_name == artifacts.kernel_name
+            && receipt.root_artifact.as_ref() == Some(&root),
+        "admission receipt differs from the complete built guest artifacts"
+    );
     let file = tempfile::Builder::new()
         .prefix("admission.")
         .suffix(".json")

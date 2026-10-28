@@ -8,6 +8,7 @@ use rusix::{
         raw::{NixRepresentation, NixValue},
     },
     nix_record, nix_text,
+    nixos::{ContextualModule, ModuleBody},
 };
 
 /// Pinned source trees and target platform used by every artifact in a VM build.
@@ -405,6 +406,7 @@ fn domain_constructor(sources: &Sources, pkgs: &NixValue) -> NixValue {
                             .unwrap()
                             .as_expression(),
                         crate::vm::system(&sources.machine, &sources.apps),
+                        guest_artifacts(sources, pkgs, &request),
                         nix_record! {
                             "nixpkgs": nix_record! {
                                 "pkgs": pkgs.clone(),
@@ -461,6 +463,35 @@ fn domain_constructor(sources: &Sources, pkgs: &NixValue) -> NixValue {
             (defaults, result)
         },
     )
+}
+
+/// Build one deployable guest bundle from the same configuration used by its boot closure.
+/// Keeping this outside the runtime closure avoids a dependency cycle through the system itself.
+fn guest_artifacts(sources: &Sources, pkgs: &NixValue, request: &NixValue) -> NixValue {
+    ContextualModule::new(|context| {
+        let images = Images { pkgs, workspace: &sources.apps };
+        let root = images.root(root_capacity(sources, request)).as_expression();
+        let system = context.config.select("system.build.toplevel");
+        let closure = images.boot_manifest(
+            request.clone().select("storeArtifactName"),
+            NixValue::list([system.clone()]),
+            request.clone().select("storeDevice"),
+            "/nix/store".into(),
+        );
+        let manifest = pkgs.clone().select("writeText").call("airlock-guest-artifacts.json")
+            .call(NixValue::builtin("toJSON").call(nix_record! {
+                "domain": request.clone().select("name"),
+                "system": system.to_text(),
+                "root_source": nix_text!("{root}/root.img", root = root.clone()),
+                "root_metadata": nix_text!("{metadata}/root.json", metadata = root.select("metadata")),
+                "closure_source": closure.as_expression().to_text(),
+                "kernel_name": request.clone().select("kernelName"),
+            }));
+
+        ModuleBody::new(nix_record! {
+            "system": nix_record! { "build": nix_record! { "airlockGuestArtifacts": manifest } },
+        }).key("airlock.vm.guest-artifacts")
+    }).into_expression()
 }
 
 /// Interpret the bootstrap input's optional MiB/GiB capacity without changing stored definitions.

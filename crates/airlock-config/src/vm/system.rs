@@ -45,7 +45,7 @@ pub(super) fn module(source: &NixPath, workspace: &Workspace) -> NixValue {
             .import_value(options::module())
             .import_value(network::module(&network))
             .import_value(gui::module(source, workspace))
-            .import_value(super::authoring::module(workspace))
+            .import_value(super::authoring::module(source, workspace))
     })
     .into_expression()
 }

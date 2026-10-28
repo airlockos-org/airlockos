@@ -9,6 +9,9 @@ mod terminal;
 #[path = "packaged/early_init.rs"]
 mod early_init;
 
+#[path = "packaged/compiler.rs"]
+mod compiler;
+
 use crate::common;
 use airlock_tests::system;
 use anyhow::{Context, Result, ensure};

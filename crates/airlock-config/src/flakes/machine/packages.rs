@@ -90,6 +90,10 @@ pub(super) fn outputs(build: &Build, system: NixValue) -> NixValue {
                     crate::vm::authoring::dependencies(&pkgs, &build.workspace.root()),
                 ),
                 (
+                    "airlock-machine-compiler".into(),
+                    crate::vm::authoring::compiler(&pkgs, &build.workspace, &build.source),
+                ),
+                (
                     "airlock-qubes-vm-kernel".into(),
                     crate::vm_build::kernel(&pkgs),
                 ),

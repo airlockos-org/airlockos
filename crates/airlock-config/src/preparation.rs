@@ -3,6 +3,8 @@
 
 pub mod cache;
 
+mod packaged;
+
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
@@ -433,6 +435,27 @@ pub fn run_machine(
     };
 
     match arguments.as_slice() {
+        [command, directory, metadata] if command == "package-compiler" => packaged::install(
+            &std::env::current_dir()?,
+            &PathBuf::from(directory),
+            &PathBuf::from(metadata),
+        ),
+        [command, cache] if command == "prepare-installed" => {
+            let executable = std::env::current_exe()?;
+            let package = executable.parent().ok_or("compiler package directory")?;
+            if packaged::matches(&std::env::current_dir()?, package)? {
+                let tree = prepare(&std::env::current_dir()?, &PathBuf::from(cache), |tree| {
+                    // Bind the binary to the captured bytes too, closing the check-to-snapshot race.
+                    if !packaged::matches(tree, package)? {
+                        return Err("compiler inputs changed during source capture".into());
+                    }
+                    emit(tree)
+                })?;
+                println!("path:{path}", path = tree.display());
+            }
+            // Empty output is an explicit cache miss. The worker then uses the checkout's Makefile.
+            Ok(())
+        }
         [command, directory] if command == "--emit" => emit(&PathBuf::from(directory)),
         [command, cache] if command == "prepare" => {
             let tree = prepare(&std::env::current_dir()?, &PathBuf::from(cache), emit)?;
