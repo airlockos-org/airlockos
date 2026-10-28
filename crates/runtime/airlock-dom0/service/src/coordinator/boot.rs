@@ -190,6 +190,9 @@ struct BootReceipt {
     shared: LockHash,
     // Per-guest applied configuration and immutable artifact identities.
     domains: BTreeMap<GuestName, LockHash>,
+    // Optional diagnostics for older receipts; these never authorize reuse.
+    #[serde(default)]
+    details: Option<snapshot::Details>,
 }
 
 struct BootSelection {
@@ -382,8 +385,17 @@ impl Coordinator {
     }
 
     fn boot_cached(&self, selection: &BootSelection, names: &[GuestName]) -> Result<bool> {
+        Ok(self.boot_cache_mismatch(selection, names)?.is_none())
+    }
+
+    /// Preserve complete reuse validation while explaining a rejected receipt.
+    fn boot_cache_mismatch(
+        &self,
+        selection: &BootSelection,
+        names: &[GuestName],
+    ) -> Result<Option<String>> {
         let Some(receipt) = self.boot_receipt()? else {
-            return Ok(false);
+            return Ok(Some("no applied boot configuration receipt".into()));
         };
         let known: Vec<_> = names
             .iter()
@@ -394,9 +406,22 @@ impl Coordinator {
             if !known.is_empty() {
                 self.boot_snapshot(&selection.inputs.requirements()?, &known)?;
             }
-            return Ok(false);
+            let missing = names
+                .iter()
+                .filter(|n| !receipt.domains.contains_key(*n))
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            return Ok(Some(if receipt.identity != selection.identity {
+                "selected startup configuration differs from saved receipt".into()
+            } else {
+                format!(
+                    "VMs missing from applied receipt: {names}",
+                    names = missing.join(", ")
+                )
+            }));
         }
-        let (shared, snapshots) = self.boot_snapshot(&selection.inputs.requirements()?, names)?;
+        let snapshot = self.boot_snapshot(&selection.inputs.requirements()?, names)?;
+        let snapshots = &snapshot.domains;
         let fresh = snapshots
             .iter()
             .map(|(name, fingerprint)| DomainState {
@@ -415,25 +440,33 @@ impl Coordinator {
                     .unwrap_or_default(),
             })
             .collect::<Vec<_>>();
-        Ok(Reuse::check(
+        let reusable = Reuse::check(
             selection.identity.to_string(),
             receipt.identity.as_str(),
-            shared.as_str(),
+            snapshot.shared.as_str(),
             receipt.shared.as_str(),
             &fresh,
             &saved,
         )
-        .is_some())
+        .is_some();
+        Ok((!reusable).then(|| snapshot.mismatch(&receipt)))
     }
 
     fn boot_record(&self, selection: &BootSelection, names: &[GuestName]) -> Result<()> {
-        let (shared, mut domains) = self.boot_snapshot(&selection.inputs.requirements()?, names)?;
+        let snapshot::Snapshot {
+            shared,
+            mut domains,
+            mut details,
+        } = self.boot_snapshot(&selection.inputs.requirements()?, names)?;
         if let Some(previous) = self.boot_receipt()?
             && previous.identity == selection.identity
             && previous.shared == shared
         {
             for (n, v) in previous.domains {
                 domains.entry(n).or_insert(v);
+            }
+            if let Some(previous) = previous.details {
+                details.inherit(previous);
             }
         }
         state::save(
@@ -443,6 +476,7 @@ impl Coordinator {
                 identity: selection.identity.clone(),
                 shared,
                 domains,
+                details: Some(details),
             },
         )
     }
@@ -631,11 +665,8 @@ impl Coordinator {
                     "\x1b[H\x1b[J\n  Airlock | Startup\n\n  Starting your desktop…\n",
                 );
             }
-        } else {
-            ensure!(
-                self.boot_cached(&selected, &configured)?,
-                "GUI configuration changed after startup; repair in recovery"
-            );
+        } else if let Some(reason) = self.boot_cache_mismatch(&selected, &configured)? {
+            bail!("GUI configuration changed after startup: {reason}; repair in recovery");
         }
         let mut result = json!({});
         if !reused {
@@ -862,10 +893,11 @@ impl Coordinator {
         let assistant = parallel_assistant(&plan)?;
         let mut configured = plan.guests().to_vec();
         configured.extend(assistant.iter().cloned());
-        ensure!(
-            self.boot_cached(&selected, &configured)?,
-            "foreground configuration changed before GUI handoff; repair in recovery"
-        );
+        if let Some(reason) = self.boot_cache_mismatch(&selected, &configured)? {
+            bail!(
+                "foreground configuration changed before GUI handoff: {reason}; repair in recovery"
+            );
+        }
 
         let phase = ReadyPhase::deferred(&plan, &self.runner, &selected.identity)?;
         let names = phase.guests();

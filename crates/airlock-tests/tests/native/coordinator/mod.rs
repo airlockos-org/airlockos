@@ -766,6 +766,64 @@ fn namespace_boot_cache_checks_persistent_disks_before_reuse() -> Result<()> {
         json!(["activating", "active"])
     );
 
+    // Real Qubes saves lazily created empty device collections and the GUI's
+    // keyboard layout after the foreground receipt, before deferred setup.
+    let xml_path = machine.path("qubes.xml");
+    let xml = fs::read_to_string(&xml_path)?;
+    let runtime_xml = xml
+        .replace("</volume-config></domain>", r#"</volume-config><devices class="block"/><devices class="usb"/></domain>"#)
+        .replace(
+            r#"<property name="name">sys-gui</property>"#,
+            r#"<property name="name">sys-gui</property><property name="keyboard_layout">us++</property>"#,
+        );
+    let receipt_path = machine.path("machine/boot-configuration.json");
+    let receipt = read(&receipt_path)?;
+    let mut legacy = receipt.clone();
+    legacy.as_object_mut().unwrap().remove("details");
+    save(&receipt_path, &legacy)?;
+    fs::write(
+        &xml_path,
+        runtime_xml.replacen(
+            r#"<devices class="usb"/>"#,
+            r#"<devices class="usb"><device backend-domain="sys-usb" id="1-1"/></devices>"#,
+            1,
+        ),
+    )?;
+    error(
+        &machine.run(
+            &["boot-setup", "--background", SETUP, "--apply"],
+            None,
+            false,
+        )?,
+        "sys-clipboard: comparison details unavailable in saved receipt",
+    );
+    save(&receipt_path, &receipt)?;
+
+    // A populated collection still rejects deferred setup, naming the VM and
+    // configuration category rather than losing the failure behind a boolean.
+    error(
+        &machine.run(
+            &["boot-setup", "--background", SETUP, "--apply"],
+            None,
+            false,
+        )?,
+        "sys-clipboard: configuration",
+    );
+    fs::write(&xml_path, &runtime_xml)?;
+
+    let policy_path = machine.path("qubes-policy.d/90-airlock.policy");
+    let policy = fs::read(&policy_path)?;
+    fs::write(&policy_path, "# changed policy\n")?;
+    error(
+        &machine.run(
+            &["boot-setup", "--background", SETUP, "--apply"],
+            None,
+            false,
+        )?,
+        "shared Qubes state: policy",
+    );
+    fs::write(&policy_path, policy)?;
+
     assert_eq!(
         machine.run(
             &["boot-setup", "--background", SETUP, "--apply"],
@@ -774,6 +832,7 @@ fn namespace_boot_cache_checks_persistent_disks_before_reuse() -> Result<()> {
         )?["status"],
         "passed"
     );
+    fs::write(&xml_path, xml)?;
 
     machine.data = read(machine.path("data.json"))?;
     machine.data["boot_unit_states"]["usr-assistant"] = json!(["failed"]);
@@ -807,6 +866,14 @@ fn namespace_boot_cache_checks_persistent_disks_before_reuse() -> Result<()> {
     let missing = machine.run(&["boot-setup", "--gui", SETUP, "--apply"], None, false)?;
     assert!(missing["error"].as_str().unwrap().contains("No such file"));
     fs::rename(&saved_executable, &executable)?;
+    error(
+        &machine.run(
+            &["boot-setup", "--background", SETUP, "--apply"],
+            None,
+            false,
+        )?,
+        "sys-clipboard: artifact metadata",
+    );
     assert_eq!(
         machine.run(&["boot-setup", "--gui", SETUP, "--apply"], None, true)?["reused"],
         false,

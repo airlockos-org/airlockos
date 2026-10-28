@@ -17,6 +17,32 @@ struct Node {
 }
 
 impl Node {
+    /// Exclude representational noise and keyboard state not owned by the declaration.
+    fn normalize(&mut self, prefs: &BTreeMap<String, Value>) {
+        // Qubes creates device collections lazily. An empty collection grants no
+        // assignments, regardless of when a loaded extension first serializes it.
+        self.children.retain(|node| {
+            !(node.tag == "devices"
+                && node.attrs.len() == 1
+                && node.attrs.contains_key("class")
+                && node.text.trim().is_empty()
+                && node.children.is_empty())
+        });
+
+        // The GUI reports the session's layout after login. Explicit settings,
+        // including an explicit reset, remain part of the startup comparison.
+        if !prefs.contains_key("keyboard_layout")
+            && let Some(properties) = self.children.iter_mut().find(|n| n.tag == "properties")
+        {
+            properties.children.retain(|property| {
+                property
+                    .attrs
+                    .get("name")
+                    .is_none_or(|name| name != "keyboard_layout")
+            });
+        }
+    }
+
     fn child(&self, tag: &str) -> Result<&Node> {
         self.children
             .iter()
@@ -199,12 +225,100 @@ fn domains(root: &Node) -> Result<BTreeMap<&str, &Node>> {
     Ok(domains)
 }
 
+/// Category hashes explain a rejection; the complete hashes still decide reuse.
+#[derive(Serialize, Deserialize)]
+pub(super) struct Details {
+    // Pools, global settings, persistent ownership and managed policy fingerprints.
+    shared: BTreeMap<String, LockHash>,
+    // Configuration, immutable artifact metadata and persistent disk sizes per VM.
+    domains: BTreeMap<GuestName, BTreeMap<String, LockHash>>,
+}
+
+impl Details {
+    /// Retain diagnostics for disjoint scopes only when their aggregate receipt is retained too.
+    pub(super) fn inherit(&mut self, previous: Self) {
+        for (name, categories) in previous.domains {
+            self.domains.entry(name).or_insert(categories);
+        }
+    }
+}
+
+/// Fresh aggregate fingerprints accompanied by bounded diagnostic categories.
+pub(super) struct Snapshot {
+    /// Complete global Qubes configuration and managed policy fingerprint.
+    pub(super) shared: LockHash,
+    /// Complete checked state of each requested VM.
+    pub(super) domains: BTreeMap<GuestName, LockHash>,
+    /// Additional fingerprints used only to explain aggregate mismatches.
+    pub(super) details: Details,
+}
+
+/// Hash object members independently without retaining configuration contents.
+fn categories(value: &Value) -> Result<BTreeMap<String, LockHash>> {
+    value
+        .as_object()
+        .context("snapshot categories must be an object")?
+        .iter()
+        .map(|(name, value)| Ok((name.clone(), state::digest(value)?.parse()?)))
+        .collect()
+}
+
+/// Describe changed categories, including receipts written before details existed.
+fn changed(
+    current: &BTreeMap<String, LockHash>,
+    saved: Option<&BTreeMap<String, LockHash>>,
+) -> String {
+    let Some(saved) = saved else {
+        return "comparison details unavailable in saved receipt".into();
+    };
+
+    let names = current.keys().chain(saved.keys()).collect::<BTreeSet<_>>();
+    let changes = names
+        .into_iter()
+        .filter(|name| current.get(*name) != saved.get(*name))
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    if changes.is_empty() {
+        "aggregate fingerprint".into()
+    } else {
+        changes.join(", ")
+    }
+}
+
+impl Snapshot {
+    /// Identify every rejected scope without exposing XML or artifact paths.
+    pub(super) fn mismatch(&self, saved: &BootReceipt) -> String {
+        let mut changes = Vec::new();
+        if self.shared != saved.shared {
+            changes.push(format!(
+                "shared Qubes state: {categories}",
+                categories = changed(
+                    &self.details.shared,
+                    saved.details.as_ref().map(|d| &d.shared)
+                )
+            ));
+        }
+        for (name, fingerprint) in &self.domains {
+            if saved.domains.get(name) != Some(fingerprint) {
+                changes.push(format!(
+                    "{name}: {categories}",
+                    categories = changed(
+                        &self.details.domains[name],
+                        saved.details.as_ref().and_then(|d| d.domains.get(name))
+                    )
+                ));
+            }
+        }
+        changes.join("; ")
+    }
+}
+
 impl Coordinator {
     pub(super) fn boot_snapshot(
         &self,
         requirements: &airlock_machine_core::boot::artifacts::BootRequirements<'_>,
         names: &[GuestName],
-    ) -> Result<(LockHash, BTreeMap<GuestName, LockHash>)> {
+    ) -> Result<Snapshot> {
         let topology = requirements.inputs().topology();
         let root = xml(&configured_path(
             "AIRLOCK_QUBES_XML",
@@ -273,7 +387,12 @@ impl Coordinator {
             "policy exceeds size limit"
         );
         let owners: Vec<_> = owners.iter().map(|((p, v), n)| json!([p, v, n])).collect();
-        let shared = state::digest(&json!({"pools":pools,"labels":root.child("labels")?.value(),"prefs":root.child("properties")?.value(),"owners":owners,"policy":format!("{:x}",Sha256::digest(policy_bytes))}))?.parse()?;
+        let shared_value = json!({"pools":pools,"labels":root.child("labels")?.value(),"prefs":root.child("properties")?.value(),"owners":owners,"policy":format!("{:x}",Sha256::digest(policy_bytes))});
+        let shared = state::digest(&shared_value)?.parse()?;
+        let mut details = Details {
+            shared: categories(&shared_value)?,
+            domains: BTreeMap::new(),
+        };
         let mut snapshots = BTreeMap::new();
         for name in names {
             let mut node = (*domains
@@ -290,6 +409,7 @@ impl Coordinator {
                 );
             }
             node.children.retain(|n| n.tag != "tags");
+            node.normalize(&topology.domains[name].prefs);
             if let Some(features) = node.children.iter_mut().find(|n| n.tag == "features") {
                 features.children.retain(|n| {
                     n.attrs.get("name").is_some_and(|key| {
@@ -393,13 +513,21 @@ impl Coordinator {
                     }
                 }
             }
+            let configuration = node.value();
+            details.domains.insert(name.clone(), categories(&json!({
+                "configuration":configuration, "artifact metadata":artifacts, "persistent disks":disks
+            }))?);
             snapshots.insert(
                 name.clone(),
-                state::digest(&json!({"xml":node.value(),"artifacts":artifacts,"disks":disks}))?
+                state::digest(&json!({"xml":configuration,"artifacts":artifacts,"disks":disks}))?
                     .parse()?,
             );
         }
-        Ok((shared, snapshots))
+        Ok(Snapshot {
+            shared,
+            domains: snapshots,
+            details,
+        })
     }
 }
 
@@ -415,6 +543,46 @@ mod tests {
             format!("<qubes><domains>{domains}</domains></qubes>"),
         )?;
         xml(file.path())
+    }
+
+    /// Runtime layout and empty collections are equivalent; declared layouts and assignments remain checked.
+    #[test]
+    fn normalization_preserves_owned_settings_and_device_assignments() -> Result<()> {
+        let before = configuration(
+            r#"
+            <domain><properties/><devices class="pci"/></domain>
+        "#,
+        )?;
+        let after = configuration(
+            r#"
+            <domain><properties><property name="keyboard_layout">us++</property></properties>
+                <devices class="pci"/><devices class="block"/><devices class="usb"/>
+            </domain>
+        "#,
+        )?;
+        let normalized = |root: &Node, prefs: &BTreeMap<String, Value>| -> Result<Value> {
+            let mut node = root.child("domains")?.child("domain")?.clone();
+            node.normalize(prefs);
+            Ok(node.value())
+        };
+        let empty = BTreeMap::new();
+        assert_eq!(normalized(&before, &empty)?, normalized(&after, &empty)?);
+
+        // An explicit reset is owned just like a concrete layout selection.
+        for setting in [json!("us++"), Value::Null] {
+            let prefs = BTreeMap::from([("keyboard_layout".into(), setting)]);
+            assert_ne!(normalized(&before, &prefs)?, normalized(&after, &prefs)?);
+        }
+
+        let assigned = configuration(
+            r#"
+            <domain><properties/><devices class="usb">
+                <device backend-domain="sys-usb" id="1-1"/>
+            </devices></domain>
+        "#,
+        )?;
+        assert_ne!(normalized(&before, &empty)?, normalized(&assigned, &empty)?);
+        Ok(())
     }
 
     /// Both upstream's default representation and an explicit fixed name identify dom0.
