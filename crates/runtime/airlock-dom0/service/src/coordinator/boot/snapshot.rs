@@ -170,7 +170,8 @@ fn xml(path: &Path) -> Result<Node> {
 }
 
 fn metadata(path: &Path) -> Result<Value> {
-    let m = fs::metadata(path)?;
+    let m = fs::metadata(path)
+        .with_context(|| format!("read required boot artifact {path}", path = path.display()))?;
     ensure!(
         m.is_file(),
         "artifact is not a regular file: {}",
@@ -201,9 +202,10 @@ fn domains(root: &Node) -> Result<BTreeMap<&str, &Node>> {
 impl Coordinator {
     pub(super) fn boot_snapshot(
         &self,
-        topology: &Topology,
+        requirements: &airlock_machine_core::boot::artifacts::BootRequirements<'_>,
         names: &[GuestName],
     ) -> Result<(LockHash, BTreeMap<GuestName, LockHash>)> {
+        let topology = requirements.inputs().topology();
         let root = xml(&configured_path(
             "AIRLOCK_QUBES_XML",
             "/var/lib/qubes/qubes.xml",
@@ -297,8 +299,8 @@ impl Coordinator {
                     })
                 });
             }
-            let hermit = topology.domains[name].backend.hermit();
-            if hermit.is_some() {
+            let contract = requirements.guest(name)?;
+            if let airlock_deployment_core::boot::artifacts::Guest::Hermit { .. } = contract {
                 ensure!(
                     node.attr("class")? == "HermitVM",
                     "{name}: Hermit backend requires HermitVM class"
@@ -311,27 +313,31 @@ impl Coordinator {
                 .find(|n| n.tag == "volume-config")
                 .context("missing persistent volumes; use recovery")?;
             let mut artifacts = BTreeMap::new();
-            if let Some(image) = hermit {
-                // Hermit boots one authenticated executable and deliberately has no disks.
-                // Track that file so cache reuse still detects missing or replaced artifacts.
-                ensure!(
-                    volumes.children.is_empty(),
-                    "{name}: Hermit volumes must be empty"
-                );
-                let path = PathBuf::from(image.executable.as_str());
-                artifacts.insert(path.clone(), metadata(&path)?);
-            } else {
-                let kinds: BTreeSet<_> = volumes
-                    .children
-                    .iter()
-                    .map(|v| v.attr("name"))
-                    .collect::<Result<_>>()?;
-                ensure!(
-                    ["root", "private", "store", "store-data"]
+            match contract {
+                airlock_deployment_core::boot::artifacts::Guest::Hermit { executable, .. } => {
+                    // Hermit boots one authenticated executable and deliberately has no disks.
+                    // Track that file so cache reuse still detects missing or replaced artifacts.
+                    ensure!(
+                        volumes.children.is_empty(),
+                        "{name}: Hermit volumes must be empty"
+                    );
+                    let path = PathBuf::from(executable);
+                    artifacts.insert(path.clone(), metadata(&path)?);
+                }
+                airlock_deployment_core::boot::artifacts::Guest::Nixos { .. } => {
+                    let kinds: BTreeSet<_> = volumes
+                        .children
                         .iter()
-                        .all(|n| kinds.contains(n)),
-                    "{name}: persistent or closure volumes missing"
-                );
+                        .map(|v| v.attr("name"))
+                        .collect::<Result<_>>()?;
+                    ensure!(
+                        contract
+                            .volumes()
+                            .iter()
+                            .all(|volume| kinds.contains(volume.name())),
+                        "{name}: persistent or closure volumes missing"
+                    );
+                }
             }
 
             let mut disks = BTreeMap::new();

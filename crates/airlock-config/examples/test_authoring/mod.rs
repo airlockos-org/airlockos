@@ -90,6 +90,7 @@ pub(super) fn fixture(
             "prepared_store/sealed_store" => prepared_store::sealed_store(inputs),
             "prepared_store/cache" => prepared_store::cache(inputs),
             "prepared_store/raw_disk_hooks" => prepared_store::raw_disk_hooks(inputs),
+            "prepared_store/retention" => prepared_store::retention(inputs),
             "workspace/sources" => workspace::sources(inputs, settings)?,
             "usr_assistant_machine_source/seed_archive" => {
                 usr_assistant_machine_source::seed_archive(inputs)

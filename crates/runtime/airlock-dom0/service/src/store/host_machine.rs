@@ -84,9 +84,16 @@ pub(super) fn save(
     root: &Path,
     storage: &Path,
     machine: &Path,
-    receipt: &HostReceipt,
+    checked: &super::ValidatedHost,
 ) -> Result<()> {
-    publish_snapshot(root, storage, machine, receipt, Publication::Candidate).map(|_| ())
+    publish_snapshot(
+        root,
+        storage,
+        machine,
+        checked.receipt(),
+        Publication::Candidate,
+    )
+    .map(|_| ())
 }
 
 /// Preserve an existing boot binding when the running host has an unfinished live selection.
@@ -94,9 +101,15 @@ pub(super) fn checkpoint(
     root: &Path,
     storage: &Path,
     machine: &Path,
-    receipt: &HostReceipt,
+    checked: &super::ValidatedHost,
 ) -> Result<bool> {
-    publish_snapshot(root, storage, machine, receipt, Publication::Checkpoint)
+    publish_snapshot(
+        root,
+        storage,
+        machine,
+        checked.receipt(),
+        Publication::Checkpoint,
+    )
 }
 
 /// Capture one typed host identity; only the candidate path can snapshot the precommit phase.
@@ -158,8 +171,8 @@ fn publish_snapshot(
     Ok(true)
 }
 
-pub(super) fn restore(sysroot: &Path, receipt: &HostReceipt) -> Result<()> {
-    restore_with(sysroot, receipt, |_| Ok(()))
+pub(super) fn restore(sysroot: &Path, checked: &super::ValidatedHost) -> Result<()> {
+    restore_with(sysroot, checked.receipt(), |_| Ok(()))
 }
 
 /// The hook represents interruption before publication or immediately after a durable effect.

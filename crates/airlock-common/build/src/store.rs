@@ -10,6 +10,26 @@ use rusix::{
     nix_record, nix_text,
 };
 
+/// Detach a guest topology while retaining only its natively derived host requirements.
+/// The caller supplies its existing guest-handoff check. The separate requirement output keeps
+/// Nix references to kernels and executables; Linux root and shared-store payloads remain detached.
+pub fn detached_boot_topology(
+    pkgs: &NixValue,
+    native: &NixValue,
+    topology: NixValue,
+    handoff: NixValue,
+) -> NixValue {
+    pkgs.clone().select("runCommand").call("airlock-usb-prepared-topology.json").call(nix_record! {
+        "__structuredAttrs": true,
+        "outputs": NixValue::list(["out".into(), "requirements".into()]),
+        "unsafeDiscardReferences": nix_record! { "out": true },
+    }).call(nix_text!(r#"
+        {handoff}
+        {native}/bin/airlock-dom0-service storage image boot-requirements {topology} > "$requirements"
+        cp {topology} "$out"
+    "#, handoff = handoff, native = native.clone(), topology = topology))
+}
+
 /// Build the format-only tool from an independently locked source root.
 /// Application manifests, lockfile, feature graph and authoring code never enter this derivation.
 pub(crate) fn packer(pkgs: &NixValue, workspace: &Workspace) -> Package {

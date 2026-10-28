@@ -2,6 +2,71 @@
 
 use super::*;
 
+/// Exercise the production reference-detachment recipe with the already Cargo-built native tool.
+/// Tiny executable/kernel fixtures test store references; ELF admission is covered separately.
+pub(super) fn retention(inputs: NixValue) -> NixValue {
+    let pkgs = NixValue::builtin("import")
+        .call(inputs.clone().select("nixpkgs"))
+        .call(rusix::nix_record! { "system": "x86_64-linux" });
+    pkgs.bind(|pkgs| {
+        let binary = NixValue::builtin("path").call(rusix::nix_record! {
+            "path": NixPath::from_source_text(inputs.clone().select("native").into_expr::<String>()),
+            "name": "airlock-dom0-cargo",
+        });
+        let native = pkgs.clone().select("runCommand").call("airlock-retention-native").call(rusix::nix_record! {
+            "buildInputs": NixValue::list([
+                pkgs.clone().select("lib.getLib").call(pkgs.clone().select("udev")),
+                pkgs.clone().select("stdenv.cc.cc.lib"),
+                pkgs.clone().select("python3"),
+            ]),
+        }).call(rusix::nix_text!(r#"
+            mkdir -p "$out/bin"
+            cp {binary} "$out/bin/airlock-dom0-service"
+            chmod 0555 "$out/bin/airlock-dom0-service"
+        "#, binary = binary));
+        let executable = pkgs.clone().select("writeTextDir").call("kernel.elf").call("executable fixture");
+        let kernel = pkgs.clone().select("writeTextDir").call("vmlinuz").call("kernel fixture");
+        let guest = pkgs.clone().select("writeTextDir").call("root.img").call("Linux guest payload");
+        let topology = rusix::nix_record! {
+            "schema":"airlock.qubes-topology.v1",
+            "kernels":rusix::nix_record! { "qubes-kernel":rusix::nix_record! { "source":kernel.clone().to_text() } },
+            "domains":rusix::nix_record! {
+                "sys-clipboard":rusix::nix_record! {
+                    "class":"HermitVM", "netvm":NixValue::null(), "template":NixValue::null(),
+                    "features":rusix::nix_record! { "qrexec":"", "gui":"" },
+                    "prefs":rusix::nix_record! { "memory":32_i64,"maxmem":32_i64,"vcpus":1_i64,
+                        "virt_mode":"pvh","kernel":"","guivm":NixValue::null(),"audiovm":NixValue::null() },
+                    "backend":rusix::nix_record! { "type":"hermit","system":rusix::nix_record! { "source":executable.clone().to_text() },
+                        "artifact":rusix::nix_record! { "schema":"airlock.hermit-pvh.v1", "executable":rusix::nix_text!("{image}/kernel.elf",image=executable.clone()),
+                            "bytes":64_i64,"sha256":"a".repeat(64),"source_revision":"b".repeat(40),
+                            "integration_revision":"c".repeat(40),"build_lock":"d".repeat(64),"authority":"disconnected" } },
+                },
+                "usr-home":rusix::nix_record! {
+                    "class":"StandaloneVM", "netvm":NixValue::null(),"template":NixValue::null(),
+                    "backend":rusix::nix_record! { "type":"nix-closure", "system":rusix::nix_record! { "source":guest.clone().to_text() },
+                        "root":rusix::nix_record! { "source":rusix::nix_text!("{guest}/root.img",guest=guest.clone()) },
+                        "kernel":rusix::nix_record! { "name":"qubes-kernel" },
+                        "store":rusix::nix_record! { "source":guest.clone().to_text(),"mode":"shared-closure",
+                            "device":"/dev/xvde","blobDevice":"/dev/xvdf","mountpoint":"/nix/store","viewBackend":"erofs-objectmap" } },
+                },
+            },
+        };
+        let topology = pkgs.clone().select("writeText").call("mixed-boot-topology.json").call(NixValue::builtin("toJSON").call(topology));
+        let detached = airlock_build::store::detached_boot_topology(&pkgs, &native, topology, "".into());
+        let required = detached.clone().select("requirements");
+        let system = pkgs.clone().select("runCommand").call("airlock-retained-host").call(rusix::nix_record! {})
+            .call(rusix::nix_text!(r#"
+                mkdir -p "$out"
+                ln -s {required} "$out/boot-requirements"
+            "#, required=required.clone()));
+        rusix::nix_record! {
+            "system":system,
+            "report":rusix::nix_record! { "executable":executable.to_text(),"kernel":kernel.to_text(),
+                "guest":guest.to_text(),"requirements":required.to_text(),"detached":detached.to_text(),"native":native.to_text() },
+        }
+    })
+}
+
 /// Evaluate real upstream host-side disk hooks without building a system, disk or assembly VM.
 pub(super) fn raw_disk_hooks(inputs: NixValue) -> NixValue {
     let source = inputs.clone().select("nixpkgs");
@@ -46,6 +111,13 @@ pub(super) fn raw_disk_hooks(inputs: NixValue) -> NixValue {
         rusix::nix_record! {
             "preVM": image.clone().select("preVM"),
             "postVM": image.select("postVM"),
+            "checkedBuilder": airlock_build::vm::checked_image_builder(
+                &"/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-native".into(),
+                &"/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-seed".into(),
+                &"/nix/store/cccccccccccccccccccccccccccccccc-topology".into(),
+                &"/nix/store/dddddddddddddddddddddddddddddddd-host".into(),
+                &rusix::nix_record! { "builder": "/nix/store/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-builder", "args": NixValue::list(["-e".into(), "upstream.sh".into()]) },
+            ),
         }
     })
 }
@@ -191,6 +263,21 @@ fn prepared_store_sealed_store_body(config: NixValue) -> NixValue {
                 NixValue::builtin("map")
                     .call(NixValue::builtin("toString"))
                     .call(boot.clone().select("system.extraDependencies")),
+            ),
+            (
+                "requiredBootArtifacts",
+                boot.clone()
+                    .select("system.build.requiredBootArtifacts")
+                    .to_text(),
+            ),
+            (
+                "bootArtifactReport",
+                NixValue::builtin("fromJSON").call(
+                    NixValue::builtin("unsafeDiscardStringContext").call(
+                        NixValue::builtin("readFile")
+                            .call(boot.clone().select("system.build.requiredBootArtifacts")),
+                    ),
+                ),
             ),
             (
                 "hermitExecutables",

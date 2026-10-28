@@ -44,6 +44,8 @@ mod state;
 
 mod store;
 
+pub use store::{ValidatedHost, VerifiedImageSeed};
+
 use airlock_nix_core::identity::{GuestName, ReviewId};
 use anyhow::{Result, ensure};
 use clap::{Parser, Subcommand};

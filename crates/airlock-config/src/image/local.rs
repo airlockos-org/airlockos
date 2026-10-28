@@ -10,7 +10,7 @@ use rusix::{
 };
 
 /// Seed the normal Qubes database and guest storage before the first nested boot.
-pub(crate) fn module(workspace: &Workspace, prepared: NixValue, entries: NixValue) -> NixValue {
+pub(crate) fn module(workspace: &Workspace, prepared: NixValue) -> NixValue {
     ContextualModule::with_arguments(["modulesPath"], |context| {
         let runtime = store::runtime(
             &context.pkgs,
@@ -19,14 +19,6 @@ pub(crate) fn module(workspace: &Workspace, prepared: NixValue, entries: NixValu
             prepared.clone(),
         );
         let native = Application::Dom0.build(&context.pkgs, workspace).as_expression();
-        let hermit = context.lib.clone().select("filterAttrs")
-            .call(NixValue::function(|_| NixValue::function(|entry| {
-                entry.attr_or("backendType", "nix-closure").equals("hermit")
-            })))
-            .call(entries);
-        let executables = NixValue::builtin("map")
-            .call(NixValue::function(|entry| entry.select("executable")))
-            .call(NixValue::builtin("attrValues").call(hermit));
         let image = usb::disk_builder(&context).call(
             usb::disk_arguments(&context, "nixos").merge_attrs(nix_record! { "copyChannel": false }),
         );
@@ -77,7 +69,6 @@ pub(crate) fn module(workspace: &Workspace, prepared: NixValue, entries: NixValu
 
         ModuleBody::new(nix_record! {
             "system": nix_record! {
-                "extraDependencies": executables,
                 "build": nix_record! {
                     "image": context.lib.clone().select("mkForce").call(image),
                     "localPreparedRuntime": runtime,

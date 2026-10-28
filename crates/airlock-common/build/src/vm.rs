@@ -10,6 +10,30 @@ use rusix::{
     nix_record, nix_text,
 };
 
+/// Route an upstream image builder through the native seed-validation boundary.
+/// The original builder and arguments remain unchanged after the checked seed, topology and host.
+/// Nix observes these deferred values; the native command performs integrity and completeness checks.
+pub fn checked_image_builder(
+    native: &NixValue,
+    seed: &NixValue,
+    topology: &NixValue,
+    host: &NixValue,
+    original: &NixValue,
+) -> NixValue {
+    nix_record! {
+        "builder": nix_text!("{native}/bin/airlock-dom0-service", native = native.clone()),
+        "args": NixValue::concat_lists([
+            NixValue::list([
+                "storage".into(), "image".into(), "assemble-host".into(),
+                seed.clone().to_text(), topology.clone().to_text(),
+                "--profile".into(), "normal".into(), "--host".into(), host.clone().to_text(),
+                "--".into(), original.clone().select("builder").to_text(),
+            ]),
+            original.clone().select("args"),
+        ]),
+    }
+}
+
 /// Stage an upstream NixOS raw disk inside its output directory before the assembly VM starts.
 /// Publication then renames the file within that directory instead of moving it from build scratch.
 /// Evaluation fails if the upstream staging assignment, earlier output-directory creation or raw

@@ -110,7 +110,8 @@ pub(super) fn assemble(sysroot: &Path, cmdline: &str) -> Result<Value> {
         system = text(&read(&root.join("host/aliases.json"))?, &system)?;
     }
 
-    let record = host::validate(&root, Path::new(host::POOL), &system, false)?;
+    let checked = host::validate(&root, Path::new(host::POOL), &system, false)?;
+    let record = checked.receipt();
     let generation = record.generation.get();
     let generation_root = storage.join("generations").join(generation.to_string());
     let upper = generation_root.join("upper");
@@ -307,7 +308,7 @@ pub(super) fn assemble(sysroot: &Path, cmdline: &str) -> Result<Value> {
             physical(Path::new(&system))?.join("init").is_file(),
             "selected init missing from assembled view"
         );
-        host_machine::restore(sysroot, &record)?;
+        host_machine::restore(sysroot, &checked)?;
         write(&root.join("host/running.json"), &record, 0o644)?;
         for directory in children(&root.join("running/dom0"))? {
             let old = directory

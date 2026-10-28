@@ -24,6 +24,58 @@ pub(super) const HOST: &str = airlock_machine_core::host_store::ROOT;
 
 pub(super) const MACHINE: &str = "/var/lib/airlock/machine";
 
+/// A retained host view whose records, files and complete inventory were authenticated.
+/// Wire records are diagnostic claims and cannot construct this evidence.
+///
+/// ```compile_fail
+/// use airlock_dom0_service::ValidatedHost;
+/// /// Deserializing a receipt must not bypass filesystem and retention checks.
+/// fn bypass() {
+///     fn deserialize<T: serde::de::DeserializeOwned>() {}
+///     deserialize::<ValidatedHost>();
+/// }
+/// ```
+pub struct ValidatedHost {
+    // Authenticated record; immutable access cannot manufacture another checked view.
+    receipt: HostReceipt,
+    // Exact store objects in the checked manifest and registration.
+    paths: BTreeSet<String>,
+    // Canonical physical pool where the records and retained files were checked.
+    pool: PathBuf,
+}
+
+impl ValidatedHost {
+    /// Render the original wire record for diagnostics without granting a decoding constructor.
+    pub fn report(&self) -> Result<Value> {
+        Ok(serde_json::to_value(&self.receipt)?)
+    }
+
+    pub(crate) fn receipt(&self) -> &HostReceipt {
+        &self.receipt
+    }
+
+    pub(crate) fn paths(&self) -> &BTreeSet<String> {
+        &self.paths
+    }
+
+    pub(crate) fn pool(&self) -> &Path {
+        &self.pool
+    }
+
+    pub(crate) fn observation(&self) -> Result<airlock_deployment_core::host::Observation> {
+        self.receipt.observation()
+    }
+}
+
+impl serde::Serialize for ValidatedHost {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        self.receipt.serialize(serializer)
+    }
+}
+
 /// Open the same selected overlay configured for the host's Nix daemon.
 pub(super) fn overlay_uri() -> String {
     airlock_machine_core::host_store::URI.into()
@@ -34,7 +86,7 @@ pub(super) fn validate(
     logical: &Path,
     system: &str,
     allow_retired: bool,
-) -> Result<HostReceipt> {
+) -> Result<ValidatedHost> {
     let path = root
         .join("host/boots")
         .join(format!("{}.json", entry(system)?));
@@ -128,7 +180,11 @@ pub(super) fn validate(
             && pin["physical_references"] == json!(refs),
         "host retention pin mismatch"
     );
-    Ok(receipt)
+    Ok(ValidatedHost {
+        receipt,
+        paths,
+        pool: fs::canonicalize(root)?,
+    })
 }
 
 fn admit(
@@ -196,7 +252,7 @@ pub(super) fn publish(
     registration: &str,
     systems: &[String],
     incremental: bool,
-) -> Result<HostReceipt> {
+) -> Result<ValidatedHost> {
     pool_path(root, &root.join("host/boots"))?;
     if root
         .join("host/boots")
@@ -210,7 +266,7 @@ pub(super) fn publish(
     let previous = if running.try_exists()? {
         let running: Value = read(&running)?;
         let old = validate(root, root, &text(&running, "system")?, false)?;
-        Some(read::<Value>(&old.manifest)?["store"].clone())
+        Some(read::<Value>(&old.receipt().manifest)?["store"].clone())
     } else {
         None
     };
@@ -287,7 +343,7 @@ pub(super) fn publish(
         pool_path(root, &path)?;
         write(&path, &selected, 0o644)?;
     }
-    Ok(record)
+    validate(root, root, system, false)
 }
 
 pub(super) fn refresh_builder(
@@ -379,7 +435,7 @@ fn publication_registration(system: &str) -> Result<String> {
         .collect())
 }
 
-pub(super) fn publish_live(system: &str) -> Result<HostReceipt> {
+pub(super) fn publish_live(system: &str) -> Result<ValidatedHost> {
     let root = Path::new(POOL);
     ensure_pool(root)?;
     let temporary = Path::new(HOST).join("publishing");
@@ -401,7 +457,7 @@ pub(super) fn publish_live(system: &str) -> Result<HostReceipt> {
     let record = publish(root, system, &registration, &[], true)?;
     let directory = Path::new(HOST)
         .join("generations")
-        .join(record.generation.to_string());
+        .join(record.receipt().generation.to_string());
     if !directory.join("nix/var/nix/db/db.sqlite").try_exists()? {
         database::seed(
             Path::new("/nix/var/nix/db/db.sqlite"),
@@ -413,9 +469,19 @@ pub(super) fn publish_live(system: &str) -> Result<HostReceipt> {
     Ok(record)
 }
 
-pub(super) fn select(root: &Path, esp: &Path, system: &str, firmware: bool) -> Result<HostReceipt> {
+pub(super) fn select(
+    root: &Path,
+    esp: &Path,
+    system: &str,
+    firmware: bool,
+) -> Result<ValidatedHost> {
     let record = validate(root, root, system, false)?;
-    let entry = boot_artifacts::verify(root, esp, &record.system, record.generation)?;
+    let entry = boot_artifacts::verify(
+        root,
+        esp,
+        &record.receipt().system,
+        record.receipt().generation,
+    )?;
     boot_artifacts::select_entry(esp, &entry, firmware)?;
     write(&root.join("host/selected.json"), &record, 0o644)?;
     Ok(record)
@@ -435,7 +501,7 @@ pub(super) fn retire(root: &Path, esp: &Path, system: &str) -> Result<Value> {
         .join("host/boots")
         .join(format!("{}.json", entry(system)?));
     if path.try_exists()? {
-        let mut record = validate(root, root, system, true)?;
+        let mut record = validate(root, root, system, true)?.receipt().clone();
         record.retired = Some(true);
         write(&path, &record, 0o644)?;
     }

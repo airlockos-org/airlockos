@@ -92,56 +92,26 @@ pub(super) fn prepared_configuration(
     let native = Application::Dom0
         .build(&context.pkgs, workspace)
         .as_expression();
-    let topology = context
-        .pkgs
-        .clone()
-        .select("runCommand")
-        .call("airlock-usb-prepared-topology.json")
-        .call(nix_record! {
-            "__structuredAttrs": true,
-            "unsafeDiscardReferences": nix_record! {
-                "out": true,
-            },
-        })
-        .call(nix_text!(
-            r#"
-            {native}/bin/airlock-dom0-service storage image verify-handoff {topology} {prepared}/pool
-            cp {topology} "$out"
-        "#,
-            native = native,
-            prepared = prepared.clone(),
-            topology = store::json(
-                &context.pkgs,
-                "airlock-usb-topology.json",
-                context.config.clone().select("airlock.qubes.topology"),
-            ),
-        ));
-    let kernels = NixValue::builtin("map")
-        .call(NixValue::function(|kernel| kernel.select("source")))
-        .call(
-            NixValue::builtin("attrValues")
-                .call(context.config.clone().select("airlock.qubes.kernels")),
-        );
-    // The detached topology no longer retains these paths. Hermit boots from
-    // dom0's store, unlike Linux guest payloads served by the prepared pool.
-    let hermit = context
-        .lib
-        .clone()
-        .select("filterAttrs")
-        .call(NixValue::function(|_| {
-            NixValue::function(|domain| domain.select("backend.type").equals("hermit"))
-        }))
-        .call(
-            context
-                .config
-                .clone()
-                .select("airlock.qubes.topology.domains"),
-        );
-    let executables = NixValue::builtin("map")
-        .call(NixValue::function(|domain| {
-            domain.select("backend.system.source")
-        }))
-        .call(NixValue::builtin("attrValues").call(hermit));
+    let topology = store::json(
+        &context.pkgs,
+        "airlock-usb-topology.json",
+        context.config.clone().select("airlock.qubes.topology"),
+    );
+    let handoff = nix_text!(
+        "{native}/bin/airlock-dom0-service storage image verify-handoff {topology} {prepared}/pool",
+        native = native.clone(),
+        topology = topology.clone(),
+        prepared = prepared.clone(),
+    );
+    let topology = airlock_build::store::detached_boot_topology(
+        &context.pkgs,
+        &native,
+        topology,
+        handoff.into(),
+    );
+    // Only the requirement output keeps references. Its contents come from the
+    // same exhaustive native contract used by startup and image validation.
+    let requirements = topology.clone().select("requirements");
 
     nix_record! {
         "environment": nix_record! {
@@ -153,16 +123,14 @@ pub(super) fn prepared_configuration(
             },
         },
         "system": nix_record! {
-            "extraDependencies": NixValue::concat_lists([
-                NixValue::list([
+            "extraDependencies": NixValue::list([
                     prepared.clone().select("descriptors"),
                     prepared.clone().select("validation"),
-                ]),
-                kernels,
-                executables,
+                    requirements.clone(),
             ]),
             "build": nix_record! {
                 "usbPreparedGuestStore": prepared,
+                "requiredBootArtifacts": requirements,
             },
         },
     }
@@ -323,9 +291,9 @@ fn disk(
                             echo "USB image: validating prepared store before disk assembly" >&2
                             {check}
                         "#,
-                        check = unified.clone().select("checkCommand"),
+                        check = unified.clone().select("guestCheckCommand"),
                     ).into(),
-                    old.select("preVM"),
+                    old.clone().select("preVM"),
                     nix_text!(
                         r#"
                             echo 'USB image: disk prepared; starting offline installation' >&2
@@ -336,7 +304,10 @@ fn disk(
 
             NixValue::if_else(
                 valid,
-                definitions,
+                definitions.merge_attrs(airlock_build::vm::checked_image_builder(
+                    &native, unified, &unified.clone().select("bootTopology"),
+                    &unified.clone().select("bootSystem"), &old,
+                )),
                 NixValue::builtin("throw").call(
                     "Upstream disk assembly no longer exposes the required mount, unmount and image-publication hooks."
                 ),

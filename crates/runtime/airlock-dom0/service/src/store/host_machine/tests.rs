@@ -3,6 +3,26 @@
 use super::*;
 use serde_json::json;
 
+/// Exercise restoration after host authentication; public entry points require opaque evidence.
+fn restore_receipt(root: &Path, receipt: &HostReceipt) -> Result<()> {
+    restore_with(root, receipt, |_| Ok(()))
+}
+
+/// Exercise candidate snapshot persistence independently of the host-store authentication fixture.
+fn save_receipt(root: &Path, storage: &Path, machine: &Path, receipt: &HostReceipt) -> Result<()> {
+    publish_snapshot(root, storage, machine, receipt, Publication::Candidate).map(|_| ())
+}
+
+/// Exercise checkpoint policy after authentication, including interrupted selections.
+fn checkpoint_receipt(
+    root: &Path,
+    storage: &Path,
+    machine: &Path,
+    receipt: &HostReceipt,
+) -> Result<bool> {
+    publish_snapshot(root, storage, machine, receipt, Publication::Checkpoint)
+}
+
 /// Immutable host identity used without invoking live pool or bootloader operations.
 const SYSTEM: &str = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-host";
 
@@ -96,7 +116,7 @@ impl Fixture {
             &json!({"stale":true}),
             0o644,
         )?;
-        assert!(restore(self.root.path(), &self.receipt).is_err());
+        assert!(restore_receipt(self.root.path(), &self.receipt).is_err());
         assert_eq!(
             state::read::<Value>(&self.machine().join("selection.json"))?,
             json!({"stale":true})
@@ -118,7 +138,7 @@ fn interrupted_boot_publication_replays_the_complete_bound_snapshot() -> Result<
         });
         assert!(result.is_err());
         for _ in 0..2 {
-            restore(fixture.root.path(), &fixture.receipt)?;
+            restore_receipt(fixture.root.path(), &fixture.receipt)?;
             assert_eq!(
                 state::read::<Value>(&fixture.machine().join("selection.json"))?,
                 fixture.binding["selection"]
@@ -206,7 +226,7 @@ fn legacy_bindings_cannot_skip_empty_guest_declarations_or_changed_staging() -> 
     let fixture = Fixture::new()?;
     fixture.save_binding(&json!({"schema":"airlock.host-machine.v1","system":SYSTEM,
         "selection":fixture.binding["selection"],"staged":{"usr-home":7}}))?;
-    restore(fixture.root.path(), &fixture.receipt)?;
+    restore_receipt(fixture.root.path(), &fixture.receipt)?;
     Ok(())
 }
 
@@ -297,23 +317,23 @@ fn image_binding_and_bootstrap_exception_do_not_invent_a_transaction() -> Result
         0o644,
     )?;
     for _ in 0..2 {
-        restore(fixture.root.path(), &fixture.receipt)?;
+        restore_receipt(fixture.root.path(), &fixture.receipt)?;
         assert!(!fixture.machine().join("selection.json").exists());
         assert!(!fixture.machine().join("latest.json").exists());
     }
     fs::remove_file(fixture.storage().join("generations/2/machine.json"))?;
-    assert!(restore(fixture.root.path(), &fixture.receipt).is_err());
+    assert!(restore_receipt(fixture.root.path(), &fixture.receipt).is_err());
     let mut initial = fixture.receipt.clone();
     initial.generation = 1.try_into()?;
-    assert!(restore(fixture.root.path(), &initial).is_err());
+    assert!(restore_receipt(fixture.root.path(), &initial).is_err());
     fs::remove_file(fixture.storage().join("boot-staged.json"))?;
-    restore(fixture.root.path(), &initial)?;
+    restore_receipt(fixture.root.path(), &initial)?;
     write(
         &fixture.machine().join("latest.json"),
         &json!({"stale":true}),
         0o644,
     )?;
-    assert!(restore(fixture.root.path(), &initial).is_err());
+    assert!(restore_receipt(fixture.root.path(), &initial).is_err());
     Ok(())
 }
 
@@ -333,7 +353,7 @@ fn save_captures_checked_identity_and_refuses_inconsistent_snapshot() -> Result<
         "previous":previous,"phase":"host-boot-selection"}),
         0o600,
     )?;
-    save(
+    save_receipt(
         &fixture.root.path().join("pool"),
         &fixture.storage(),
         &machine,
@@ -348,7 +368,7 @@ fn save_captures_checked_identity_and_refuses_inconsistent_snapshot() -> Result<
     );
     assert_eq!(bound["selection"], selection);
     // Checkpoint must preserve this binding rather than replace it with an unfinished selection.
-    assert!(!checkpoint(
+    assert!(!checkpoint_receipt(
         &fixture.root.path().join("pool"),
         &fixture.storage(),
         &machine,
@@ -358,7 +378,7 @@ fn save_captures_checked_identity_and_refuses_inconsistent_snapshot() -> Result<
     let mut status: Value = state::read(&status_path)?;
     status["phase"] = json!("failed");
     write(&status_path, &status, 0o600)?;
-    assert!(!checkpoint(
+    assert!(!checkpoint_receipt(
         &fixture.root.path().join("pool"),
         &fixture.storage(),
         &machine,
@@ -366,7 +386,7 @@ fn save_captures_checked_identity_and_refuses_inconsistent_snapshot() -> Result<
     )?);
     status["phase"] = json!("reboot-required");
     write(&status_path, &status, 0o600)?;
-    assert!(checkpoint(
+    assert!(checkpoint_receipt(
         &fixture.root.path().join("pool"),
         &fixture.storage(),
         &machine,
@@ -374,7 +394,7 @@ fn save_captures_checked_identity_and_refuses_inconsistent_snapshot() -> Result<
     )?);
     write(&release.join("staged.json"), &json!({}), 0o600)?;
     assert!(
-        save(
+        save_receipt(
             &fixture.root.path().join("pool"),
             &fixture.storage(),
             &machine,
@@ -404,7 +424,7 @@ fn changed_evidence_after_interruption_cannot_finish_the_snapshot() -> Result<()
     let mut status: Value = state::read(&status_path)?;
     status["phase"] = json!("failed");
     write(&status_path, &status, 0o600)?;
-    assert!(restore(fixture.root.path(), &fixture.receipt).is_err());
+    assert!(restore_receipt(fixture.root.path(), &fixture.receipt).is_err());
     assert!(!fixture.storage().join("boot-staged.json").exists());
     assert!(!fixture.machine().join("controller").is_symlink());
     Ok(())

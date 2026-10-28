@@ -17,7 +17,7 @@ pub(crate) enum Schema {
     V1,
 }
 
-/// Complete publication/validation result, distinct from a deployment approval.
+/// Decoded publication claim; only the storage validator can authenticate it as a host view.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct HostReceipt {
     /// Known host boot-record schema.

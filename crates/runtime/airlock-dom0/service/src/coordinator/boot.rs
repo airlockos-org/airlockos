@@ -398,11 +398,11 @@ impl Coordinator {
             .collect();
         if known.len() != names.len() || receipt.identity != selection.identity {
             if !known.is_empty() {
-                self.boot_snapshot(selection.inputs.topology(), &known)?;
+                self.boot_snapshot(&selection.inputs.requirements()?, &known)?;
             }
             return Ok(false);
         }
-        let (shared, snapshots) = self.boot_snapshot(selection.inputs.topology(), names)?;
+        let (shared, snapshots) = self.boot_snapshot(&selection.inputs.requirements()?, names)?;
         let fresh = snapshots
             .iter()
             .map(|(name, fingerprint)| DomainState {
@@ -433,7 +433,7 @@ impl Coordinator {
     }
 
     fn boot_record(&self, selection: &BootSelection, names: &[GuestName]) -> Result<()> {
-        let (shared, mut domains) = self.boot_snapshot(selection.inputs.topology(), names)?;
+        let (shared, mut domains) = self.boot_snapshot(&selection.inputs.requirements()?, names)?;
         if let Some(previous) = self.boot_receipt()?
             && previous.identity == selection.identity
             && previous.shared == shared

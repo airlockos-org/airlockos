@@ -326,6 +326,18 @@ fn main() -> Result<()> {
         }
         "boot-cache-maintenance" => maintenance::execute(&args[1..])?,
         "airlock-test-peer" => match args.get(1).map(String::as_str) {
+            Some("image-assembly") => {
+                let report = json!({
+                    "seed":std::env::var("AIRLOCK_VERIFIED_IMAGE_SEED")?,
+                    "host":std::env::var("AIRLOCK_VERIFIED_IMAGE_HOST")?,
+                    "profile":std::env::var("AIRLOCK_VERIFIED_IMAGE_PROFILE")?,
+                    "topology":std::env::var("AIRLOCK_VERIFIED_IMAGE_TOPOLOGY")?,
+                });
+                fs::write(
+                    args.get(2).context("assembly marker")?,
+                    serde_json::to_vec(&report)?,
+                )?;
+            }
             Some("observe-build-cpus") => observe_build_cpus(&args[2..])?,
             Some("host-capabilities") => println!("{}", airlock_tests::system::capabilities()),
             Some("systemd-order-setup") => {

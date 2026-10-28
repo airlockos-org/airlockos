@@ -7,7 +7,12 @@ use crate::{
 use anyhow::Result;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, process::Command};
+use std::{
+    fs,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 /// One admitted host, exact boot metadata and a disposable EFI partition.
 struct Host {
@@ -23,6 +28,13 @@ impl Host {
     /// Admit a host generation and construct the minimum valid Xen PE boot entry.
     fn new() -> Result<Self> {
         let store = Store::new()?;
+        fs::write(
+            store
+                .physical
+                .join(Path::new(&store.system).file_name().unwrap())
+                .join("kernel.elf"),
+            b"fixture executable",
+        )?;
         let receipt = common::json(
             store
                 .command(&["pool", "admit", "--pool-root"])
@@ -127,6 +139,171 @@ efi /EFI/nixos/xen.efi
     fn run(&self, arguments: &[&str]) -> Result<Value> {
         common::json(&mut self.command(arguments), None)
     }
+
+    /// Copy admitted bytes into an image seed and apply the production runtime path convention.
+    fn image_seed(&self) -> Result<PathBuf> {
+        let seed = self.store.temporary.path().join("image-seed");
+        let pool = seed.join("pool");
+        let old = self.store.pool.to_str().unwrap();
+        let installed = "/var/lib/airlock/closure-store";
+        for (relative, (bytes, _)) in snapshot(&self.store.pool)? {
+            let path = pool.join(relative);
+            fs::create_dir_all(path.parent().unwrap())?;
+            if path.extension().is_some_and(|s| s == "json") {
+                let mut value: Value = serde_json::from_slice(&bytes)?;
+                relocate_seed_json(&mut value, old, installed);
+                fs::write(path, serde_json::to_vec(&value)?)?;
+            } else {
+                fs::write(path, bytes)?;
+            }
+        }
+        let boots = pool.join("host/boots");
+        for entry in fs::read_dir(boots)? {
+            let path = entry?.path();
+            let mut record: Value = serde_json::from_slice(&fs::read(&path)?)?;
+            let map =
+                pool.join(Path::new(record["blob_map"].as_str().unwrap()).strip_prefix(installed)?);
+            record["blob_map_sha256"] =
+                json!(format!("{hash:x}", hash = Sha256::digest(fs::read(map)?)));
+            fs::write(path, serde_json::to_vec(&record)?)?;
+        }
+        let mut fingerprints = json!({});
+        for (relative, (bytes, _)) in snapshot(&pool)? {
+            fingerprints[relative.to_str().unwrap()] = json!({"size":bytes.len(), "sha256":format!("{hash:x}", hash = Sha256::digest(&bytes))});
+        }
+        fs::write(
+            seed.join("pool-fingerprints.json"),
+            serde_json::to_vec(&fingerprints)?,
+        )?;
+        Ok(seed)
+    }
+}
+
+/// Relocate fixture records together, including retained map and manifest references.
+fn relocate_seed_json(value: &mut Value, old: &str, installed: &str) {
+    match value {
+        Value::String(text)
+            if text == old
+                || text
+                    .strip_prefix(old)
+                    .is_some_and(|tail| tail.starts_with('/')) =>
+        {
+            *text = format!("{installed}{tail}", tail = &text[old.len()..]);
+        }
+        Value::Array(values) => {
+            for value in values {
+                relocate_seed_json(value, old, installed);
+            }
+        }
+        Value::Object(values) => {
+            for value in values.values_mut() {
+                relocate_seed_json(value, old, installed);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A real packaged manifest gates assembly of a mixed topology; receipts and missing artifacts cannot bypass it.
+#[test]
+fn mixed_image_assembly_requires_checked_seed_and_complete_host_artifacts() -> Result<()> {
+    let host = Host::new()?;
+    let seed = host.image_seed()?;
+    let root = host.store.temporary.path();
+    let topology_path = root.join("topology.json");
+    let marker = root.join("assembly-started.json");
+    let linux = "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-linux";
+    let mut topology = json!({"schema":"airlock.qubes-topology.v1", "domains":{
+        "sys-clipboard":{
+            "class":"HermitVM", "netvm":null, "template":null, "features":{"qrexec":"","gui":""},
+            "prefs":{"memory":32,"maxmem":32,"vcpus":1,"kernel":"","virt_mode":"pvh","guivm":null,"audiovm":null},
+            "backend":{"type":"hermit","system":{"source":host.store.system},"artifact":{
+                "schema":"airlock.hermit-pvh.v1", "executable":format!("{system}/kernel.elf", system = host.store.system),
+                "bytes":64,"sha256":"a".repeat(64),"source_revision":"b".repeat(40),
+                "integration_revision":"c".repeat(40),"build_lock":"d".repeat(64),"authority":"disconnected"}}
+        },
+        "usr-home":{
+            "class":"StandaloneVM","template":null,"netvm":null,
+            "backend":{"type":"nix-closure","system":{"source":linux},
+                "root":{"source":format!("{linux}/root.img")},"kernel":{"name":"qubes-kernel"},
+                "store":{"source":linux,"mode":"shared-closure","device":"/dev/xvde","blobDevice":"/dev/xvdf",
+                    "mountpoint":"/nix/store","viewBackend":"erofs-objectmap"}}
+        }
+    }});
+    fs::write(&topology_path, serde_json::to_vec(&topology)?)?;
+    let command = |operation: &str| {
+        let mut command = host.store.command(&["image", operation]);
+        command.arg(&seed).arg(&topology_path).args([
+            "--profile",
+            "normal",
+            "--host",
+            &host.store.system,
+        ]);
+        command
+    };
+    let checked = common::json(&mut command("verify-host"), None)?;
+    assert_eq!(checked["guests"], 2);
+    let mut assemble = command("assemble-host");
+    assemble
+        .arg("--")
+        .arg(common::binary("AIRLOCK_TEST_PEER_BIN", "airlock-test-peer"))
+        .arg("image-assembly")
+        .arg(&marker);
+    common::run(&mut assemble, None)?.checked()?;
+    let started: Value = serde_json::from_slice(&fs::read(&marker)?)?;
+    assert_eq!(started["seed"], seed.to_str().unwrap());
+    assert_eq!(started["host"], host.store.system);
+    assert_eq!(started["profile"], "normal");
+    assert_eq!(started["topology"], checked["topology"]);
+    fs::remove_file(&marker)?;
+
+    #[cfg(feature = "qubes")]
+    {
+        use airlock_deployment_core::boot::artifacts::Profile;
+        use airlock_machine_core::boot::artifacts::SelectedBoot;
+        // Root disks have separate artifact checks and are excluded from duplicate byte hashing.
+        let disk = seed.join("pool/root.img");
+        fs::write(&disk, b"original disk")?;
+        let selection = SelectedBoot::new(
+            Profile::Normal,
+            host.store.system.parse()?,
+            topology.clone(),
+        )?;
+        let evidence = airlock_dom0_service::VerifiedImageSeed::verify(&seed, selection)?;
+        fs::write(&disk, b"changed disk")?;
+        let arguments = ["image-assembly".into(), marker.clone().into_os_string()];
+        let failure = evidence
+            .assemble(
+                common::binary("AIRLOCK_TEST_PEER_BIN", "airlock-test-peer").as_os_str(),
+                &arguments,
+            )
+            .unwrap_err();
+        assert!(failure.to_string().contains("verified image input changed"));
+        assert!(
+            !marker.exists(),
+            "changed seed must never reach the upstream builder"
+        );
+    }
+
+    let missing = "/nix/store/dddddddddddddddddddddddddddddddd-missing-clipboard";
+    topology["domains"]["sys-clipboard"]["backend"]["system"]["source"] = json!(missing);
+    topology["domains"]["sys-clipboard"]["backend"]["artifact"]["executable"] =
+        json!(format!("{missing}/kernel.elf"));
+    fs::write(&topology_path, serde_json::to_vec(&topology)?)?;
+    let failed = common::run(&mut assemble, None)?;
+    assert!(!failed.status.success());
+    assert!(
+        String::from_utf8_lossy(&failed.stdout).contains("sys-clipboard: boot artifact absent")
+    );
+    assert!(!marker.exists());
+
+    fs::write(&topology_path, serde_json::to_vec(&checked)?)?;
+    assert!(
+        !common::run(&mut assemble, None)?.status.success(),
+        "a saved success receipt cannot stand in for the selected topology"
+    );
+    assert!(!marker.exists());
+    Ok(())
 }
 
 /// The fixture's flat ASCII host record uses the existing canonical JSON fingerprint protocol.

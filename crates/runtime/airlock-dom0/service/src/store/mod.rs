@@ -14,6 +14,8 @@ mod host_receipt;
 
 pub(crate) use host_receipt::HostReceipt;
 
+pub use host::ValidatedHost;
+
 pub(crate) use response::{
     AdmissionReceipt, GenerationMatch, GenerationMatchOutcome, GenerationMatchSchema, ResolvedRoot,
 };
@@ -55,6 +57,10 @@ mod host_machine;
 mod host_install;
 
 mod prepared;
+
+mod image_evidence;
+
+pub use image_evidence::VerifiedImageSeed;
 
 mod progress;
 

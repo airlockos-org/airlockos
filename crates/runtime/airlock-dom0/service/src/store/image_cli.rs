@@ -3,12 +3,51 @@
 
 use super::{fs::*, generations, prepared, root};
 use anyhow::{Result, ensure};
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 use serde_json::{Value, json};
 use std::{
+    ffi::OsString,
     fs,
     path::{Path, PathBuf},
 };
+
+/// Explicit boot policy decoded only at the image command boundary.
+#[derive(Clone, Copy, ValueEnum)]
+enum Profile {
+    /// Normal VM and graphical startup.
+    Normal,
+    /// Independent text recovery.
+    Recovery,
+}
+
+#[derive(Args)]
+struct Selection {
+    // Profile whose complete topology is being packaged, with no implicit default.
+    #[arg(long, value_enum)]
+    profile: Profile,
+    // Exact host generation selected by this profile.
+    #[arg(long)]
+    host: crate::model::StorePath,
+}
+
+impl Selection {
+    /// Bind the command's explicit profile and host to the complete validated topology.
+    fn decode(
+        self,
+        topology: &Path,
+    ) -> Result<airlock_machine_core::boot::artifacts::SelectedBoot> {
+        use airlock_deployment_core::boot::artifacts::Profile as Checked;
+        let profile = match self.profile {
+            Profile::Normal => Checked::Normal,
+            Profile::Recovery => Checked::Recovery,
+        };
+        airlock_machine_core::boot::artifacts::SelectedBoot::new(
+            profile,
+            self.host,
+            crate::state::configuration(topology)?,
+        )
+    }
+}
 
 /// Parsed store request, validated by the application's single command parser.
 #[derive(Args)]
@@ -20,6 +59,10 @@ pub(crate) struct Request {
 
 #[derive(Subcommand)]
 enum Operation {
+    BootRequirements {
+        // Exact generated topology whose complete native requirements are emitted.
+        topology: PathBuf,
+    },
     PreparePool {
         // Fresh directory receiving immutable guest and builder data.
         root: PathBuf,
@@ -80,6 +123,21 @@ enum Operation {
         seed: PathBuf,
         // Exact guest topology whose Hermit executables must be retained by dom0.
         topology: PathBuf,
+        // Explicit profile and host bound to the integrity check.
+        #[command(flatten)]
+        selection: Selection,
+    },
+    AssembleHost {
+        // Immutable seed whose integrity and completeness authorize this invocation.
+        seed: PathBuf,
+        // Complete selected topology, rather than a list of prefiltered requirements.
+        topology: PathBuf,
+        // Profile and host that the upstream builder will assemble.
+        #[command(flatten)]
+        selection: Selection,
+        // Original upstream Nix builder and its unchanged arguments.
+        #[arg(last = true, required = true)]
+        command: Vec<OsString>,
     },
     VerifyPrepared {
         // JSON request binding the selected descriptor to the configured VM.
@@ -127,6 +185,7 @@ pub(super) fn run(command: Request) -> Result<Value> {
         Operation::PrepareHost { .. } => "Unified store",
         Operation::VerifyOutputs { .. } => "Verify guest store",
         Operation::VerifyHost { .. } => "Verify unified store",
+        Operation::AssembleHost { .. } => "Verify and assemble image",
         Operation::InstallHost { .. } => "Install host store",
         _ => return execute(command),
     };
@@ -135,6 +194,23 @@ pub(super) fn run(command: Request) -> Result<Value> {
 
 fn execute(command: Request) -> Result<Value> {
     match command.operation {
+        Operation::BootRequirements { topology } => {
+            let inputs = airlock_machine_core::boot::BootInputs::new(crate::state::configuration(
+                &topology,
+            )?)?;
+            let requirements = inputs.requirements()?;
+            let guests = requirements
+                .guests()
+                .iter()
+                .map(|guest| {
+                    json!({"domain":guest.name(),
+                "volumes":guest.volumes().iter().map(|volume| volume.name()).collect::<Vec<_>>()})
+                })
+                .collect::<Vec<_>>();
+            Ok(
+                json!({"schema":"airlock.boot-requirements.v1","host_roots":requirements.host_roots(),"guests":guests}),
+            )
+        }
         Operation::PreparePool {
             root,
             descriptors,
@@ -183,11 +259,19 @@ fn execute(command: Request) -> Result<Value> {
         } => super::progress::phase("Installing recovery and sealing host boot", || {
             prepared::install_host(&root, &recovery_paths, &recovery_system)
         }),
-        Operation::VerifyHost { seed, topology } => {
-            let inputs = airlock_machine_core::boot::BootInputs::new(crate::state::configuration(
-                &topology,
-            )?)?;
-            prepared::verify_host(&seed, inputs.topology())
+        Operation::VerifyHost {
+            seed,
+            topology,
+            selection,
+        } => Ok(super::VerifiedImageSeed::verify(&seed, selection.decode(&topology)?)?.report()),
+        Operation::AssembleHost {
+            seed,
+            topology,
+            selection,
+            command,
+        } => {
+            let evidence = super::VerifiedImageSeed::verify(&seed, selection.decode(&topology)?)?;
+            evidence.assemble(&command[0], &command[1..])
         }
         Operation::VerifyPrepared { request: path } => {
             let value = request(&path)?;

@@ -29,6 +29,28 @@ fn raw_image_publication_preserves_inode_and_sparse_allocation() -> Result<()> {
 
     let temporary = tempfile::tempdir()?;
     let report = raw_disk_hooks(temporary.path(), false)?.value()?;
+    assert_eq!(
+        report["checkedBuilder"]["builder"],
+        "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-native/bin/airlock-dom0-service"
+    );
+    assert_eq!(
+        report["checkedBuilder"]["args"],
+        json!([
+            "storage",
+            "image",
+            "assemble-host",
+            "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-seed",
+            "/nix/store/cccccccccccccccccccccccccccccccc-topology",
+            "--profile",
+            "normal",
+            "--host",
+            "/nix/store/dddddddddddddddddddddddddddddddd-host",
+            "--",
+            "/nix/store/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-builder",
+            "-e",
+            "upstream.sh"
+        ])
+    );
     // Run only the staging assignment from preVM; actual partitioning, installation
     // and the assembly VM are outside this host-side publication regression.
     let assignment = text(&report["preVM"])
@@ -115,6 +137,92 @@ fn raw_disk_hooks(root: &Path, changed: bool) -> Result<Reply> {
         "prepared_store/raw_disk_hooks",
         json!({"nixpkgs":sources["nixpkgsSource"], "changedUpstream":changed}),
     )
+}
+
+/// Nix's actual scanner retains derived host roots while detaching guest payload and build tools.
+#[test]
+#[ignore = "explicit tiny Nix builds using the already Cargo-built native requirement tool"]
+fn package_detached_topology_retains_only_derived_host_objects() -> Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let root = temporary.path();
+    let sources: Value = serde_json::from_slice(&fs::read(
+        std::env::var_os("AIRLOCK_RUSIX_SOURCES").context("prepared Nix source")?,
+    )?)?;
+    let store = PathBuf::from(std::env::var_os("AIRLOCK_NIX_ROOT").context("guarded store")?);
+    ensure!(
+        store.is_absolute() && store != Path::new("/"),
+        "select the guarded Airlock store"
+    );
+    let driver = root.join("retention.nix");
+    fs::write(&driver, common::run(Command::new(common::binary("AIRLOCK_TEST_FIXTURES_BIN", "examples/test_fixtures"))
+        .arg("prepared_store/retention").arg(serde_json::to_string(&json!({
+            "nixpkgs":sources["nixpkgsSource"], "native":common::binary("AIRLOCK_DOM0_BIN","airlock-dom0-service")
+        }))?), None)?.checked()?)?;
+    let command = || {
+        let mut command = Command::new("nix");
+        command
+            .arg("--store")
+            .arg(&store)
+            .args([
+                "--extra-experimental-features",
+                "nix-command flakes",
+                "--option",
+                "builders",
+                "",
+                "--option",
+                "build-users-group",
+                "",
+                "--option",
+                "substituters",
+                "",
+                "--offline",
+            ])
+            .env_remove("NIX_REMOTE")
+            .env("NIX_CONFIG", "")
+            .env("NIX_PATH", "");
+        command
+    };
+    let mut build = command();
+    build
+        .args(["build", "--impure", "--no-link", "--json", "--file"])
+        .arg(&driver)
+        .arg("system");
+    let built = support::run(&mut build, None, Duration::from_secs(180))?;
+    let logs = PathBuf::from(std::env::var_os("AIRLOCK_RUSIX_LOG_DIR").context("test logs")?);
+    fs::create_dir_all(&logs)?;
+    fs::write(logs.join("retention-build.stderr"), &built.stderr)?;
+    let built: Value = serde_json::from_slice(&built.checked()?)?;
+    let mut inspect = command();
+    inspect
+        .args(["eval", "--impure", "--json", "--file"])
+        .arg(&driver)
+        .arg("report");
+    let report: Value = serde_json::from_slice(&common::run(&mut inspect, None)?.checked()?)?;
+    let mut query = command();
+    query.args([
+        "path-info",
+        "--recursive",
+        text(&built[0]["outputs"]["out"]),
+    ]);
+    let closure = String::from_utf8(common::run(&mut query, None)?.checked()?)?;
+    let paths = closure.lines().collect::<Vec<_>>();
+    for field in ["executable", "kernel", "requirements"] {
+        assert!(
+            paths.contains(&text(&report[field])),
+            "host closure omitted {field}: {closure}"
+        );
+    }
+    for field in ["guest", "detached", "native"] {
+        assert!(
+            !paths.contains(&text(&report[field])),
+            "host closure retained {field}: {closure}"
+        );
+    }
+    fs::write(
+        logs.join("retention-closure.json"),
+        serde_json::to_vec_pretty(&json!({"report":report,"closure":paths}))?,
+    )?;
+    Ok(())
 }
 
 /// Changing one package rebuilds only its fragment and affected index; another closure reuses both outputs.
@@ -387,12 +495,18 @@ fn prepared_image_validates_sealed_pool_before_assembly() -> Result<()> {
     assert!(dependencies.contains(&report["validation"]));
     let executables = report["hermitExecutables"].as_array().unwrap();
     assert!(
+        report["bootDependencies"]
+            .as_array()
+            .unwrap()
+            .contains(&report["requiredBootArtifacts"])
+    );
+    assert!(
         !executables.is_empty(),
         "normal USB boot must exercise Hermit retention"
     );
     for executable in executables {
         assert!(
-            report["bootDependencies"]
+            report["bootArtifactReport"]["host_roots"]
                 .as_array()
                 .unwrap()
                 .contains(executable),

@@ -325,7 +325,9 @@ pub(super) fn run(command: Request) -> Result<Value> {
                     Ok(json!({"bound":system}))
                 }
                 Operation::CheckpointMachine => {
-                    let record: HostReceipt = read(&pool.join("host/running.json"))?;
+                    let raw: HostReceipt = read(&pool.join("host/running.json"))?;
+                    let checked = host::validate(pool, pool, raw.system.as_str(), false)?;
+                    let record = checked.receipt();
                     let selection = machine.join("selection.json");
                     if selection.try_exists()? {
                         let selection: Value = read(&selection)?;
@@ -335,7 +337,7 @@ pub(super) fn run(command: Request) -> Result<Value> {
                             return Ok(json!({"checkpoint":"unchanged","system":record.system}));
                         }
                     }
-                    if !host_machine::checkpoint(pool, storage, machine, &record)? {
+                    if !host_machine::checkpoint(pool, storage, machine, &checked)? {
                         return Ok(json!({"checkpoint":"unchanged","system":record.system}));
                     }
                     Ok(json!({"bound":record.system}))

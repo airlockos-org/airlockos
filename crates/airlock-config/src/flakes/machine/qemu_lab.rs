@@ -70,7 +70,7 @@ fn host(build: &Build, entries: NixValue, prepared: Option<NixValue>) -> NixValu
             nix_record! { "system": nix_record! { "extraDependencies": NixValue::list([kernel.clone().select("package")]) } },
         ];
         if let Some(prepared) = prepared {
-            modules.push(crate::image::local_module(&build.workspace, prepared, entries.clone()));
+            modules.push(crate::image::local_module(&build.workspace, prepared));
         }
         build.lib.clone().select("nixosSystem").call(nix_record! {
             "system": "x86_64-linux",

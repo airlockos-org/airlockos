@@ -351,20 +351,30 @@ pub(super) fn unified(
         ));
 
     seed.bind(|seed| {
+        let topology = json(pkgs, "airlock-host-topology.json", boot_topology(config));
+        let system = NixValue::if_else(
+            config.clone().select("specialisation").has_attr("usb-lab"),
+            config.clone().select("specialisation.usb-lab.configuration.system.build.toplevel"),
+            config.clone().select("system.build.toplevel"),
+        );
         let check = nix_text!(
             r#"
             {vm_check}
-            {native}/bin/airlock-dom0-service storage image verify-host {seed} {topology}
+            {native}/bin/airlock-dom0-service storage image verify-host {seed} {topology} --profile normal --host {system}
         "#,
             vm_check = vm_store.clone().select("checkCommand"),
             native = native,
             seed = seed.clone(),
-            topology = json(pkgs, "airlock-host-topology.json", boot_topology(config)),
+            topology = topology.clone(),
+            system = system.clone(),
         );
 
         seed.merge_attrs(nix_record! {
             "descriptors": vm_store.clone().select("descriptors"),
             "checkCommand": check,
+            "guestCheckCommand": vm_store.clone().select("checkCommand"),
+            "bootTopology": topology,
+            "bootSystem": system,
             "imageCaches": NixValue::list([vm_store.clone().select("imageCache"), cache]),
         })
     })
