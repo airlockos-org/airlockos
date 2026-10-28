@@ -58,6 +58,8 @@ pub struct Controller {
     filter: String,
     /// Whether file-search editing should consume keyboard navigation.
     filter_has_focus: bool,
+    /// Whether the file browser is visible; hiding it retains its filter, folders and selection.
+    files_visible: bool,
     /// Hierarchy of the changed files, retaining their review indices.
     file_tree: FileTree,
     /// Directory paths currently folded in the file tree.
@@ -164,6 +166,7 @@ impl Controller {
             tab: Tab::Source,
             filter: String::new(),
             filter_has_focus: false,
+            files_visible: true,
             file_tree,
             collapsed_folders: BTreeSet::new(),
             scroll_to_selection: false,
@@ -204,6 +207,13 @@ impl Controller {
 
 impl eframe::App for Controller {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.confirm.is_none()
+            && !self.about_open
+            && ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::B))
+        {
+            self.files_visible = !self.files_visible;
+        }
+
         self.header(ctx);
         self.footer(ctx);
         self.sidebar(ctx);

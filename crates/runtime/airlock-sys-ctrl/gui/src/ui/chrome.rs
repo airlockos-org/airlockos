@@ -24,19 +24,9 @@ impl Controller {
                             self.about_open = true;
                         }
 
-                        let label = if self.approval.is_some() { "APPROVAL REQUIRED" } else if self.review.mode == "demo" {
-                            "LOCAL PREVIEW"
-                        } else {
-                            "LOCAL REVIEW"
-                        };
-                        egui::Frame::new()
-                            .fill(ACCENT_TINT)
-                            .stroke(Stroke::new(1.0_f32, ACCENT))
-                            .inner_margin(8.0)
-                            .corner_radius(5.0)
-                            .show(ui, |ui| {
-                                ui.label(RichText::new(label).color(ACCENT).strong().size(12.0));
-                            });
+                        if self.review.mode == "demo" {
+                            ui.label(RichText::new("Preview").color(MUTED).size(12.0));
+                        }
                     });
                 });
             });

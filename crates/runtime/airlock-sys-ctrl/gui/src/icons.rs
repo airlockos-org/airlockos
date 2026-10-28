@@ -7,6 +7,10 @@ pub const BUTTON_SIZE: f32 = 28.0;
 /// Small vector glyph used for review actions, navigation and copy affordances.
 #[derive(Clone, Copy)]
 pub enum Icon {
+    /// Sidebar frame and inward chevron for hiding the changed-file browser.
+    HideFiles,
+    /// Sidebar frame and outward chevron for restoring the changed-file browser.
+    ShowFiles,
     Previous,
     Next,
     CollapseAll,
@@ -70,6 +74,28 @@ fn paint(ui: &egui::Ui, center: egui::Pos2, icon: Icon, color: Color32) {
     let point = |x, y| center + Vec2::new(x, y);
     let line = |a, b| ui.painter().line_segment([a, b], stroke);
     match icon {
+        Icon::HideFiles | Icon::ShowFiles => {
+            ui.painter().rect_stroke(
+                egui::Rect::from_min_max(point(-8.0, -7.0), point(8.0, 7.0)),
+                1.5,
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+            line(point(-2.0, -7.0), point(-2.0, 7.0));
+            let direction = if matches!(icon, Icon::HideFiles) {
+                -1.0
+            } else {
+                1.0
+            };
+            ui.painter().add(egui::Shape::line(
+                vec![
+                    point(3.0 - direction * 1.5, -3.0),
+                    point(3.0 + direction * 1.5, 0.0),
+                    point(3.0 - direction * 1.5, 3.0),
+                ],
+                stroke,
+            ));
+        }
         Icon::Previous | Icon::Next => {
             let direction = if matches!(icon, Icon::Previous) {
                 -1.0

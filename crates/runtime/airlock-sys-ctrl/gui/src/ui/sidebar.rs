@@ -3,25 +3,43 @@
 use super::*;
 
 impl Controller {
-    pub(super) fn review_title(&self, ui: &mut egui::Ui) {
-        ui.add(
-            egui::Label::new(
-                RichText::new(&self.review.candidate.subject)
-                    .strong()
-                    .size(15.0),
-            )
-            .truncate(),
-        )
-        .on_hover_text(&self.review.candidate.subject)
-        .context_menu(|ui| {
-            if ui.button("Copy change title").clicked() {
-                ui.ctx().copy_text(self.review.candidate.subject.clone());
-                ui.close();
+    pub(super) fn review_title(&mut self, ui: &mut egui::Ui) {
+        icons::row(ui, |ui| {
+            let (icon, label) = if self.files_visible {
+                (Icon::HideFiles, "Hide changed files (Ctrl+B)")
+            } else {
+                (Icon::ShowFiles, "Show changed files (Ctrl+B)")
+            };
+            if icons::button(ui, icon, label, true).clicked() {
+                self.files_visible = !self.files_visible;
+                ui.ctx().request_repaint();
             }
+
+            ui.add(
+                egui::Label::new(
+                    RichText::new(&self.review.candidate.subject)
+                        .strong()
+                        .size(15.0),
+                )
+                .truncate(),
+            )
+            .on_hover_text(&self.review.candidate.subject)
+            .context_menu(|ui| {
+                if ui.button("Copy change title").clicked() {
+                    ui.ctx().copy_text(self.review.candidate.subject.clone());
+                    ui.close();
+                }
+            });
         });
     }
 
     pub(super) fn sidebar(&mut self, ctx: &egui::Context) {
+        // A hidden filter cannot keep consuming source-navigation shortcuts.
+        self.filter_has_focus = false;
+        if !self.files_visible {
+            return;
+        }
+
         egui::SidePanel::left("files")
             .default_width(330.0)
             .min_width(270.0)
