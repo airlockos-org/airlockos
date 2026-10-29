@@ -22,6 +22,10 @@ machines (VMs), including dom0, the privileged control VM.
 
 [![VM layout: Xen runs dom0 and the system and user VMs. Dom0 manages the shared Nix store and provides read-only closure views to the other VMs.](docs/assets/system-overview.svg)](docs/assets/system-overview.svg)
 
+[![GNOME workspace overview showing Files and Calculator. Click to watch the AirlockOS desktop video.](docs/assets/desktop-video-preview.png)](https://youtu.be/h528TDh-PLU)
+
+**[Watch: AirlockOS desktop and VM workspaces](https://youtu.be/h528TDh-PLU)**
+
 AirlockOS is under active development. Qubes OS security equivalence has not
 been established. See [Security](SECURITY.md) for limitations and reporting.
 
