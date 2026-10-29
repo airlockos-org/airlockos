@@ -111,7 +111,7 @@ impl Connection {
 
     /// Queue one bounded response; the main loop drains it without blocking.
     fn reply(&mut self, reply: Reply) -> Result<(), TransportError> {
-        self.outgoing = shared::frames(Kind::Response, self.sequence, &reply.encode())?.into();
+        self.outgoing = shared::frames(Kind::Response, self.sequence, &reply.try_encode()?)?.into();
         self.flush()?;
         Ok(())
     }
@@ -173,8 +173,11 @@ pub fn run(authority: u16, nonce: &str, scratch_bytes: u64) -> Result<(), Transp
     let mut ready = false;
     let mut clipboard = Clipboard::with_storage(DEFAULT_CAPACITY, storage);
     let mut usage = clipboard.storage().usage();
-    let mut peers: Vec<Connection> = Vec::new();
-    let mut retiring: Vec<Connection> = Vec::new();
+    let mut slots = airlock_clipboard_core::resources::Slots::new();
+    let mut peers: Vec<Connection> =
+        Vec::with_capacity(airlock_clipboard_core::resources::LIVE_LIMIT);
+    let mut retiring: Vec<Connection> =
+        Vec::with_capacity(airlock_clipboard_core::resources::SLOT_LIMIT);
     loop {
         let observed = endpoint::generation();
         let now = endpoint::now_ns();
@@ -191,9 +194,10 @@ pub fn run(authority: u16, nonce: &str, scratch_bytes: u64) -> Result<(), Transp
                     {
                         let old = peers.remove(index);
                         clipboard.disconnect(old.caller);
+                        assert!(slots.retire());
                         retiring.push(old);
                     }
-                    if peers.len() >= 32 || retiring.len() >= 32 {
+                    if !slots.admit() {
                         Reply::Error(Error::Capacity)
                     } else {
                         epoch = epoch.checked_add(1).ok_or(TransportError::Corrupt)?;
@@ -207,7 +211,10 @@ pub fn run(authority: u16, nonce: &str, scratch_bytes: u64) -> Result<(), Transp
                                     grant: offer.grant,
                                 }
                             }
-                            Err(_) => Reply::Error(Error::Capacity),
+                            Err(_) => {
+                                assert!(slots.release_live());
+                                Reply::Error(Error::Capacity)
+                            }
                         }
                     }
                 }
@@ -239,6 +246,7 @@ pub fn run(authority: u16, nonce: &str, scratch_bytes: u64) -> Result<(), Transp
             if outcome.is_err() {
                 let peer = peers.remove(index);
                 clipboard.disconnect(peer.caller);
+                assert!(slots.retire());
                 retiring.push(peer);
             } else {
                 index += 1;
@@ -253,9 +261,17 @@ pub fn run(authority: u16, nonce: &str, scratch_bytes: u64) -> Result<(), Transp
                 ram = current.ram_bytes,
                 disk = current.disk_bytes
             );
+            let (live, peak) = crate::heap::APPLICATION_HEAP.usage();
+            println!(
+                "AIRLOCK_CLIPBOARD_HEAP cap={} live={live} peak={peak}",
+                crate::heap::APP_HEAP_BYTES
+            );
             usage = current;
         }
+        let before = retiring.len();
         retiring.retain_mut(|connection| connection.close(now).is_err());
+        assert!(slots.release_retired(before - retiring.len()));
+        assert_eq!(slots.counts(), (peers.len(), retiring.len()));
         // Event-driven waits also wake for bounded liveness and unfinished-copy cleanup.
         let interval = if retiring.is_empty() {
             1_000_000_000

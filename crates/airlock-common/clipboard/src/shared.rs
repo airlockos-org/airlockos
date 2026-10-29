@@ -331,14 +331,30 @@ impl<S: Storage> Clipboard<S> {
     /// The generation also changes on clear, allowing endpoints to discard stale data.
     pub fn offer(&self, caller: Participant) -> Result<(u64, Option<Offer>), Error> {
         self.access(caller)?;
-        Ok((
-            self.generation,
-            self.published.as_ref().map(|content| Offer {
+        let offer = if let Some(content) = &self.published {
+            let mut formats = Vec::new();
+            formats
+                .try_reserve_exact(content.formats.len())
+                .map_err(|_| Error::Capacity)?;
+            for representation in &content.formats {
+                let mut name = String::new();
+                name.try_reserve_exact(representation.format.name.len())
+                    .map_err(|_| Error::Capacity)?;
+                name.push_str(&representation.format.name);
+                formats.push(Format {
+                    name,
+                    size: representation.format.size,
+                });
+            }
+            Some(Offer {
                 generation: content.generation,
                 source: content.source,
-                formats: content.formats.iter().map(|r| r.format.clone()).collect(),
-            }),
-        ))
+                formats,
+            })
+        } else {
+            None
+        };
+        Ok((self.generation, offer))
     }
 
     /// Read a bounded range from exactly the requested generation, without consuming it.

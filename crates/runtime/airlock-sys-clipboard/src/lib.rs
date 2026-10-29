@@ -8,3 +8,6 @@ pub mod shared;
 
 #[cfg(target_os = "hermit")]
 pub mod service;
+
+/// Fixed-capacity heap used only by the Hermit executable.
+pub mod heap;

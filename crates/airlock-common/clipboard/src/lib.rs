@@ -8,3 +8,6 @@
 extern crate alloc;
 
 pub mod shared;
+
+/// Verified connection resource admission and cleanup accounting.
+pub mod resources;

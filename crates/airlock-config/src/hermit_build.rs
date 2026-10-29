@@ -117,6 +117,14 @@ pub(crate) fn constructor(
                     "src": source(pkgs, workspace, &integration),
                     "bin": "sys-clipboard",
                     "pname": "airlock-sys-clipboard",
+                    "cargoVendorDir": pkgs.clone().select("rustPlatform.fetchCargoVendor").call(nix_record! {
+                        "name": "airlock-clipboard-deps",
+                        "src": pkgs.clone().select("runCommand").call("airlock-clipboard-dependency-lock").call(nix_record! {}).call(nix_text!(r#"
+                            mkdir -p "$out"
+                            cp {lock} "$out/Cargo.lock"
+                        "#, lock = NixValue::builtin("path").call(nix_record! { "path": workspace.root().join_relative("runtime/airlock-sys-clipboard/build.lock").unwrap(), "name": "clipboard-build.lock" }))),
+                        "hash": "sha256-H85jqKWmQCp+GqQAa1wvt0zXsEAsFsekTHNndWtbLec=",
+                    }),
                 })
                 .select("overrideAttrs")
                 .call(NixValue::function(|_| {

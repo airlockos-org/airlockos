@@ -8,6 +8,7 @@ license = "MIT"
 description = "Hermit shared clipboard service and Xen transport protocol"
 
 [dependencies]
+talc = { version = "=5.0.4", features = ["counters"] }
 airlock-clipboard-core = { path = "../../airlock-common/clipboard" }
 # The pinned commit is supplied from the local integration repository during development.
 xen-transport = { git = "https://github.com/airlockos-org/hermit-xen", rev = "909d25eff50a13dfc64e0a5d56a1c9dac16795e4" }

@@ -182,12 +182,18 @@ impl<'a> Reader<'a> {
 
     fn formats(&mut self) -> Result<Vec<Format>, TransportError> {
         let count = self.size(MAX_FORMATS)?;
-        let mut formats = Vec::with_capacity(count);
+        let mut formats = Vec::new();
+        formats
+            .try_reserve_exact(count)
+            .map_err(|_| TransportError::TooLarge)?;
         for _ in 0..count {
             let len = self.size(MAX_FORMAT_NAME)?;
-            let name = std::str::from_utf8(self.take(len)?)
-                .map_err(|_| TransportError::Malformed)?
-                .to_owned();
+            let text =
+                std::str::from_utf8(self.take(len)?).map_err(|_| TransportError::Malformed)?;
+            let mut name = String::new();
+            name.try_reserve_exact(text.len())
+                .map_err(|_| TransportError::TooLarge)?;
+            name.push_str(text);
             let size = self.size(airlock_clipboard_core::shared::DEFAULT_CAPACITY)?;
             formats.push(Format { name, size });
         }
@@ -289,7 +295,11 @@ impl Request {
                 if reader.bytes.len() > DATA_CHUNK {
                     return Err(TransportError::TooLarge);
                 }
-                let bytes = reader.take(reader.bytes.len())?.to_vec();
+                let mut bytes = Vec::new();
+                bytes
+                    .try_reserve_exact(reader.bytes.len())
+                    .map_err(|_| TransportError::TooLarge)?;
+                bytes.extend_from_slice(reader.take(reader.bytes.len())?);
                 Self::Write {
                     generation,
                     format,
@@ -319,7 +329,30 @@ impl Request {
 impl Reply {
     /// Serialize a bounded response without logging private content.
     pub fn encode(&self) -> Vec<u8> {
-        let mut bytes = vec![2];
+        self.try_encode()
+            .expect("bounded clipboard reply allocation failed")
+    }
+
+    /// Encode into one bounded reservation, returning exhaustion to the service loop.
+    pub fn try_encode(&self) -> Result<Vec<u8>, TransportError> {
+        match self {
+            Self::Data(data) if data.len() > DATA_CHUNK => return Err(TransportError::TooLarge),
+            Self::Offer(_, Some(offer))
+                if offer.formats.len() > MAX_FORMATS
+                    || offer
+                        .formats
+                        .iter()
+                        .any(|format| format.name.len() > MAX_FORMAT_NAME) =>
+            {
+                return Err(TransportError::TooLarge);
+            }
+            _ => (),
+        }
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(MAX_PACKET)
+            .map_err(|_| TransportError::TooLarge)?;
+        bytes.push(2);
         match self {
             Self::Ok => bytes.push(0),
             Self::Generation(generation) => {
@@ -360,7 +393,7 @@ impl Reply {
                 });
             }
         }
-        bytes
+        Ok(bytes)
     }
 
     /// Decode a service response, checking every count and exact packet consumption.
@@ -445,6 +478,9 @@ impl Incoming {
             if offset != 0 {
                 return Err(TransportError::Malformed);
             }
+            self.bytes
+                .try_reserve_exact(length)
+                .map_err(|_| TransportError::TooLarge)?;
             self.active = Some((message.id, length));
         }
         if self.active != Some((message.id, length))
@@ -467,17 +503,18 @@ pub fn frames(kind: Kind, id: u64, bytes: &[u8]) -> Result<Vec<Message>, Transpo
     if bytes.is_empty() || bytes.len() > MAX_PACKET {
         return Err(TransportError::TooLarge);
     }
-    bytes
-        .chunks(MAX_PAYLOAD - 8)
-        .enumerate()
-        .map(|(index, chunk)| {
-            let mut payload = Vec::with_capacity(MAX_PAYLOAD);
-            payload.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-            payload.extend_from_slice(&((index * (MAX_PAYLOAD - 8)) as u32).to_le_bytes());
-            payload.extend_from_slice(chunk);
-            Message::new(kind, id, &payload)
-        })
-        .collect()
+    let mut frames = Vec::new();
+    frames
+        .try_reserve_exact(bytes.len().div_ceil(MAX_PAYLOAD - 8))
+        .map_err(|_| TransportError::TooLarge)?;
+    for (index, chunk) in bytes.chunks(MAX_PAYLOAD - 8).enumerate() {
+        let mut payload = [0; MAX_PAYLOAD];
+        payload[..4].copy_from_slice(&(bytes.len() as u32).to_le_bytes());
+        payload[4..8].copy_from_slice(&((index * (MAX_PAYLOAD - 8)) as u32).to_le_bytes());
+        payload[8..8 + chunk.len()].copy_from_slice(chunk);
+        frames.push(Message::new(kind, id, &payload[..8 + chunk.len()])?);
+    }
+    Ok(frames)
 }
 
 /// Execute one synchronous request on an exclusively owned authenticated connection.

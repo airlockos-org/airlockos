@@ -105,6 +105,8 @@ pub(crate) fn run(root: &Path, prepare: bool) -> Result<u8> {
             "airlock-provisioning-core",
             "-p",
             "airlock-build-plan",
+            "-p",
+            "airlock-clipboard-core",
             "--features",
             "airlock-machine-planning/wire",
             "--locked",

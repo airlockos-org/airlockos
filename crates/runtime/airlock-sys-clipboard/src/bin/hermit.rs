@@ -10,6 +10,11 @@ fn main() {
     // never an authorization token or a replacement for the executable digest.
     let source = option_env!("AIRLOCK_SOURCE_REVISION").unwrap_or("unrecorded");
     println!("AIRLOCK_CLIPBOARD_BUILD source={source}");
+    let (live, peak) = airlock_sys_clipboard::heap::APPLICATION_HEAP.usage();
+    println!(
+        "AIRLOCK_CLIPBOARD_HEAP cap={} live={live} peak={peak}",
+        airlock_sys_clipboard::heap::APP_HEAP_BYTES
+    );
     let nonce = std::env::args()
         .find_map(|argument| argument.strip_prefix("airlock.boot=").map(str::to_owned))
         .filter(|value| {
