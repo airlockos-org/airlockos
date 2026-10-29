@@ -12,6 +12,14 @@ machines (VMs), including dom0, the privileged control VM.
 
 **[Website](https://airlockos.org/) · [Documentation](https://airlockos.org/docs/) · [Getting started](https://airlockos.org/docs/getting-started/)**
 
+<p align="center">
+  <a href="https://youtu.be/h528TDh-PLU">
+    <img src="docs/assets/desktop-video-preview-play.png" width="600" alt="Watch the AirlockOS desktop video: GNOME workspace overview with Files and Calculator">
+  </a>
+  <br>
+  <em>AirlockOS desktop and VM workspaces. <a href="https://youtu.be/h528TDh-PLU">Watch the video.</a></em>
+</p>
+
 - [NixOS](https://nixos.org/) for dom0, the desktop, networking, and user applications.
 - [Whole-machine updates](https://airlockos.org/docs/architecture/system-changes-and-approval/)
   and [system generation rollback](https://airlockos.org/docs/using-airlock-os/#whole-machine-rollback).
@@ -21,14 +29,6 @@ machines (VMs), including dom0, the privileged control VM.
 - [GNOME desktop displaying applications from multiple VMs](https://airlockos.org/docs/architecture/gui-and-input/).
 
 [![VM layout: Xen runs dom0 and the system and user VMs. Dom0 manages the shared Nix store and provides read-only closure views to the other VMs.](docs/assets/system-overview.svg)](docs/assets/system-overview.svg)
-
-<p align="center">
-  <a href="https://youtu.be/h528TDh-PLU">
-    <img src="docs/assets/desktop-video-preview-play.png" width="600" alt="Watch the AirlockOS desktop video: GNOME workspace overview with Files and Calculator">
-  </a>
-  <br>
-  <em>AirlockOS desktop and VM workspaces. <a href="https://youtu.be/h528TDh-PLU">Watch the video.</a></em>
-</p>
 
 AirlockOS is under active development. Qubes OS security equivalence has not
 been established. See [Security](SECURITY.md) for limitations and reporting.
