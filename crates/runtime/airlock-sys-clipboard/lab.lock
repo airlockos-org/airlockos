@@ -3,6 +3,19 @@
 version = 4
 
 [[package]]
+name = "airlock-clipboard-core"
+version = "0.1.0"
+
+[[package]]
+name = "airlock-sys-clipboard"
+version = "0.1.0"
+dependencies = [
+ "airlock-clipboard-core",
+ "hermit",
+ "xen-transport",
+]
+
+[[package]]
 name = "cc"
 version = "1.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -25,15 +38,6 @@ source = "git+https://github.com/hermit-os/hermit-rs?rev=e9dc6784ad1a2dc6d18c681
 dependencies = [
  "cc",
  "home",
-]
-
-[[package]]
-name = "airlock-sys-clipboard"
-version = "0.1.0"
-dependencies = [
- "airlock-clipboard-core",
- "hermit",
- "xen-transport",
 ]
 
 [[package]]
@@ -69,17 +73,3 @@ dependencies = [
 [[package]]
 name = "xen-transport"
 version = "0.1.0"
-
-dependencies = [
- "libc",
-]
-
-[[package]]
-name = "airlock-clipboard-core"
-version = "0.1.0"
-
-[[package]]
-name = "libc"
-version = "0.2.191"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
