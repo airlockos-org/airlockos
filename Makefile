@@ -279,7 +279,7 @@ IMAGE_TOOLS_DIR ?= $(abspath $(or $(CARGO_TARGET_DIR),crates/target))/$(if $(fil
 IMAGE_BUILD_ARTIFACTS ?= $(CURDIR)/.airlock-logs/image-build.jsonl
 image-tools-build:
 	@mkdir -p "$(dir $(IMAGE_BUILD_ARTIFACTS))"
-	cargo build --locked --profile $(NATIVE_BUILD_PROFILE) --manifest-path crates/Cargo.toml -p airlock-image --message-format=json-render-diagnostics > "$(IMAGE_BUILD_ARTIFACTS)"
+	$(if $(filter 1,$(AIRLOCK_USB_INSTALL_LOGGED)),$(AIRLOCK_DEV) build-phase --stage image-tools --,) cargo build --locked --profile $(NATIVE_BUILD_PROFILE) --manifest-path crates/Cargo.toml -p airlock-image --message-format=json-render-diagnostics > "$(IMAGE_BUILD_ARTIFACTS)"
 
 USB_PUBLIC_KEY ?=
 USB_PUBLIC_KEY_ARGS = $(if $(strip $(USB_PUBLIC_KEY)),--public-key "$(USB_PUBLIC_KEY)",)
@@ -288,11 +288,21 @@ USB_DEV_PASSWORD_ARGS = $(if $(filter 1,$(USB_INSECURE_DEV_PASSWORD)),--insecure
 
 .PHONY: usb-dom0-console-image usb-dom0-console-write usb-dev-install
 
-# The Rust wrapper must run before prerequisites, including native tool compilation.
-ifeq ($(AIRLOCK_IMAGE_BUILD_LIMITED),1)
+# Start the transcript before source checks and image-tool compilation. Only the
+# outer invocation logs; recursive Make and the captured source inherit the marker.
+ifneq ($(AIRLOCK_USB_INSTALL_LOGGED),1)
+usb-dev-install:
+	+@$(AIRLOCK_DEV) usb-install-log -- $(MAKE) --no-print-directory AIRLOCK_USB_INSTALL_LOGGED=1 $@
+else ifeq ($(AIRLOCK_IMAGE_BUILD_LIMITED),1)
 usb-dev-install: image-tools-build
 	@$(AIRLOCK_DEV) usb-build-provision --usb-bin "$(IMAGE_TOOLS_DIR)/airlock-usb" --serial "$(USB_SERIAL)" $(USB_PUBLIC_KEY_ARGS) --result-link-dir "$(or $(AIRLOCK_RESULT_LINK_DIR),$(CURDIR)/.airlock)" $(if $(AIRLOCK_NIX_ROOT),--nix-root "$(AIRLOCK_NIX_ROOT)",) --resize-backup-dir "$(or $(AIRLOCK_LOG_DIR),/var/log/airlock)/usb-root-expansion" $(USB_DEV_PASSWORD_ARGS)
+else
+usb-dev-install:
+	@$(AIRLOCK_DEV) build-phase --stage source-check -- $(AIRLOCK_DEV) check-image-source
+	+@$(AIRLOCK_DEV) build-budget -- $(MAKE) --no-print-directory AIRLOCK_IMAGE_BUILD_LIMITED=1 $@
+endif
 
+ifeq ($(AIRLOCK_IMAGE_BUILD_LIMITED),1)
 usb-dom0-console-image: ensure-generated-dirs
 	$(AIRLOCK_NIX) build .#airlock-usb-dom0-console-image --out-link "$(or $(AIRLOCK_RESULT_LINK_DIR),$(CURDIR)/.airlock)/usb-dom0-console-image" --print-build-logs
 endif
@@ -341,7 +351,7 @@ usb-dev-image: image-tools-build usb-dev-prepare-inputs
 	  --temporary-root "$(or $(AIRLOCK_TMPDIR),$(TMPDIR),$(CURDIR)/.airlock)" \
 	  --image-command $(AIRLOCK_NIX) build --impure .#airlock-usb-dev-image --out-link "$(or $(AIRLOCK_RESULT_LINK_DIR),$(CURDIR)/.airlock)/usb-dev-image" --print-build-logs
 else
-usb-dom0-console-image usb-builder-offline-check usb-dev-image usb-dev-install:
+usb-dom0-console-image usb-builder-offline-check usb-dev-image:
 	@$(AIRLOCK_DEV) check-image-source
 	@$(AIRLOCK_DEV) build-budget -- $(MAKE) --no-print-directory AIRLOCK_IMAGE_BUILD_LIMITED=1 $@
 endif

@@ -21,6 +21,179 @@ fn report(command: &mut Command) -> Result<Value> {
     Ok(serde_json::from_slice(&run(command, None)?.checked()?)?)
 }
 
+/// Stream both output pipes before exit, retain non-newline prompts, and never observe stdin.
+#[test]
+fn usb_install_log_streams_and_preserves_failure_and_recent_runs() -> Result<()> {
+    let fixture = Repository::new()?;
+    let config: Value = serde_json::from_slice(&fs::read(fixture.path("peer.json"))?)?;
+    let shell = config["bash"].as_str().context("fixture shell")?;
+    let logs = fixture.path("install logs");
+    let parent = logs.join("usb-install");
+    let dev = binary("AIRLOCK_DEV_BIN", "airlock-dev");
+    let script = r#"
+        printf 'output before input\n'
+        printf 'diagnostic before input\n' >&2
+        printf 'Input: '
+        IFS= read -r answer
+        test "$answer" = 'private fixture input' || exit 99
+        printf '\n'
+        printf '%100000s\n' stdout-tail
+        printf '%100000s\n' stderr-tail >&2
+        "$1" --repository-root "$2" build-phase --stage fixture-build -- "$BASH" -c 'exit 42'
+    "#;
+    let mut command = fixture.command(&["usb-install-log", "--", shell, "-c", script, "fixture"]);
+    command
+        .arg(&dev)
+        .arg(&fixture.root)
+        .env("AIRLOCK_LOG_DIR", &logs);
+    let mut dialogue = Dialogue::spawn(&mut command)?;
+    dialogue.until(b"Input: ", Duration::from_secs(5))?;
+    assert!(dialogue.running()?);
+    let failed_run = fs::canonicalize(parent.join("latest"))?;
+    let active: Value = serde_json::from_slice(&fs::read(failed_run.join("summary.json"))?)?;
+    assert_eq!(active["status"], "running");
+    assert_eq!(
+        active["revision"],
+        git(&fixture.root, &["rev-parse", "HEAD"])?
+    );
+    let partial = fs::read_to_string(failed_run.join("console.log"))?;
+    assert!(partial.contains("output before input"));
+    // stdout and stderr are separate pipes, so wait for the observer to drain both.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !fs::read_to_string(failed_run.join("console.log"))?.contains("diagnostic before input") {
+        ensure!(
+            Instant::now() < deadline,
+            "stderr was not streamed before child exit"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    // A later successful start keeps latest even if the older command fails afterwards.
+    let mut newer =
+        fixture.command(&["usb-install-log", "--", shell, "-c", "printf 'newer run\n'"]);
+    newer.env("AIRLOCK_LOG_DIR", &logs);
+    run(&mut newer, None)?.checked()?;
+    let successful_run = fs::canonicalize(parent.join("latest"))?;
+    assert_ne!(failed_run, successful_run);
+    dialogue.send(b"private fixture input\n")?;
+    // Drain the large stdout stream while the logger concurrently drains stderr.
+    dialogue.until(b"stdout-tail\n", Duration::from_secs(5))?;
+    assert_eq!(dialogue.finish()?.code(), Some(42));
+    assert_eq!(fs::canonicalize(parent.join("latest"))?, successful_run);
+    assert_eq!(fs::canonicalize(parent.join("latest-failed"))?, failed_run);
+    let summary: Value = serde_json::from_slice(&fs::read(failed_run.join("summary.json"))?)?;
+    assert_eq!(summary["status"], "failed");
+    assert_eq!(summary["exit_code"], 42);
+    assert!(summary["finished_at"].is_string());
+    assert!(summary["elapsed_seconds"].as_f64().unwrap() > 0.0);
+    assert!(
+        summary["phases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|phase| { phase["stage"] == "fixture-build" && phase["state"] == "failed" })
+    );
+    let transcript = fs::read_to_string(failed_run.join("console.log"))?;
+    assert!(transcript.contains("stderr-tail"));
+    assert!(transcript.contains("stdout-tail"));
+    assert!(transcript.contains("Z +"));
+    assert!(transcript.contains("[stdout]"));
+    assert!(transcript.contains("[stderr]"));
+    assert!(!transcript.contains("private fixture input"));
+    let successful: Value =
+        serde_json::from_slice(&fs::read(successful_run.join("summary.json"))?)?;
+    assert_eq!(successful["status"], "succeeded");
+    assert_eq!(successful["exit_code"], 0);
+    Ok(())
+}
+
+/// Controlling-terminal password tools retain access to /dev/tty without entering the transcript.
+#[test]
+fn usb_install_log_preserves_private_terminal_prompts() -> Result<()> {
+    let fixture = Repository::new()?;
+    let config: Value = serde_json::from_slice(&fs::read(fixture.path("peer.json"))?)?;
+    let shell = config["bash"].as_str().context("fixture shell")?;
+    let logs = fixture.path("install logs");
+    let dev = binary("AIRLOCK_DEV_BIN", "airlock-dev");
+    let child = r#"
+        stty -echo </dev/tty
+        printf 'TTY password: ' >/dev/tty
+        IFS= read -r answer </dev/tty
+        stty echo </dev/tty
+        test "$answer" = 'private tty input' || exit 99
+        printf 'TTY_DONE\n'
+    "#;
+    let arguments = [
+        dev.to_str().unwrap(),
+        "--repository-root",
+        fixture.root.to_str().unwrap(),
+        "usb-install-log",
+        "--",
+        shell,
+        "-c",
+        child,
+    ];
+    let quoted = arguments
+        .iter()
+        .map(|arg| airlock_tests::process::quote(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut command = Command::new(common::tool("script")?);
+    command.args(["--quiet", "--return", "--command", &quoted, "/dev/null"]);
+    fixture.environment(&mut command);
+    command.env("AIRLOCK_LOG_DIR", &logs).env("SHELL", shell);
+    let mut dialogue = Dialogue::spawn(&mut command)?;
+    dialogue.until(b"TTY password: ", Duration::from_secs(5))?;
+    dialogue.send(b"private tty input\n")?;
+    dialogue.until(b"TTY_DONE", Duration::from_secs(5))?;
+    assert!(dialogue.finish()?.success());
+    let transcript = fs::read_to_string(logs.join("usb-install/latest/console.log"))?;
+    assert!(transcript.contains("TTY_DONE"));
+    assert!(!transcript.contains("TTY password:"));
+    assert!(!transcript.contains("private tty input"));
+    Ok(())
+}
+
+/// Spawn failures and ordinary termination signals must leave a discoverable final outcome.
+#[test]
+fn usb_install_log_retains_spawn_errors_and_interruptions() -> Result<()> {
+    let fixture = Repository::new()?;
+    let logs = fixture.path("install logs");
+    let latest = logs.join("usb-install/latest");
+    let mut missing =
+        fixture.command(&["usb-install-log", "--", "/missing-airlock-install-fixture"]);
+    missing.env("AIRLOCK_LOG_DIR", &logs);
+    assert_eq!(run(&mut missing, None)?.status.code(), Some(1));
+    let summary: Value = serde_json::from_slice(&fs::read(latest.join("summary.json"))?)?;
+    assert_eq!(summary["status"], "failed");
+    assert!(summary["error"].is_string());
+
+    let config: Value = serde_json::from_slice(&fs::read(fixture.path("peer.json"))?)?;
+    let shell = config["bash"].as_str().context("fixture shell")?;
+    let mut interrupted = fixture.command(&[
+        "usb-install-log",
+        "--",
+        shell,
+        "-c",
+        r#"
+        kill -TERM "$PPID"
+        IFS= read -r unused
+    "#,
+    ]);
+    interrupted.env("AIRLOCK_LOG_DIR", &logs);
+    let mut dialogue = Dialogue::spawn(&mut interrupted)?;
+    assert_eq!(dialogue.finish()?.code(), Some(143));
+    let summary: Value = serde_json::from_slice(&fs::read(latest.join("summary.json"))?)?;
+    assert_eq!(summary["status"], "interrupted");
+    assert_eq!(summary["signal"], 15);
+    assert_eq!(summary["exit_code"], 143);
+    assert_eq!(
+        fs::canonicalize(&latest)?,
+        fs::canonicalize(logs.join("usb-install/latest-failed"))?
+    );
+    Ok(())
+}
+
 /// Credentials precede an unprivileged build, and failures never authorize a write or reuse an old result.
 #[test]
 fn combined_usb_build_prepares_once_and_provisions_only_its_successful_image() -> Result<()> {
@@ -251,6 +424,7 @@ fn image_build_rejects_stale_application_content_before_prerequisites() -> Resul
             root = airlock_tests::process::quote(fixture.root.to_str().unwrap()),
         ));
         fixture.environment(&mut command);
+        command.env("AIRLOCK_LOG_DIR", fixture.path("install logs"));
         let output = run(&mut command, None)?;
         assert!(!output.status.success());
         assert!(String::from_utf8_lossy(&output.stderr).contains("application pin"));
@@ -265,6 +439,19 @@ fn image_build_rejects_stale_application_content_before_prerequisites() -> Resul
     );
     assert!(fixture.calls("nix")?.is_empty());
     assert!(fixture.calls("cargo")?.is_empty());
+    let run = fixture.path("install logs/usb-install/latest-failed");
+    let transcript = fs::read_to_string(run.join("console.log"))?;
+    assert!(transcript.contains("application pin"));
+    assert!(transcript.contains("is stale"));
+    let summary: Value = serde_json::from_slice(&fs::read(run.join("summary.json"))?)?;
+    assert_eq!(summary["status"], "failed");
+    assert!(
+        summary["phases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|phase| phase["stage"] == "source-check")
+    );
 
     Ok(())
 }

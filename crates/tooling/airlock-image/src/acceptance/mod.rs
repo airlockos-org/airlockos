@@ -514,6 +514,7 @@ fn lock(path: &Path, reason: &str) -> Result<File> {
 }
 
 fn run_gate(args: &Args, report: &mut Value, output: Option<&Path>) -> Result<()> {
+    let acceptance = airlock_nix_core::runtime::progress::Span::start("offline-acceptance");
     let inputs = inputs(args)?;
     let (identity_value, fingerprint) = identity(args, &inputs)?;
     report["fingerprint"] = json!(fingerprint);
@@ -591,8 +592,11 @@ fn run_gate(args: &Args, report: &mut Value, output: Option<&Path>) -> Result<()
         "builder inputs changed before image assembly"
     );
     report["receipt"] = json!(receipt_path);
+    acceptance.complete();
     if let Some(output) = output {
-        assemble(args, &inputs, &identity_value, &fingerprint, report, output)?;
+        airlock_nix_core::runtime::progress::phase("image-assembly", || {
+            assemble(args, &inputs, &identity_value, &fingerprint, report, output)
+        })?;
     }
     report["status"] = json!("passed");
     Ok(())

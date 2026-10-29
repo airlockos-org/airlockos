@@ -25,6 +25,8 @@ mod build_budget;
 
 mod build_log;
 
+mod install_log;
+
 mod usb_build_provision;
 
 mod nested;
@@ -46,6 +48,21 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Action {
+    /// Retain a timestamped USB install transcript and its final outcome.
+    UsbInstallLog {
+        /// Recursive Make command, started only after the run record exists.
+        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        arguments: Vec<OsString>,
+    },
+    /// Measure a build step without changing its input or output protocols.
+    BuildPhase {
+        /// Operation name retained in the install summary.
+        #[arg(long)]
+        stage: String,
+        /// Build command with literal arguments.
+        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        arguments: Vec<OsString>,
+    },
     /// Operate a persistent Airlock desktop in the QEMU lab.
     QemuLab(nested::qemu_lab::Args),
     /// Run a workstation build with one physical core excluded from its CPU affinity.
@@ -125,6 +142,8 @@ enum Action {
 fn execute(args: Args) -> Result<u8> {
     let root = repository::root(args.repository_root.as_deref())?;
     match args.command {
+        Action::UsbInstallLog { arguments } => install_log::run(&root, &arguments),
+        Action::BuildPhase { stage, arguments } => install_log::phase(&stage, &arguments),
         Action::QemuLab(args) => nested::qemu_lab::execute(&root, args),
         Action::BuildBudget { arguments } => build_budget::run(&root, &arguments),
         Action::Nested { command } => nested::execute(&root, command),
@@ -156,7 +175,19 @@ fn execute(args: Args) -> Result<u8> {
         }
         Action::UsbBuildProvision(args) => usb_build_provision::run(&root, args),
         Action::Source { command } => {
+            let phase =
+                (std::env::var("AIRLOCK_USB_INSTALL_LOGGED").as_deref() == Ok("1")).then(|| {
+                    airlock_nix_core::runtime::progress::Span::start(match &command {
+                        source::Action::Prepare { .. } => "source-prepare",
+                        source::Action::Seed { .. } => "source-seed",
+                        source::Action::OfflineInputs(_) => "offline-inputs",
+                        _ => "source-operation",
+                    })
+                });
             source::execute(&root, command)?;
+            if let Some(phase) = phase {
+                phase.complete();
+            }
             Ok(0)
         }
         Action::Deploy(args) => deploy::execute(&root, args),

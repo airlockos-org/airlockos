@@ -21,6 +21,16 @@ the shared `usb-dev-image` link. A successful build also updates that shared lin
 and its GC root. To retry provisioning, rerun the combined command; unchanged
 build outputs can be reused from cache.
 
+The combined command streams stdout and stderr to the terminal and to
+`$AIRLOCK_LOG_DIR/usb-install/<UTC-time>-<run-id>/console.log`, with UTC timestamps
+and elapsed seconds. `summary.json` records the command, source revisions, phase
+timings and exit status; it is updated while the command runs. `latest` points to
+the newest started run and `latest-failed` to the most recently finished failed
+or interrupted run. Without `AIRLOCK_LOG_DIR`, logs use `.airlock-logs/usb-install/`
+in the checkout. Logging starts after the workstation launcher has bootstrapped
+itself, before source validation and image-tool compilation. Password input and
+direct terminal prompts are not recorded. Logs are retained until removed.
+
 ## Deployment
 
 Before editing system configuration, inspect its recorded deployed source and

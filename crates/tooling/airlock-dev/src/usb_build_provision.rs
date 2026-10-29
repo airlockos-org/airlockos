@@ -3,6 +3,7 @@
 use crate::support;
 use airlock_image::provisioning::{BuildOutcome, BuildRun, CompletedBuild, READY};
 use airlock_nix_core::runtime::process::OwnedChild;
+use airlock_nix_core::runtime::progress::{Span, phase};
 use airlock_nix_core::store_path::StorePath;
 use anyhow::{Context, Result, ensure};
 use clap::Args as ClapArgs;
@@ -150,7 +151,9 @@ pub(crate) fn run(root: &Path, args: Args) -> Result<u8> {
         .permissions(fs::Permissions::from_mode(0o700))
         .tempdir_in(&result_directory)?;
     let result_link = run.path().join("usb-dev-image");
-    let source = Snapshot::capture(root, &run.path().join("source"))?;
+    let source = phase("source-snapshot", || {
+        Snapshot::capture(root, &run.path().join("source"))
+    })?;
     eprintln!(
         "USB build source captured: repository {revision}, machine {machine_revision}.",
         revision = source.revision,
@@ -195,12 +198,16 @@ pub(crate) fn run(root: &Path, args: Args) -> Result<u8> {
     eprintln!(
         "Preparing USB provisioning now; sudo and dom0 password prompts precede the image build."
     );
-    let mut helper = Helper::start(&mut command)?;
-    helper.prepared()?;
+    let helper = phase("credentials", || -> Result<Helper> {
+        let mut helper = Helper::start(&mut command)?;
+        helper.prepared()?;
+        Ok(helper)
+    })?;
     source.check()?;
     eprintln!(
         "Credentials collected. Building the USB image as the current user; provisioning follows automatically on success."
     );
+    let image_build = Span::start("image-build");
     let status = Command::new("make")
         .current_dir(&source.root)
         .args(["--no-print-directory", "usb-dev-image"])
@@ -223,6 +230,7 @@ pub(crate) fn run(root: &Path, args: Args) -> Result<u8> {
         eprintln!("Image build failed; USB was not written.");
         return Ok(status.code().unwrap_or(1).try_into().unwrap_or(1));
     }
+    image_build.complete();
     source.check()?;
     ensure!(
         fs::symlink_metadata(&result_link).is_ok(),
@@ -264,8 +272,11 @@ pub(crate) fn run(root: &Path, args: Args) -> Result<u8> {
         &result_link,
         Some(image),
     )?;
-    let status = helper.finish(Some(&completed))?;
-    ensure!(status.success(), "USB provisioning failed: {status}");
+    phase("usb-provision", || -> Result<()> {
+        let status = helper.finish(Some(&completed))?;
+        ensure!(status.success(), "USB provisioning failed: {status}");
+        Ok(())
+    })?;
     eprintln!("USB build and provisioning completed.");
     Ok(0)
 }
