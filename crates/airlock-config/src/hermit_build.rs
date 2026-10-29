@@ -8,7 +8,7 @@ use rusix::{
 };
 
 /// Portable integration pin; development overrides must select this exact local commit.
-pub(crate) const INTEGRATION_REVISION: &str = "03bd87fad25d094f0a19c9ef936994683bc2e7e1";
+pub(crate) const INTEGRATION_REVISION: &str = "909d25eff50a13dfc64e0a5d56a1c9dac16795e4";
 
 /// Portable flake input; local development overrides must retain the pinned Git identity.
 pub(crate) fn input() -> NixValue {
@@ -101,7 +101,14 @@ pub(crate) fn constructor(
     revision: NixValue,
 ) -> NixValue {
     NixValue::function_attrs(
-        ["name", "memory", "vcpus", "autostart", "clipboardAuthority"],
+        [
+            "name",
+            "memory",
+            "vcpus",
+            "autostart",
+            "clipboardAuthority",
+            "scratchMiB",
+        ],
         |request| {
             let image = integration
                 .clone()
@@ -173,6 +180,9 @@ pub(crate) fn constructor(
                     "services": nix_record! {}, "devices": nix_record! {},
                     "backend": nix_record! {
                         "type": "hermit", "system": nix_record! { "source": image.to_text() }, "artifact": artifact,
+                        "scratch": NixValue::if_else(request.clone().select("scratchMiB").equals(NixValue::null()), NixValue::null(), nix_record! {
+                            "bytes": NixValue::builtin("mul").call(request.clone().select("scratchMiB")).call(1024_i64 * 1024),
+                        }),
                     },
                 },
             }
@@ -186,6 +196,7 @@ pub(crate) fn constructor(
                 vec![
                     ("autostart", false.into()),
                     ("clipboardAuthority", NixValue::null()),
+                    ("scratchMiB", NixValue::null()),
                 ],
                 NixValue::if_else(
                     pinned,

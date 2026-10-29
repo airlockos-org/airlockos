@@ -117,13 +117,50 @@ impl Connection {
     }
 }
 
+/// Adapt the sole admitted ephemeral VBD to the OS-independent clipboard spool.
+struct Disk {
+    /// Exclusive device; its kernel driver owns bounded grants and I/O timeouts.
+    device: xen_transport::hermit::block::Device,
+}
+
+impl airlock_clipboard_core::shared::storage::BlockDevice for Disk {
+    fn sectors(&self) -> u64 {
+        self.device.sectors()
+    }
+
+    fn read(&mut self, sector: u64, bytes: &mut [u8]) -> Result<(), Error> {
+        self.device.read(sector, bytes).map_err(|_| Error::Io)
+    }
+
+    fn write(&mut self, sector: u64, bytes: &[u8]) -> Result<(), Error> {
+        self.device.write(sector, bytes).map_err(|_| Error::Io)
+    }
+
+    fn flush(&mut self) -> Result<(), Error> {
+        self.device.flush().map_err(|_| Error::Io)
+    }
+}
+
 /// Run the normal clipboard until its trusted authority disconnects.
 /// The service boot is the identity boundary; a lost authority requires a fresh
 /// service boot rather than reusing stale provisioning capabilities.
-pub fn run(authority: u16, nonce: &str) -> Result<(), TransportError> {
+pub fn run(authority: u16, nonce: &str, scratch_bytes: u64) -> Result<(), TransportError> {
     if authority == 0 || authority >= 0x7ff0 {
         return Err(TransportError::Malformed);
     }
+    use airlock_clipboard_core::shared::storage::{RAM_LIMIT, Spool, Storage};
+
+    let mut device = xen_transport::hermit::block::Device::open()?;
+    if scratch_bytes < DEFAULT_CAPACITY as u64
+        || device.sectors().checked_mul(512) != Some(scratch_bytes)
+    {
+        return Err(TransportError::Malformed);
+    }
+    device.flush()?;
+    let storage = Spool::new(Disk { device }, RAM_LIMIT);
+    println!(
+        "AIRLOCK_CLIPBOARD_STORAGE_READY boot={nonce} capacity={scratch_bytes} ram_limit={RAM_LIMIT}"
+    );
     let mut epoch = endpoint::now_ns().max(1);
     let mut control = Connection::new(0, authority, epoch)?;
     let offer = control.pending.as_ref().unwrap().offer();
@@ -134,7 +171,8 @@ pub fn run(authority: u16, nonce: &str) -> Result<(), TransportError> {
         session = offer.session
     );
     let mut ready = false;
-    let mut clipboard = Clipboard::new(DEFAULT_CAPACITY);
+    let mut clipboard = Clipboard::with_storage(DEFAULT_CAPACITY, storage);
+    let mut usage = clipboard.storage().usage();
     let mut peers: Vec<Connection> = Vec::new();
     let mut retiring: Vec<Connection> = Vec::new();
     loop {
@@ -188,9 +226,13 @@ pub fn run(authority: u16, nonce: &str) -> Result<(), TransportError> {
         while index < peers.len() {
             let peer = &mut peers[index];
             let outcome = match peer.poll() {
-                Ok(Some(request)) => {
-                    peer.reply(shared::execute(&mut clipboard, now, peer.caller, request))
-                }
+                Ok(Some(request)) => peer.reply(shared::execute_with_clock(
+                    &mut clipboard,
+                    endpoint::now_ns(),
+                    peer.caller,
+                    request,
+                    endpoint::now_ns,
+                )),
                 Ok(None) => Ok(()),
                 Err(error) => Err(error),
             };
@@ -201,6 +243,17 @@ pub fn run(authority: u16, nonce: &str) -> Result<(), TransportError> {
             } else {
                 index += 1;
             }
+        }
+        let now = endpoint::now_ns();
+        clipboard.tick(now);
+        let current = clipboard.storage().usage();
+        if current != usage {
+            println!(
+                "AIRLOCK_CLIPBOARD_STORAGE boot={nonce} ram_bytes={ram} disk_bytes={disk}",
+                ram = current.ram_bytes,
+                disk = current.disk_bytes
+            );
+            usage = current;
         }
         retiring.retain_mut(|connection| connection.close(now).is_err());
         // Event-driven waits also wake for bounded liveness and unfinished-copy cleanup.

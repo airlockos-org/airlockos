@@ -143,3 +143,25 @@ fn descriptor_rejects_unknown_fields_and_unbounded_size() {
     wire["authorized"] = true.into();
     assert!(serde_json::from_value::<Descriptor>(wire).is_err());
 }
+
+/// Scratch capacity and mapper identity cannot select arbitrary persistent storage.
+#[test]
+fn scratch_contract_is_bounded_and_boot_scoped() {
+    for bytes in [0, 512, 1024 * 1024 - 1, 257 * 1024 * 1024, u64::MAX] {
+        assert!(super::ScratchDisk { bytes }.validate().is_err());
+    }
+    let disk = super::ScratchDisk {
+        bytes: 128 * 1024 * 1024,
+    };
+    disk.validate().unwrap();
+    assert_eq!(
+        disk.device_path(&"sys-clipboard".parse().unwrap()),
+        "/dev/mapper/vm-volatile-sys_dclipboard-crypt@volatile"
+    );
+    assert!(
+        serde_json::from_value::<super::ScratchDisk>(
+            serde_json::json!({"bytes": disk.bytes, "source": "/user-data"})
+        )
+        .is_err()
+    );
+}

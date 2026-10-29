@@ -25,7 +25,7 @@ use std::{
 };
 
 /// Memory and root-image sizes use MiB, unlike Qubes private-volume sizes in bytes.
-#[derive(Clone, Copy, IntoRusixValue)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, IntoRusixValue)]
 pub struct MiB(
     /// Count of 2^20-byte units, emitted directly for the builder's MiB fields.
     pub u32,
@@ -73,6 +73,7 @@ impl<R, B> VmHandle<R, B> {
             || [
                 "airlock-role",
                 "airlock-backend",
+                "airlock-hermit-scratch",
                 "airlock-network-provider",
                 "airlock-managed",
                 "airlock-clipboard-authority",
@@ -167,6 +168,8 @@ pub enum GuestBackend {
     Hermit {
         /// Application source selection interpreted by the Hermit builder.
         application: HermitApplication,
+        /// Optional bounded scratch capacity; its Qubes volume is encrypted and reset at every start.
+        scratch: Option<MiB>,
     },
 }
 
@@ -691,7 +694,10 @@ impl Vm {
         let mut vm = Self::nixos(name, memory)?;
         let definition =
             Rc::get_mut(&mut vm.reference.definition).expect("new declaration has no clones");
-        definition.backend = GuestBackend::Hermit { application };
+        definition.backend = GuestBackend::Hermit {
+            application,
+            scratch: None,
+        };
         let mut settings = definition.settings.get();
         settings.root_image = MiB(0);
         definition.settings.set(settings);
@@ -699,6 +705,24 @@ impl Vm {
             reference: vm.reference,
             role: PhantomData,
         })
+    }
+
+    /// Declare a Hermit service with one encrypted, nonpersistent scratch disk.
+    /// Capacity is validated at finalization; no Linux images or modules are enabled.
+    pub fn hermit_with_scratch(
+        name: &str,
+        memory: MiB,
+        application: HermitApplication,
+        scratch: MiB,
+    ) -> Result<VmHandle<Service, Hermit>, AuthoringError> {
+        let mut vm = Self::hermit(name, memory, application)?;
+        let definition =
+            Rc::get_mut(&mut vm.reference.definition).expect("new declaration has no clones");
+        definition.backend = GuestBackend::Hermit {
+            application,
+            scratch: Some(scratch),
+        };
+        Ok(vm)
     }
 
     /// Creates shared configuration without claiming membership in any machine.
@@ -1235,7 +1259,19 @@ impl Machine {
             {
                 return Err(AuthoringError::InvalidResources {
                     vm: vm.name().to_owned(),
-                    reason: "Hermit requires one CPU, fixed 16–256 MiB memory, and no Linux, GUI or storage configuration",
+                    reason: "Hermit requires one CPU, fixed 16–256 MiB memory, and no Linux, GUI or persistent storage configuration",
+                });
+            }
+
+            if let GuestBackend::Hermit {
+                scratch: Some(size),
+                ..
+            } = definition.backend
+                && !(1..=256).contains(&size.0)
+            {
+                return Err(AuthoringError::InvalidResources {
+                    vm: vm.name().to_owned(),
+                    reason: "Hermit scratch disk must be between 1 and 256 MiB",
                 });
             }
 

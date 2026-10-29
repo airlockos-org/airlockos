@@ -14,6 +14,33 @@ use sha2::{Digest, Sha256};
 /// Largest executable accepted, including debugging information.
 pub const MAX_EXECUTABLE_BYTES: u64 = 64 * 1024 * 1024;
 
+/// Optional, freshly encrypted scratch storage owned by one Hermit VM.
+/// The existing Qubes volatile-volume lifecycle owns allocation and disposal;
+/// this contract permits neither a persistent source nor another VM's data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScratchDisk {
+    /// Capacity in bytes: a whole MiB between 1 and 256 MiB.
+    pub bytes: u64,
+}
+
+impl ScratchDisk {
+    /// Reject sizes outside the bounded scratch-device contract.
+    pub fn validate(&self) -> Result<(), InvalidArtifact> {
+        require(
+            (1..=256).contains(&(self.bytes / (1024 * 1024)))
+                && self.bytes.is_multiple_of(1024 * 1024),
+            "scratch disk capacity",
+        )
+    }
+
+    /// Match Qubes' encrypted volatile mapper name without accepting a source path.
+    pub fn device_path(&self, name: &crate::identity::GuestName) -> String {
+        let escaped = name.as_str().replace('_', "_u").replace('-', "_d");
+        format!("/dev/mapper/vm-volatile-{escaped}-crypt@volatile")
+    }
+}
+
 /// Runtime authority compiled into the service, independently of its VM role.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

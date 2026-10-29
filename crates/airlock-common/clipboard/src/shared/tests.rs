@@ -50,13 +50,13 @@ fn multiple_formats_publish_together_and_survive_repeated_paste_and_idle() {
     for _ in 0..3 {
         assert_eq!(
             clipboard.read(TARGET, generation, 0, 0, 10),
-            Ok(&b"abc"[..])
+            Ok(b"abc".to_vec())
         );
         assert_eq!(
             clipboard.read(TARGET, generation, 1, 1, 2),
-            Ok(&[255, 3][..])
+            Ok(vec![255, 3])
         );
-        assert_eq!(clipboard.read(TARGET, generation, 2, 0, 10), Ok(&[][..]));
+        assert_eq!(clipboard.read(TARGET, generation, 2, 0, 10), Ok(vec![]));
     }
     assert_eq!(clipboard.offer(TARGET).unwrap().1.unwrap().source, SOURCE);
 }
@@ -79,7 +79,7 @@ fn replacements_invalidate_reads_and_late_source_chunks() {
     clipboard.write(3, TARGET, new, 0, 0, b"b").unwrap();
     clipboard.complete(4, TARGET, new).unwrap();
     assert_eq!(clipboard.read(SOURCE, old, 0, 0, 1), Err(Error::Stale));
-    assert_eq!(clipboard.read(SOURCE, new, 0, 0, 1), Ok(&b"b"[..]));
+    assert_eq!(clipboard.read(SOURCE, new, 0, 0, 1), Ok(b"b".to_vec()));
     let cleared = clipboard.begin(5, SOURCE, vec![]).unwrap();
     assert_eq!(clipboard.offer(TARGET), Ok((cleared, None)));
     assert_eq!(clipboard.read(TARGET, new, 0, 0, 1), Err(Error::Stale));

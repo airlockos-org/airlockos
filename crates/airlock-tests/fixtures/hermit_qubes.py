@@ -49,7 +49,35 @@ with tempfile.TemporaryDirectory() as directory, asyncio.Runner() as runner:
         vm._airlock_hermit_nonce = request["nonce"]
         reply = {"class": type(vm).__name__, "volumes": list(vm.volumes)}
         try:
+            disk = request["domain"]["backend"].get("scratch")
+            vm._airlock_hermit_scratch = json.dumps(disk, separators=(",", ":"))
+            if disk is not None:
+                vm.features["airlock-hermit-scratch"] = json.dumps(disk)
+                vm._prepare_scratch()
+                vm._airlock_hermit_scratch = json.dumps(disk, separators=(",", ":"))
+                volume = vm.volumes["volatile"]
+                # Exercise upstream volatile-file initialization in the disposable
+                # directory; cryptsetup itself belongs to the privileged Xen test.
+                runner.run(volume.start())
+                for key, value in request.get("volume_overrides", {}).items():
+                    setattr(volume, key, value)
+                reply["volumes"] = list(vm.volumes)
+            if "scratch_after_stop" in request:
+                if not request.get("keep_active"):
+                    runner.run(volume.stop())
+                disk = request["scratch_after_stop"]
+                vm.features["airlock-hermit-scratch"] = json.dumps(disk) if disk else ""
+                vm._prepare_scratch()
+                vm._airlock_hermit_scratch = json.dumps(disk, separators=(",", ":"))
+                reply["volumes"] = list(vm.volumes)
+                if disk is not None:
+                    volume = vm.volumes["volatile"]
+                    runner.run(volume.start())
             reply["xml"] = vm.create_config_file()
+            if disk is not None:
+                reply["scratch"] = {"size": volume.size, "ephemeral": volume.ephemeral,
+                    "save_on_stop": volume.save_on_stop, "snap_on_start": volume.snap_on_start,
+                    "vid": volume.vid}
         except qubes.exc.QubesException as error:
             reply["error"] = str(error)
         print(json.dumps(reply))

@@ -373,6 +373,9 @@ impl Schema<'_> {
             ),
             "system": self.optional(self.record(self.source_fields()), "Immutable guest system object."),
             "artifact": self.optional(self.hermit_artifact(), "Authenticated Hermit PVH executable."),
+            "scratch": self.optional(self.record(nix_record! {
+                "bytes": self.option(self.kind("ints.positive"), None, "Encrypted ephemeral scratch capacity in bytes."),
+            }), "Optional Hermit scratch disk."),
             "kernel": self.optional(
                 self.boot_component(),
                 "Required kernel name or artifact for closure-backed VMs.",

@@ -339,6 +339,29 @@ pub fn boot_xml_with_authority(
     nonce: &str,
     authority: Option<u16>,
 ) -> Result<String> {
+    boot_xml_with_scratch(xml, artifact, memory, nonce, authority, None)
+}
+
+/// Admit only the canonical Qubes encrypted volatile disk named by the approved backend.
+/// The caller supplies its VM identity, never an independently chosen source path.
+pub fn boot_xml_with_scratch(
+    xml: &str,
+    artifact: &Descriptor,
+    memory: u64,
+    nonce: &str,
+    authority: Option<u16>,
+    scratch: Option<(
+        &airlock_nix_core::hermit_artifact::ScratchDisk,
+        &airlock_nix_core::identity::GuestName,
+    )>,
+) -> Result<String> {
+    if let Some((disk, _)) = scratch {
+        disk.validate()?;
+    }
+    let disk_source = scratch.map(|(disk, name)| disk.device_path(name));
+    let scratch_argument = scratch.map_or_else(String::new, |(disk, _)| {
+        format!(" airlock.scratch={bytes}", bytes = disk.bytes)
+    });
     ensure!(
         (artifact.authority == AuthorityMode::Normal) == authority.is_some(),
         "Hermit authority does not match artifact"
@@ -372,6 +395,8 @@ pub fn boot_xml_with_authority(
     let mut current_memories = 0;
     let mut domains = 0;
     let mut cpus = 0;
+    let mut disks = 0;
+    let mut disk_fields = 0_u8;
     loop {
         let event = reader.read_event()?;
         match &event {
@@ -381,7 +406,6 @@ pub fn boot_xml_with_authority(
                     !matches!(
                         name.as_str(),
                         "initrd"
-                            | "disk"
                             | "interface"
                             | "hostdev"
                             | "cmdline"
@@ -411,7 +435,43 @@ pub fn boot_xml_with_authority(
                         ))
                     })
                     .collect::<Result<std::collections::BTreeMap<_, _>>>()?;
+                if path == ["domain", "devices", "disk"] {
+                    let (bit, key, expected) = match name.as_str() {
+                        "driver" => (1, "name", "phy"),
+                        "source" => (
+                            2,
+                            "dev",
+                            disk_source.as_deref().context("undeclared Hermit disk")?,
+                        ),
+                        "target" => (4, "dev", "xvdc"),
+                        "script" => (8, "path", "/etc/xen/scripts/qubes-block"),
+                        _ => anyhow::bail!("unsupported Hermit scratch disk option"),
+                    };
+                    ensure!(
+                        matches!(event, Event::Empty(_))
+                            && disk_fields & bit == 0
+                            && attributes.len() == 1
+                            && attributes.get(key).map(String::as_str) == Some(expected),
+                        "Hermit scratch disk differs from the approved Qubes device"
+                    );
+                    disk_fields |= bit;
+                } else if path.iter().any(|part| part == "disk") {
+                    anyhow::bail!("nested Hermit disk option");
+                }
                 match name.as_str() {
+                    "disk" => {
+                        ensure!(
+                            disk_source.is_some()
+                                && path == ["domain", "devices"]
+                                && disks == 0
+                                && matches!(event, Event::Start(_))
+                                && attributes.len() == 2
+                                && attributes.get("type").map(String::as_str) == Some("block")
+                                && attributes.get("device").map(String::as_str) == Some("disk"),
+                            "undeclared or incompatible Hermit scratch disk"
+                        );
+                        disks += 1;
+                    }
                     "domain" => {
                         ensure!(
                             path.is_empty()
@@ -456,6 +516,10 @@ pub fn boot_xml_with_authority(
             Event::Text(text) => {
                 let text = text.decode()?;
                 if !text.trim().is_empty() {
+                    ensure!(
+                        !path.iter().any(|part| part == "disk"),
+                        "unexpected Hermit disk text"
+                    );
                     match path.last().map(String::as_str) {
                         Some("kernel") => {
                             ensure!(
@@ -490,7 +554,7 @@ pub fn boot_xml_with_authority(
                     ensure!(path == ["domain", "os"], "unexpected Hermit OS node");
                     writer.write_event(Event::Start(BytesStart::new("cmdline")))?;
                     writer.write_event(Event::Text(BytesText::new(&format!(
-                        "-- airlock.boot={nonce}{authority_argument}"
+                        "-- airlock.boot={nonce}{authority_argument}{scratch_argument}"
                     ))))?;
                     writer.write_event(Event::End(BytesEnd::new("cmdline")))?;
                     command += 1;
@@ -513,6 +577,8 @@ pub fn boot_xml_with_authority(
             && memories == 1
             && current_memories == 1
             && cpus == 1
+            && disks == usize::from(disk_source.is_some())
+            && (disk_source.is_none() || disk_fields == 15)
             && path.is_empty(),
         "incomplete Hermit XML"
     );
@@ -597,6 +663,40 @@ mod tests {
         let mut substituted = descriptor;
         substituted.sha256 = "0".repeat(64).parse().unwrap();
         assert!(verify_image(&substituted, 32).is_err());
+    }
+
+    /// Only the declared encrypted device can accompany a Hermit executable.
+    #[test]
+    fn scratch_disk_is_exact_and_cannot_substitute_persistent_data() {
+        use airlock_nix_core::hermit_artifact::ScratchDisk;
+        let disk = ScratchDisk {
+            bytes: 128 * 1024 * 1024,
+        };
+        let name = "sys-clipboard".parse().unwrap();
+        let nonce = "01234567-89ab-cdef-0123-456789abcdef";
+        let source = disk.device_path(&name);
+        let device = format!(
+            r#"<disk type="block" device="disk"><driver name="phy"/><source dev="{source}"/><target dev="xvdc"/><script path="/etc/xen/scripts/qubes-block"/></disk>"#
+        );
+        let input = xml().replace("<devices>", &format!("<devices>{device}"));
+        let check = |xml: &str| {
+            boot_xml_with_scratch(xml, &artifact(), 32, nonce, None, Some((&disk, &name)))
+        };
+        assert!(check(&input).is_ok());
+        assert!(check(&xml()).is_err());
+        assert!(boot_xml(&input, &artifact(), 32, nonce).is_err());
+        for replacement in [
+            input.replace(&source, "/dev/mapper/user-data"),
+            input.replace("xvdc", "xvda"),
+            input.replace("name=\"phy\"", "name=\"qemu\""),
+            input.replace("/etc/xen/scripts/qubes-block", "/other/script"),
+            input.replace("</disk>", "<readonly/></disk>"),
+            input.replace("</disk>", "<backenddomain name=\"other\"/></disk>"),
+            input.replace("</disk>", "<source dev=\"/other\"/></disk>"),
+            input.replace("</devices>", &format!("{device}</devices>")),
+        ] {
+            assert!(check(&replacement).is_err());
+        }
     }
 
     #[test]

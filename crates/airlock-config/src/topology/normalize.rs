@@ -312,6 +312,7 @@ fn hermit_backend(backend: &NixValue) -> NixValue {
             "type": "hermit",
             "system": required_source(&backend.clone().select("system"), "Hermit requires an immutable system source."),
             "artifact": artifact,
+            "scratch": backend.clone().attr_or("scratch", NixValue::null()),
         },
     )
 }

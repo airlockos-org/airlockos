@@ -10,7 +10,7 @@ use std::{
     process::Command,
 };
 
-/// Exercise diskless XML generation with explicitly prepared upstream Qubes packages.
+/// Exercise diskless and ephemeral-disk lifecycle with actual upstream Qubes objects.
 #[test]
 #[ignore = "requires AIRLOCK_QUBES_PYTHON and AIRLOCK_HERMIT_DOMAIN from a real Nix build"]
 fn hermit_uses_upstream_qubes_objects() -> Result<()> {
@@ -68,6 +68,49 @@ fn hermit_uses_upstream_qubes_objects() -> Result<()> {
     assert!(observe(&request)?["error"].is_string());
     request["domain"]["prefs"]["vcpus"] = json!(1);
     request["nonce"] = json!("invalid challenge");
+    assert!(observe(&request)?["error"].is_string());
+    request["nonce"] = json!(nonce);
+    request["domain"]["backend"]["scratch"] = json!({"bytes": 16 * 1024 * 1024});
+    let scratch = observe(&request)?;
+    assert!(scratch["error"].is_null(), "{scratch}");
+    assert_eq!(scratch["volumes"], json!(["volatile"]));
+    assert_eq!(scratch["scratch"]["size"], 16 * 1024 * 1024);
+    assert_eq!(scratch["scratch"]["ephemeral"], true);
+    assert_eq!(scratch["scratch"]["save_on_stop"], false);
+    assert_eq!(scratch["scratch"]["snap_on_start"], false);
+    assert!(
+        scratch["xml"]
+            .as_str()
+            .unwrap()
+            .contains("/dev/mapper/vm-volatile-sys_dclipboard-crypt@volatile")
+    );
+    for overrides in [
+        json!({"ephemeral": false}),
+        json!({"save_on_stop": true}),
+        json!({"snap_on_start": true}),
+        json!({"vid": "appvms/other/private"}),
+    ] {
+        request["volume_overrides"] = overrides;
+        assert!(observe(&request)?["error"].is_string());
+    }
+    request.as_object_mut().unwrap().remove("volume_overrides");
+    request["scratch_after_stop"] = json!({"bytes": 32 * 1024 * 1024});
+    let resized = observe(&request)?;
+    assert!(resized["error"].is_null(), "{resized}");
+    assert_eq!(resized["scratch"]["size"], 32 * 1024 * 1024);
+    request["scratch_after_stop"] = Value::Null;
+    let diskless = observe(&request)?;
+    assert!(diskless["error"].is_null(), "{diskless}");
+    assert_eq!(diskless["volumes"], json!([]));
+    assert!(!diskless["xml"].as_str().unwrap().contains("<disk"));
+    request["keep_active"] = json!(true);
+    assert!(observe(&request)?["error"].is_string());
+    request
+        .as_object_mut()
+        .unwrap()
+        .remove("scratch_after_stop");
+    request.as_object_mut().unwrap().remove("keep_active");
+    request["domain"]["backend"]["scratch"]["bytes"] = json!(0);
     assert!(observe(&request)?["error"].is_string());
     Ok(())
 }

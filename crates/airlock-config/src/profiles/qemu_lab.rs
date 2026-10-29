@@ -57,7 +57,12 @@ pub fn machine() -> Result<MachineSnapshot, AuthoringError> {
     assistant.add_module(application_session());
     machine.add(&assistant)?;
 
-    let clipboard = Vm::hermit("sys-clipboard", MiB(128), HermitApplication::Clipboard)?;
+    let clipboard = Vm::hermit_with_scratch(
+        "sys-clipboard",
+        MiB(128),
+        HermitApplication::Clipboard,
+        MiB(128),
+    )?;
     clipboard.set_autostart(true);
     machine.add(&clipboard)?;
     crate::components::clipboard::connect(&gui, &clipboard);

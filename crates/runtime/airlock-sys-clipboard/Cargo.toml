@@ -10,11 +10,11 @@ description = "Hermit shared clipboard service and Xen transport protocol"
 [dependencies]
 airlock-clipboard-core = { path = "../../airlock-common/clipboard" }
 # The pinned commit is supplied from the local integration repository during development.
-xen-transport = { git = "https://github.com/airlockos-org/hermit-xen", rev = "03bd87fad25d094f0a19c9ef936994683bc2e7e1" }
+xen-transport = { git = "https://github.com/airlockos-org/hermit-xen", rev = "909d25eff50a13dfc64e0a5d56a1c9dac16795e4" }
 
 [target.'cfg(target_os = "hermit")'.dependencies]
 hermit = { git = "https://github.com/hermit-os/hermit-rs", rev = "e9dc6784ad1a2dc6d18c6819ee51198cab9fb78a", default-features = false, features = ["pvh", "fsgsbase", "kernel-stack"] }
-xen-transport = { git = "https://github.com/airlockos-org/hermit-xen", rev = "03bd87fad25d094f0a19c9ef936994683bc2e7e1", features = ["hermit"] }
+xen-transport = { git = "https://github.com/airlockos-org/hermit-xen", rev = "909d25eff50a13dfc64e0a5d56a1c9dac16795e4", features = ["hermit"] }
 
 [[bin]]
 name = "sys-clipboard"

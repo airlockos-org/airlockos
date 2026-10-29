@@ -925,3 +925,40 @@ fn clipboard_follows_display_membership_and_checks_service_ownership() {
         Err(Error::InvalidClipboard { .. })
     ));
 }
+
+/// Scratch storage is an explicit Hermit resource and cannot introduce Linux storage.
+#[test]
+fn hermit_scratch_capacity_is_explicit_and_bounded() {
+    use airlock_config::model::{GuestBackend, HermitApplication, Machine, MiB, Vm};
+    for size in [0, 257] {
+        let mut machine = Machine::default();
+        let vm = Vm::hermit_with_scratch(
+            "sys-clipboard",
+            MiB(128),
+            HermitApplication::Clipboard,
+            MiB(size),
+        )
+        .unwrap();
+        machine.add(&vm).unwrap();
+        assert!(machine.finish().is_err());
+    }
+    let mut machine = Machine::default();
+    let vm = Vm::hermit_with_scratch(
+        "sys-clipboard",
+        MiB(128),
+        HermitApplication::Clipboard,
+        MiB(128),
+    )
+    .unwrap();
+    machine.add(&vm).unwrap();
+    let snapshot = machine.finish().unwrap();
+    let vm = snapshot.vms().next().unwrap();
+    assert!(matches!(
+        vm.backend,
+        GuestBackend::Hermit {
+            scratch: Some(MiB(128)),
+            ..
+        }
+    ));
+    assert_eq!(vm.settings.root_image.0, 0);
+}

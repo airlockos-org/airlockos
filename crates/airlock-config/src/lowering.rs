@@ -102,13 +102,14 @@ pub(crate) fn builders(machine: &MachineSnapshot) -> PackageFunction {
                             .mk_nix_native_domain()
                             .try_call(domain(&inputs, vm))
                             .expect("statically structured domain arguments"),
-                        crate::model::GuestBackend::Hermit { .. } => {
+                        crate::model::GuestBackend::Hermit { scratch, .. } => {
                             builders.mk_hermit_domain().call(nix_record! {
                                 "name": vm.name.as_str(),
                                 "memory": i64::from(vm.settings.memory.bounds().0.0),
                                 "vcpus": i64::from(vm.settings.vcpus),
                                 "autostart": vm.settings.autostart.unwrap_or(false),
                                 "clipboardAuthority": vm.features.get("airlock-clipboard-authority").map_or_else(NixValue::null, |name| name.as_str().into()),
+                                "scratchMiB": scratch.map_or_else(NixValue::null, |size| i64::from(size.0).into()),
                             })
                         }
                     })

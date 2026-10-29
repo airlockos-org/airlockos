@@ -7,6 +7,10 @@
 
 use alloc::{string::String, vec::Vec};
 
+pub mod storage;
+
+use storage::{CHUNK, NoDisk, RAM_LIMIT, Spool, Storage};
+
 /// Maximum number of representations in one clipboard offer.
 pub const MAX_FORMATS: usize = 64;
 
@@ -43,8 +47,10 @@ pub enum Error {
     Order,
     /// The incomplete offer exceeded its fixed deadline.
     Timeout,
-    /// Available memory could not accommodate this replacement.
+    /// Available memory or disk could not accommodate this replacement.
     Capacity,
+    /// Private storage failed; no partial offer is published or returned.
+    Io,
 }
 
 /// Metadata for an immutable representation; the body stays private to the service.
@@ -71,8 +77,10 @@ pub struct Offer {
 struct Representation {
     /// Format name and promised byte length.
     format: Format,
-    /// Private bytes received in contiguous order, never included in Debug output.
-    bytes: Vec<u8>,
+    /// Start in the single aggregate storage extent.
+    offset: usize,
+    /// Contiguous bytes received; only complete representations can be published.
+    written: usize,
 }
 
 /// Private offer state before or after publication.
@@ -87,8 +95,13 @@ struct Content {
     deadline: Option<u64>,
 }
 
-/// One shared clipboard, with at most one pending replacement and one published offer.
-pub struct Clipboard {
+/// One shared clipboard with exactly one private storage extent.
+/// A replacement invalidates and releases the old offer before allocating new bytes.
+/// Only the authenticated owner may advance its pending transfer, and publication
+/// requires complete contiguous data and a successful storage flush before deadline.
+pub struct Clipboard<S = Spool<NoDisk>> {
+    /// Exclusive storage shared by pending and published state, never both.
+    storage: S,
     /// Maximum combined length of the representations in an offer.
     capacity: usize,
     /// Latest issued identity; preserved even when a replacement fails.
@@ -102,15 +115,34 @@ pub struct Clipboard {
 }
 
 impl Clipboard {
-    /// Create an empty clipboard with an explicit per-offer payload bound.
+    /// Create a diskless clipboard, retaining at most `RAM_LIMIT` payload bytes.
     pub fn new(capacity: usize) -> Self {
+        Self::with_storage(capacity, Spool::new(NoDisk, RAM_LIMIT))
+    }
+}
+
+impl<S: Storage> Clipboard<S> {
+    /// Create a clipboard with explicit policy capacity and private storage.
+    pub fn with_storage(capacity: usize, storage: S) -> Self {
         Self {
+            storage,
             capacity,
             generation: 0,
             published: None,
             pending: None,
             last_time: 0,
         }
+    }
+
+    /// Inspect storage metadata without granting mutation of private bytes.
+    pub fn storage(&self) -> &S {
+        &self.storage
+    }
+
+    /// Invalidate unfinished bytes on every terminal transfer path.
+    fn abort(&mut self) {
+        self.pending = None;
+        self.storage.clear();
     }
 
     /// Check normal-mode membership at the single shared read/write policy boundary.
@@ -130,7 +162,10 @@ impl Clipboard {
                 .as_ref()
                 .is_some_and(|p| p.deadline.is_some_and(|d| now >= d))
         {
-            self.pending = None;
+            // A backwards clock invalidates only unfinished data, not a published offer.
+            if self.pending.is_some() {
+                self.abort();
+            }
         }
         self.last_time = now;
     }
@@ -161,6 +196,7 @@ impl Clipboard {
         let deadline = now.checked_add(WRITE_TIMEOUT).ok_or(Error::Bounds)?;
         self.generation = generation;
         self.published = None;
+        self.abort();
         self.pending = Some(Content {
             generation,
             source: caller,
@@ -198,12 +234,17 @@ impl Clipboard {
         representations
             .try_reserve_exact(formats.len())
             .map_err(|_| Error::Capacity)?;
+        let total = formats.iter().map(|format| format.size).sum();
+        self.storage.allocate(total)?;
+        let mut offset = 0;
         for format in formats {
-            let mut bytes = Vec::new();
-            bytes
-                .try_reserve_exact(format.size)
-                .map_err(|_| Error::Capacity)?;
-            representations.push(Representation { format, bytes });
+            let next = offset + format.size; // Aggregate overflow was checked before allocation.
+            representations.push(Representation {
+                format,
+                offset,
+                written: 0,
+            });
+            offset = next;
         }
         self.pending = Some(Content {
             generation,
@@ -232,14 +273,16 @@ impl Clipboard {
         }
         let representation = content.formats.get_mut(format).ok_or(Error::Bounds)?;
         let end = offset.checked_add(bytes.len()).ok_or(Error::Bounds)?;
-        if offset != representation.bytes.len()
-            || end > representation.format.size
-            || bytes.is_empty()
+        if offset != representation.written || end > representation.format.size || bytes.is_empty()
         {
-            self.pending = None;
+            self.abort();
             return Err(Error::Order);
         }
-        representation.bytes.extend_from_slice(bytes);
+        if let Err(error) = self.storage.write(representation.offset + offset, bytes) {
+            self.abort();
+            return Err(error);
+        }
+        representation.written = end;
         Ok(())
     }
 
@@ -250,22 +293,35 @@ impl Clipboard {
         caller: Participant,
         generation: u64,
     ) -> Result<(), Error> {
+        self.complete_with_clock(now, caller, generation, || now)
+    }
+
+    /// Flush complete bytes and recheck the injected monotonic clock before publication.
+    /// Blocking storage must not publish a transfer whose deadline passed during I/O.
+    pub fn complete_with_clock(
+        &mut self,
+        now: u64,
+        caller: Participant,
+        generation: u64,
+        finished_at: impl FnOnce() -> u64,
+    ) -> Result<(), Error> {
         self.access(caller)?;
         self.tick(now);
         let content = self.pending.as_ref().ok_or(Error::Stale)?;
         if content.generation != generation || content.source != caller {
             return Err(Error::Stale);
         }
-        if content.formats.is_empty()
-            || content
-                .formats
-                .iter()
-                .any(|r| r.bytes.len() != r.format.size)
+        if content.formats.is_empty() || content.formats.iter().any(|r| r.written != r.format.size)
         {
-            self.pending = None;
+            self.abort();
             return Err(Error::Order);
         }
-        let mut content = self.pending.take().ok_or(Error::Stale)?;
+        if let Err(error) = self.storage.flush() {
+            self.abort();
+            return Err(error);
+        }
+        self.tick(finished_at());
+        let mut content = self.pending.take().ok_or(Error::Timeout)?;
         content.deadline = None;
         self.published = Some(content);
         Ok(())
@@ -287,13 +343,13 @@ impl Clipboard {
 
     /// Read a bounded range from exactly the requested generation, without consuming it.
     pub fn read(
-        &self,
+        &mut self,
         caller: Participant,
         generation: u64,
         format: usize,
         offset: usize,
         maximum: usize,
-    ) -> Result<&[u8], Error> {
+    ) -> Result<Vec<u8>, Error> {
         self.access(caller)?;
         let content = self
             .published
@@ -301,19 +357,30 @@ impl Clipboard {
             .filter(|c| c.generation == generation)
             .ok_or(Error::Stale)?;
         let representation = content.formats.get(format).ok_or(Error::Bounds)?;
-        if offset > representation.bytes.len() || maximum == 0 {
+        if offset > representation.format.size || maximum == 0 {
             return Err(Error::Bounds);
         }
-        let end = offset
-            .saturating_add(maximum)
-            .min(representation.bytes.len());
-        Ok(&representation.bytes[offset..end])
+        let count = maximum.min(CHUNK).min(representation.format.size - offset);
+        let start = representation.offset + offset;
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(count)
+            .map_err(|_| Error::Capacity)?;
+        bytes.resize(count, 0);
+        if let Err(error) = self.storage.read(start, &mut bytes) {
+            self.published = None;
+            self.storage.clear();
+            // Exhaustion cannot wrap a stale generation back into validity.
+            self.generation = self.generation.saturating_add(1);
+            return Err(error);
+        }
+        Ok(bytes)
     }
 
     /// Abort only this connection's unfinished write; completed copies remain readable.
     pub fn disconnect(&mut self, caller: Participant) {
         if self.pending.as_ref().is_some_and(|p| p.source == caller) {
-            self.pending = None;
+            self.abort();
         }
     }
 }

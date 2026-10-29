@@ -131,6 +131,9 @@ pub enum GuestBackend {
 pub struct HermitBackend {
     /// Exact executable, build provenance and compiled authority mode.
     pub artifact: airlock_nix_core::hermit_artifact::Descriptor,
+    /// Optional encrypted scratch disk; never a Linux root or persistent volume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scratch: Option<airlock_nix_core::hermit_artifact::ScratchDisk>,
 }
 
 /// Existing Linux root, kernel and shared-store implementation.
@@ -151,6 +154,13 @@ pub struct NixosBackend {
 }
 
 impl Backend {
+    /// Borrow the scratch contract only for guests explicitly admitting that device.
+    pub fn hermit_scratch(&self) -> Option<&airlock_nix_core::hermit_artifact::ScratchDisk> {
+        match &self.guest {
+            GuestBackend::Hermit(backend) => backend.scratch.as_ref(),
+            GuestBackend::Nixos(_) => None,
+        }
+    }
     /// Return the backend protocol without inspecting the VM's name or role.
     pub fn kind(&self) -> BackendKind {
         match self.guest {
@@ -305,6 +315,9 @@ impl Topology {
         for (name, d) in &self.domains {
             if let Some(artifact) = d.backend.hermit() {
                 artifact.validate(false)?;
+                if let Some(scratch) = d.backend.hermit_scratch() {
+                    scratch.validate()?;
+                }
                 ensure!(
                     artifact.executable.as_str()
                         == format!("{system}/kernel.elf", system = d.backend.system.source),

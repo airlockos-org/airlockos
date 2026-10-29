@@ -97,11 +97,22 @@ pub enum Reply {
 }
 
 /// Execute only data-plane requests; control operations never acquire authority here.
-pub fn execute(
-    clipboard: &mut Clipboard,
+pub fn execute<S: airlock_clipboard_core::shared::storage::Storage>(
+    clipboard: &mut Clipboard<S>,
     now: u64,
     caller: Participant,
     request: Request,
+) -> Reply {
+    execute_with_clock(clipboard, now, caller, request, || now)
+}
+
+/// Execute with a fresh time observation after synchronous storage completion.
+pub fn execute_with_clock<S: airlock_clipboard_core::shared::storage::Storage>(
+    clipboard: &mut Clipboard<S>,
+    now: u64,
+    caller: Participant,
+    request: Request,
+    finished_at: impl FnOnce() -> u64,
 ) -> Reply {
     let result = match request {
         Request::Offer => clipboard
@@ -123,7 +134,7 @@ pub fn execute(
             .write(now, caller, generation, format, offset, &bytes)
             .map(|()| Reply::Ok),
         Request::Complete { generation } => clipboard
-            .complete(now, caller, generation)
+            .complete_with_clock(now, caller, generation, finished_at)
             .map(|()| Reply::Ok),
         Request::Read {
             generation,
@@ -131,7 +142,7 @@ pub fn execute(
             offset,
         } => clipboard
             .read(caller, generation, format, offset, DATA_CHUNK)
-            .map(|bytes| Reply::Data(bytes.to_vec())),
+            .map(Reply::Data),
         Request::Connect { .. } => Err(Error::Unauthorized),
     };
     result.unwrap_or_else(Reply::Error)
@@ -345,6 +356,7 @@ impl Reply {
                     Error::Order => 5,
                     Error::Timeout => 6,
                     Error::Capacity => 7,
+                    Error::Io => 8,
                 });
             }
         }
@@ -398,6 +410,7 @@ impl Reply {
                 5 => Error::Order,
                 6 => Error::Timeout,
                 7 => Error::Capacity,
+                8 => Error::Io,
                 _ => return Err(TransportError::Malformed),
             }),
             _ => return Err(TransportError::Malformed),

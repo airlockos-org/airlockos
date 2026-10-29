@@ -27,7 +27,14 @@ fn main() {
         let authority = authority
             .parse::<u16>()
             .expect("invalid clipboard authority");
-        airlock_sys_clipboard::service::run(authority, &nonce)
+        let scratch_bytes = std::env::args()
+            .find_map(|argument| {
+                argument
+                    .strip_prefix("airlock.scratch=")
+                    .and_then(|value| value.parse::<u64>().ok())
+            })
+            .expect("normal clipboard requires admitted ephemeral storage");
+        airlock_sys_clipboard::service::run(authority, &nonce, scratch_bytes)
             .expect("clipboard authority disconnected");
         return;
     }

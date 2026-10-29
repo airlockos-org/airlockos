@@ -97,6 +97,7 @@ pub(crate) fn definitions(topology: &Value, program: &str, path: &Path) -> Resul
                         "airlock-hermit-artifact"
                             | "airlock-hermit-generation"
                             | "airlock-system-source"
+                            | "airlock-hermit-scratch"
                     )),
                     "Hermit artifact feature is derived from the admitted backend"
                 );
@@ -107,6 +108,14 @@ pub(crate) fn definitions(topology: &Value, program: &str, path: &Path) -> Resul
                 features.push(Setting {
                     name: "airlock-system-source".into(),
                     value: backend.system.source.to_string(),
+                });
+                features.push(Setting {
+                    name: "airlock-hermit-scratch".into(),
+                    value: backend
+                        .hermit_scratch()
+                        .map(serde_json::to_string)
+                        .transpose()?
+                        .unwrap_or_default(),
                 });
                 features.push(Setting {
                     name: "airlock-hermit-artifact".into(),
