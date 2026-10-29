@@ -36,9 +36,12 @@ tar = "0.4"
 tempfile = "3.0"
 airlock-vm-service = { path = "../runtime/airlock-vm/service" }
 airlock-deployment-core = { path = "../airlock-common/deployment" }
+airlock-clipboard-core = { path = "../airlock-common/clipboard" }
+airlock-sys-clipboard = { path = "../runtime/airlock-sys-clipboard" }
+airlock-machine-core = { path = "../airlock-common/machine" }
+xen-transport = { git = "https://github.com/airlockos-org/hermit-xen", rev = "909d25eff50a13dfc64e0a5d56a1c9dac16795e4", features = ["linux"] }
 
 [dev-dependencies]
-airlock-machine-core = { path = "../airlock-common/machine" }
 png = "0.18"
 libloading = "0.8"
 x11rb = { version = "0.13", features = ["res"] }

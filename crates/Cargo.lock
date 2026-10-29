@@ -353,11 +353,13 @@ dependencies = [
 name = "airlock-tests"
 version = "0.1.0"
 dependencies = [
+ "airlock-clipboard-core",
  "airlock-deployment-core",
  "airlock-dom0-service",
  "airlock-machine-core",
  "airlock-nix-core",
  "airlock-qubes",
+ "airlock-sys-clipboard",
  "airlock-vm-service",
  "anyhow",
  "clap",
@@ -372,6 +374,7 @@ dependencies = [
  "tar",
  "tempfile",
  "x11rb",
+ "xen-transport",
 ]
 
 [[package]]
