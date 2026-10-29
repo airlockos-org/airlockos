@@ -210,6 +210,8 @@ fn invoke(
         }
         "initramfs_path" => return Ok(py.None()),
         "on_pre_start" => {
+            // A failed preflight must not reuse a previous boot's cleanup authority.
+            vm.setattr("_airlock_hermit_scratch", "")?;
             let image = artifact(&vm)?;
             let memory = vm.getattr("memory")?.extract::<u64>()?;
             let valid = vm.getattr("virt_mode")?.extract::<String>()? == "pvh"
@@ -329,14 +331,34 @@ fn invoke(
             vm.getattr("log")?
                 .call_method1("info", ("airlock-hermit state=started xid=%s", xid))?;
         }
-        "on_stopped" => {
-            let name = vm.getattr("name")?.extract::<String>()?;
-            airlock_dom0_service::hermit::stopped(&name)
+        "on_stopped" | "on_start_failed" => {
+            let vm_name = vm.getattr("name")?.extract::<String>()?;
+            airlock_dom0_service::hermit::stopped(&vm_name)
                 .map_err(|error| crate::exception(py, "QubesException", error))?;
             vm.getattr("log")?.call_method1(
                 "info",
                 ("airlock-hermit state=stopped execution-evidence=removed",),
             )?;
+            if name == "on_start_failed" {
+                // Qubes does not stop storage when start_encrypted fails before
+                // domain creation. Await its own cleanup before allowing a retry;
+                // otherwise FileVolume retains its running/export lock. Never
+                // operate on a live domain or metadata outside this boot's contract.
+                let captured = if vm.hasattr("_airlock_hermit_scratch")? {
+                    vm.getattr("_airlock_hermit_scratch")?.extract::<String>()?
+                } else {
+                    String::new()
+                };
+                if !captured.is_empty() && vm.call_method0("is_halted")?.is_truthy()? {
+                    let disk: Option<ScratchDisk> = serde_json::from_str(&captured)
+                        .map_err(|e| crate::exception(py, "QubesException", e))?;
+                    if let Some(disk) = disk {
+                        validate_scratch(&vm, Some(disk.bytes))?;
+                        return Ok(vm.getattr("storage")?.call_method0("stop")?.unbind());
+                    }
+                }
+                return Ok(py.import("asyncio")?.call_method1("sleep", (0,))?.unbind());
+            }
         }
         _ => return Err(pyo3::exceptions::PyAttributeError::new_err(name.to_owned())),
     }
@@ -365,9 +387,16 @@ pub(super) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     for (name, events) in [
         ("on_pre_start", vec!["domain-pre-start"]),
         ("on_started", vec!["domain-start"]),
-        ("on_stopped", vec!["domain-stopped", "domain-start-failed"]),
+        ("on_stopped", vec!["domain-stopped"]),
+        ("on_start_failed", vec!["domain-start-failed"]),
     ] {
         let method = descriptor::method(py, name, invoke, false)?;
+        if name == "on_start_failed" {
+            // Return the original Python storage coroutine, letting Qubes await
+            // it on its existing event loop. Native code performs no async I/O.
+            py.import("inspect")?
+                .call_method1("markcoroutinefunction", (&method,))?;
+        }
         let decorate = py
             .import("qubes.events")?
             .getattr("handler")?

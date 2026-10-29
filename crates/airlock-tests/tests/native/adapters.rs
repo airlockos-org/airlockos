@@ -38,6 +38,8 @@ fn hermit_uses_upstream_qubes_objects() -> Result<()> {
                     "/proc",
                     "--tmpfs",
                     "/tmp",
+                    "--tmpfs",
+                    "/run",
                     "--unshare-net",
                     "--die-with-parent",
                 ])
@@ -110,6 +112,11 @@ fn hermit_uses_upstream_qubes_objects() -> Result<()> {
         .unwrap()
         .remove("scratch_after_stop");
     request.as_object_mut().unwrap().remove("keep_active");
+    request["fail_encryption"] = json!(true);
+    let retried = observe(&request)?;
+    assert!(retried["error"].is_null(), "{retried}");
+    assert_eq!(retried["cleanup_retry"], true);
+    request.as_object_mut().unwrap().remove("fail_encryption");
     request["domain"]["backend"]["scratch"]["bytes"] = json!(0);
     assert!(observe(&request)?["error"].is_string());
     Ok(())

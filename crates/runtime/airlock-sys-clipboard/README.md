@@ -24,8 +24,10 @@ stay local until a separate cross-VM file-transfer capability exists.
 A typed clipboard connection in `airlock-config` derives membership from the GUI
 assignments and installs user services, a GUI provisioner and exact Qubes policy.
 The provisioner authenticates callers through qrexec and resolves current domain
-IDs through Qubes. Hermit grants each admitted participant its own direct channel;
-dom0 observes the boot-bound control offer but never relays clipboard content.
+IDs through Qubes. Hermit grants each admitted participant its own direct IPC
+channel. Dom0 retains its trusted toolstack and disk-backend roles: Qubes owns
+the encryption keys and can access disk plaintext. Ephemeral encryption protects
+retired on-disk data after key disposal.
 A new GUI authority lifetime restarts the volatile clipboard service. Individual
 participant reconnections preserve completed content and receive fresh epochs.
 

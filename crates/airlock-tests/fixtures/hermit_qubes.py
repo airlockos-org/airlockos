@@ -5,6 +5,7 @@ Rust owns the scenario and assertions; this fixture exposes Qubes' Python API.
 
 import asyncio
 import importlib.util
+import inspect
 import json
 import pathlib
 import sys
@@ -56,6 +57,22 @@ with tempfile.TemporaryDirectory() as directory, asyncio.Runner() as runner:
                 vm._prepare_scratch()
                 vm._airlock_hermit_scratch = json.dumps(disk, separators=(",", ":"))
                 volume = vm.volumes["volatile"]
+                if request.get("fail_encryption"):
+                    async def fail_cryptsetup(*args):
+                        raise FileNotFoundError("injected encryption helper failure")
+                    qubes.utils.cryptsetup = fail_cryptsetup
+                    assert inspect.iscoroutinefunction(module.HermitVM.on_start_failed)
+                    for attempt in range(2):
+                        try:
+                            runner.run(vm.storage.start())
+                        except FileNotFoundError:
+                            vm.events_enabled = True
+                            runner.run(vm.fire_event_async("domain-start-failed", reason="injected encryption failure"))
+                            vm.events_enabled = False
+                        else:
+                            raise AssertionError("encryption failure was not propagated")
+                        assert not pathlib.Path(volume.path).exists()
+                    reply["cleanup_retry"] = True
                 # Exercise upstream volatile-file initialization in the disposable
                 # directory; cryptsetup itself belongs to the privileged Xen test.
                 runner.run(volume.start())

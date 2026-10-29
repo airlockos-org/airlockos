@@ -35,7 +35,7 @@ fn main() {
             })
             .expect("normal clipboard requires admitted ephemeral storage");
         airlock_sys_clipboard::service::run(authority, &nonce, scratch_bytes)
-            .expect("clipboard authority disconnected");
+            .expect("clipboard service failed");
         return;
     }
     println!("AIRLOCK_CLIPBOARD_EXECUTING authority=disconnected readiness=isolated boot={nonce}");

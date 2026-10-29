@@ -81,9 +81,14 @@ pub fn qubes_startup() -> NixValue {
                                     substituteInPlace qubes-rpc/qubes.FeaturesRequest \
                                       qubes-rpc/qubes.NotifyTools qubes-rpc/qubes.NotifyUpdates \
                                       --replace-fail {wrong_query} "$out/bin/qubesd-query"
+                                    # Ephemeral volumes must use the immutable Nix dependency,
+                                    # including on hosts without distribution /usr/sbin links.
+                                    substituteInPlace qubes/utils.py \
+                                      --replace-fail /usr/sbin/cryptsetup {cryptsetup}/bin/cryptsetup
                                 "#,
                                     scheduler = previous.clone().select("lib.escapeShellArg").call(QUBES_SCHEDULER),
                                     wrong_query = nix_text!("{client}/bin/qubesd-query", client = previous.clone().select("qubes-core-qubesdb")),
+                                    cryptsetup = previous.clone().select("cryptsetup"),
                                     ).into(),
                                 ]),
                             }),
