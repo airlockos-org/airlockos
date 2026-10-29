@@ -176,8 +176,16 @@ fn catalog(directories: &[PathBuf]) -> Result<Entries> {
                 continue;
             }
             if values.get("StartupWMClass").is_none_or(|v| v.is_empty()) {
+                // D-Bus-activatable GTK applications identify their windows by their
+                // application ID, even when Exec uses a different executable name.
+                let class = if truth("DBusActivatable") {
+                    id.strip_suffix(".desktop").map(str::to_owned)
+                } else {
+                    values.get("Exec").and_then(|v| window_class(v))
+                };
+
                 values.remove("StartupWMClass");
-                if let Some(class) = values.get("Exec").and_then(|v| window_class(v)) {
+                if let Some(class) = class {
                     values.insert("StartupWMClass".into(), class);
                 }
             }

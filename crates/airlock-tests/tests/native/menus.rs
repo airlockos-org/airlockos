@@ -136,24 +136,29 @@ fn catalog_preserves_metadata_and_masks_lower_priority_entries() -> Result<()> {
         );
     }
 
+    for command in ["nautilus --new-window %U", ""] {
+        desktop(
+            &user.join("applications"),
+            "org.gnome.Nautilus.desktop",
+            json!({
+                "Exec": command, "DBusActivatable": "true", "Name[fr]": "Fichiers", "Keywords[fr]": "dossiers;", "OnlyShowIn": "GNOME;", "Icon": "org.gnome.Nautilus"
+            }),
+        )?;
+        let entries = catalog(root, &[&user])?;
+        let files = &entries["org.gnome.Nautilus.desktop"];
+        assert_eq!(files["StartupWMClass"], "org.gnome.Nautilus");
+        assert_eq!(files["Icon"], "org.gnome.Nautilus");
+        assert_eq!(files["Name[fr]"], "Fichiers");
+        assert_eq!(files["Keywords[fr]"], "dossiers;");
+    }
+
     desktop(
         &user.join("applications"),
-        "example.desktop",
-        json!({
-            "Exec": "", "DBusActivatable": "true", "Name[fr]": "Exemple", "Keywords[fr]": "dessin;", "OnlyShowIn": "GNOME;"
-        }),
-    )?;
-    let entries = catalog(root, &[&user])?;
-    assert_eq!(entries["example.desktop"]["Name[fr]"], "Exemple");
-    assert_eq!(entries["example.desktop"]["Keywords[fr]"], "dessin;");
-    assert!(entries["example.desktop"].get("StartupWMClass").is_none());
-    desktop(
-        &user.join("applications"),
-        "example.desktop",
-        json!({"Exec": "different", "StartupWMClass": "Explicit"}),
+        "org.gnome.Nautilus.desktop",
+        json!({"Exec": "different", "DBusActivatable": "true", "StartupWMClass": "Explicit"}),
     )?;
     assert_eq!(
-        catalog(root, &[&user])?["example.desktop"]["StartupWMClass"],
+        catalog(root, &[&user])?["org.gnome.Nautilus.desktop"]["StartupWMClass"],
         "Explicit"
     );
     Ok(())
