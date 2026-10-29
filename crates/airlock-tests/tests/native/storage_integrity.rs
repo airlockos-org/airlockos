@@ -163,6 +163,28 @@ fn artifact_manifest_rejection_preserves_existing_generations() -> Result<()> {
     let second = common::json(&mut store.receiver(), Some(payload))?;
     assert_eq!(first["generation"], second["generation"]);
     assert_eq!(second["objects_admitted"], 0);
+
+    // Losing one half of an object record must not permit a different tree to
+    // replace the surviving identity under the same store name.
+    let before = manifests(&store.pool.join("domains"))?;
+    let name = Path::new(&store.system)
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap();
+    fs::remove_file(
+        store
+            .pool
+            .join("objects/blob-metadata")
+            .join(format!("{name}.json")),
+    )?;
+    fs::write(
+        store.physical.join(name).join("init"),
+        "substituted contents",
+    )?;
+    let rejected = common::run(&mut store.receiver(), Some(store.artifact()?))?;
+    assert!(!rejected.status.success());
+    assert_eq!(manifests(&store.pool.join("domains"))?, before);
     Ok(())
 }
 
@@ -856,13 +878,19 @@ pub(super) fn extract(store: &Store, receipt: &Value) -> Result<PathBuf> {
     Ok(directory)
 }
 
-/// Real additive indexes read both object generations without modifying their predecessor's metadata image.
+/// Cached metadata indexes preserve exact closure membership across additions, replacements and removals.
 #[test]
-#[ignore = "requires explicitly prepared AIRLOCK_EROFS_MKFS with Airlock tar-offset support and fsck.erofs"]
+#[ignore = "requires explicitly prepared AIRLOCK_EROFS_MKFS with Airlock metadata-index support and fsck.erofs"]
 fn packaged_erofs_indexes_preserve_predecessors_and_reject_corruption() -> Result<()> {
     let mkfs = std::env::var_os("AIRLOCK_EROFS_MKFS")
         .expect("prepare the patched EROFS package explicitly");
-    let store = Store::new()?;
+    let mut store = Store::new()?;
+    let shared = format!("{hash}-shared", hash = "b".repeat(32));
+    fs::write(store.physical.join(&shared), "shared payload")?;
+    fs::write(
+        store.closure.join("store-paths"),
+        format!("{system}\n/nix/store/{shared}\n", system = store.system),
+    )?;
     let first = common::json(store.admission().env("AIRLOCK_MKFS_EROFS", &mkfs), None)?;
     let before = fs::read(first["canonical_metadata_image"].as_str().unwrap())?;
     let addition = format!("{hash}-addition", hash = "0".repeat(32));
@@ -871,6 +899,16 @@ fn packaged_erofs_indexes_preserve_predecessors_and_reject_corruption() -> Resul
         .join("x".repeat(160));
     fs::create_dir_all(store.physical.join(&relative).parent().unwrap())?;
     fs::write(store.physical.join(&relative), "new payload")?;
+    fs::set_permissions(
+        store.physical.join(&relative),
+        fs::Permissions::from_mode(0o755),
+    )?;
+    let long_target = "long-target-".repeat(20);
+    symlink(
+        &long_target,
+        store.physical.join(&addition).join("long-link"),
+    )?;
+    fs::write(store.physical.join(&addition).join("empty"), [])?;
     let mut paths = fs::OpenOptions::new()
         .append(true)
         .open(store.closure.join("store-paths"))?;
@@ -882,7 +920,7 @@ fn packaged_erofs_indexes_preserve_predecessors_and_reject_corruption() -> Resul
             .args(["--previous-generation", &first["generation"].to_string()]),
         None,
     )?;
-    assert_eq!(second["store"]["index_depth"], 1);
+    assert_eq!(second["store"]["index_depth"], 0);
     assert_eq!(
         fs::read(first["canonical_metadata_image"].as_str().unwrap())?,
         before
@@ -896,7 +934,92 @@ fn packaged_erofs_indexes_preserve_predecessors_and_reject_corruption() -> Resul
         )?,
         "system fixture"
     );
-    assert_eq!(fs::read_to_string(target.join(relative))?, "new payload");
+    assert_eq!(fs::read_to_string(target.join(&relative))?, "new payload");
+    assert_eq!(
+        fs::metadata(target.join(&relative))?.permissions().mode() & 0o777,
+        0o755
+    );
+    assert_eq!(
+        fs::read_link(target.join(&addition).join("long-link"))?,
+        PathBuf::from(long_target)
+    );
+    assert_eq!(fs::metadata(target.join(&addition).join("empty"))?.len(), 0);
+    fs::remove_dir_all(&target)?;
+
+    let previous_image = fs::read(second["canonical_metadata_image"].as_str().unwrap())?;
+    let replacement = format!("{hash}-system", hash = "c".repeat(32));
+    fs::create_dir(store.physical.join(&replacement))?;
+    fs::write(
+        store.physical.join(&replacement).join("init"),
+        "replacement system",
+    )?;
+    store.system = format!("/nix/store/{replacement}");
+    fs::write(
+        store.closure.join("store-paths"),
+        format!("{system}\n/nix/store/{shared}\n", system = store.system),
+    )?;
+    let third = common::json(
+        store
+            .admission()
+            .env("AIRLOCK_MKFS_EROFS", &mkfs)
+            .args(["--previous-generation", &second["generation"].to_string()]),
+        None,
+    )?;
+    let target = extract(&store, &third)?;
+    assert_eq!(
+        fs::read_to_string(target.join(&replacement).join("init"))?,
+        "replacement system"
+    );
+    assert_eq!(fs::read_to_string(target.join(&shared))?, "shared payload");
+    let names: BTreeSet<_> = fs::read_dir(&target)?
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            std::ffi::OsString::from(&shared),
+            std::ffi::OsString::from(&replacement)
+        ]
+        .into_iter()
+        .collect()
+    );
+    let map = read(third["canonical_blob_map"].as_str().unwrap())?;
+    assert_eq!(map["objects"].as_array().unwrap().len(), 2);
+    assert!(
+        !map["objects"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(addition))
+    );
+    assert_eq!(
+        fs::read(second["canonical_metadata_image"].as_str().unwrap())?,
+        previous_image
+    );
+
+    // Corrupt cached metadata must fail closed, even though its package bytes
+    // are still valid and a previous generation can still read them.
+    let cached = store
+        .pool
+        .join("objects/blob-metadata")
+        .join(format!("{shared}.json"));
+    let mut metadata = read(&cached)?;
+    metadata["index"][0]["offset"] = json!(0);
+    fs::write(&cached, serde_json::to_vec(&metadata)?)?;
+    let extra = format!("{hash}-extra", hash = "d".repeat(32));
+    fs::write(store.physical.join(&extra), "extra")?;
+    writeln!(
+        fs::OpenOptions::new()
+            .append(true)
+            .open(store.closure.join("store-paths"))?,
+        "/nix/store/{extra}"
+    )?;
+    let rejected = common::run(store.admission().env("AIRLOCK_MKFS_EROFS", &mkfs), None)?;
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stdout).contains("cached file index checksum mismatch"),
+        "{stdout}",
+        stdout = String::from_utf8_lossy(&rejected.stdout)
+    );
 
     let store = Store::new()?;
     let first = common::json(store.admission().env("AIRLOCK_MKFS_EROFS", &mkfs), None)?;

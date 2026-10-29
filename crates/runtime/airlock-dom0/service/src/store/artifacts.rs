@@ -17,20 +17,24 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{self, File},
-    io::{BufRead, Read, Write},
+    fs,
+    io::{BufRead, Read, Seek, SeekFrom, Write},
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
 
-/// Incoming fragment retained in a private staging directory until validation completes.
+/// Incoming bytes already arranged as immutable segments, unpublished until validation completes.
 struct Fragment {
     // Locally chosen path; no archive pathname is extracted to disk.
     path: PathBuf,
+    // Byte offset in its staged segment; root payloads always start at zero.
+    offset: u64,
     // Exact stream length checked against the tar header and manifest.
     size: u64,
     // SHA-256 of the bytes actually received.
     sha256: String,
+    // Tree and index metadata computed while receiving package bytes; absent for roots.
+    identity: Option<artifact::fragment::Identity>,
 }
 
 fn array<'a>(value: &'a Value, key: &str) -> Result<&'a Vec<Value>> {
@@ -117,119 +121,6 @@ fn objects(manifest: &Value, domain: &str, inventory: bool) -> Result<BTreeMap<S
     Ok(objects)
 }
 
-fn tar_tree_hash(fragment: &Path, name: &str) -> Result<String> {
-    let input = File::open(fragment)?;
-    let length = input.metadata()?.len();
-    let mut archive = tar::Archive::new(input);
-    let mut records = BTreeMap::new();
-    let mut end = 0;
-    for item in archive.entries()? {
-        let mut item = item?;
-        end = item
-            .raw_file_position()
-            .checked_add(
-                item.size()
-                    .div_ceil(512)
-                    .checked_mul(512)
-                    .context("tar member length overflow")?,
-            )
-            .context("tar extent overflow")?;
-        let path = item.path()?.into_owned();
-        ensure!(
-            !path.is_absolute()
-                && !path
-                    .components()
-                    .any(|c| c == std::path::Component::ParentDir),
-            "unsafe object tar path"
-        );
-        let mut components = path.components();
-        ensure!(
-            components.next().is_some_and(|c| c.as_os_str() == name),
-            "object tar path has wrong root"
-        );
-        let relative = components.collect::<PathBuf>();
-        let kind = item.header().entry_type();
-        let mode = item.header().mode()? & 0o7777;
-        let (kind, value) = if kind.is_dir() {
-            ('D', String::new())
-        } else if kind.is_symlink() {
-            (
-                'L',
-                item.link_name()?
-                    .context("missing symlink target")?
-                    .to_str()
-                    .context("non-UTF8 symlink")?
-                    .to_owned(),
-            )
-        } else {
-            ensure!(kind.is_file(), "unsupported object tar member type");
-            let mut digest = Sha256::new();
-            let mut buffer = [0; 1024 * 1024];
-            loop {
-                let count = item.read(&mut buffer)?;
-                if count == 0 {
-                    break;
-                }
-                digest.update(&buffer[..count]);
-            }
-            ('F', hex(&digest.finalize()))
-        };
-        ensure!(
-            records.insert(relative, (kind, mode, value)).is_none(),
-            "duplicate object tar path"
-        );
-    }
-    ensure!(
-        length > 0 && end == length,
-        "object fragment has an embedded terminator or trailing bytes"
-    );
-
-    let (kind, mode, value) = records
-        .remove(Path::new(""))
-        .context("object tar has no root")?;
-    let mut digest = Sha256::new();
-    match kind {
-        'L' => {
-            ensure!(records.is_empty(), "symlink tar root has children");
-            digest.update(b"L\0");
-            digest.update(value);
-        }
-        'F' => {
-            ensure!(records.is_empty(), "file tar root has children");
-            digest.update(format!("F\0{mode:o}\0"));
-            digest.update(value);
-        }
-        'D' => {
-            for path in records.keys() {
-                let mut parent = path.parent();
-                while let Some(path) = parent.filter(|path| !path.as_os_str().is_empty()) {
-                    ensure!(
-                        records.get(path).is_some_and(|(kind, _, _)| *kind == 'D'),
-                        "object tar member has a missing or non-directory parent"
-                    );
-                    parent = path.parent();
-                }
-            }
-            digest.update(b"D\0");
-            for (path, (kind, mode, value)) in records {
-                let path = path.to_str().context("non-UTF8 tar path")?;
-                match kind {
-                    'L' => digest.update(format!("L\0{path}\0{value}\0")),
-                    'D' => digest.update(format!("D\0{path}\0{mode:o}\0")),
-                    'F' => {
-                        digest.update(format!("F\0{path}\0{mode:o}\0"));
-                        digest.update(value);
-                        digest.update(b"\0");
-                    }
-                    _ => unreachable!(),
-                }
-            }
-        }
-        _ => unreachable!(),
-    }
-    Ok(hex(&digest.finalize()))
-}
-
 fn receive_members(
     input: &mut dyn BufRead,
     staging: &Path,
@@ -250,6 +141,9 @@ fn receive_members(
     let mut archive = tar::Archive::new(reader);
     let mut manifest = None;
     let mut fragments = BTreeMap::new();
+    let segment_target = pool_cli::target(None)?;
+    let mut segment_number = 0;
+    let mut segment_size = 0u64;
     for member in archive.entries()? {
         let mut member = member?;
         ensure!(
@@ -294,11 +188,32 @@ fn receive_members(
             !fragments.contains_key(&name) && allowed.is_none_or(|a| a.contains(&name)),
             "duplicate or unrequested artifact fragment"
         );
-        let target = staging.join(basename);
+        let is_root = name == "root.sparse";
+        let offset = if is_root {
+            0
+        } else {
+            segment_size.div_ceil(ALIGNMENT) * ALIGNMENT
+        };
+        let (target, offset) = if is_root {
+            (staging.join(&basename), offset)
+        } else {
+            if segment_size > 0
+                && offset
+                    .checked_add(size)
+                    .is_none_or(|end| end > segment_target)
+            {
+                segment_number += 1;
+                segment_size = 0;
+            }
+            let offset = segment_size.div_ceil(ALIGNMENT) * ALIGNMENT;
+            (staging.join(format!("segment-{segment_number}")), offset)
+        };
         let mut output = std::fs::OpenOptions::new()
             .write(true)
-            .create_new(true)
+            .create(true)
+            .truncate(false)
             .open(&target)?;
+        output.seek(SeekFrom::Start(offset))?;
         let available = rustix::fs::statvfs(staging)?;
         ensure!(
             size.checked_add(64 * 1024 * 1024).is_some_and(
@@ -306,26 +221,43 @@ fn receive_members(
             ),
             "insufficient pool space for fragment"
         );
-        let mut digest = Sha256::new();
-        let mut received = 0;
-        let mut buffer = [0; 1024 * 1024];
-        loop {
-            let count = member.read(&mut buffer)?;
-            if count == 0 {
-                break;
+        let (sha256, identity) = if is_root {
+            let mut digest = Sha256::new();
+            let mut received = 0;
+            let mut buffer = [0; 1024 * 1024];
+            loop {
+                let count = member.read(&mut buffer)?;
+                if count == 0 {
+                    break;
+                }
+                digest.update(&buffer[..count]);
+                output.write_all(&buffer[..count])?;
+                received += count as u64;
             }
-            digest.update(&buffer[..count]);
-            output.write_all(&buffer[..count])?;
-            received += count as u64;
-        }
-        ensure!(received == size, "truncated artifact member");
-        output.sync_all()?;
+            ensure!(received == size, "truncated root payload");
+            (hex(&digest.finalize()), None)
+        } else {
+            let entry = basename
+                .strip_suffix(".tar")
+                .context("missing fragment suffix")?;
+            let mut buffered = std::io::BufWriter::new(&mut output);
+            let identity = artifact::fragment::inspect(&mut member, &mut buffered, size, entry)?;
+            buffered.flush()?;
+            segment_size = offset
+                .checked_add(size)
+                .context("staged segment overflow")?;
+            (identity.sha256.clone(), Some(identity))
+        };
+        // Staging is disposable. Durability is established once, when validated
+        // segments are published; flushing every incoming member adds no recovery guarantee.
         fragments.insert(
             name,
             Fragment {
                 path: target,
+                offset,
                 size,
-                sha256: hex(&digest.finalize()),
+                sha256,
+                identity,
             },
         );
     }
@@ -371,7 +303,12 @@ fn validate_payload(
             "artifact fragment checksum mismatch"
         );
         ensure!(
-            tar_tree_hash(&fragment.path, entry(path)?)? == text(object, "tree_hash")?,
+            fragment
+                .identity
+                .as_ref()
+                .context("missing validated tree")?
+                .tree_hash
+                == text(object, "tree_hash")?,
             "artifact tree checksum mismatch"
         );
     }
@@ -595,28 +532,48 @@ fn admit(
     )?;
     let publish = (|| -> Result<Value> {
         let target = pool_cli::target(None)?;
+        // All objects and the final manifest have passed validation. Move each
+        // staged segment into the pool once; no package bytes are copied or rehashed.
+        let mut received = BTreeMap::new();
+        let mut groups: BTreeMap<&Path, Vec<segments::ReceivedFragment<'_>>> = BTreeMap::new();
+        for (path, object) in &objects {
+            if reused.contains_key(path) || segments::reusable(root, path)?.is_some() {
+                continue;
+            }
+            let fragment = fragments
+                .get(&text(object, "fragment")?)
+                .context("missing requested object")?;
+            groups
+                .entry(&fragment.path)
+                .or_default()
+                .push(segments::ReceivedFragment {
+                    logical: path,
+                    offset: fragment.offset,
+                    size: fragment.size,
+                    identity: fragment
+                        .identity
+                        .as_ref()
+                        .context("missing validated fragment")?,
+                });
+        }
+        for (path, fragments) in groups {
+            received.extend(segments::publish_received(
+                root, path, &fragments, &tx, target,
+            )?);
+        }
         let mut admitted = 0;
         let mut reused_count = 0;
         for (path, object) in &objects {
-            if let Some(existing) = segments::reusable(root, path)? {
+            if received.contains_key(path) {
+                admitted += 1;
+            } else {
+                let existing = segments::reusable(root, path)?
+                    .context("validated object was not published")?;
                 ensure!(
                     existing["tree_hash"] == object["tree_hash"],
                     "existing object hash mismatch"
                 );
                 reused_count += 1;
-            } else {
-                let fragment = fragments
-                    .get(&text(object, "fragment")?)
-                    .context("missing requested object")?;
-                segments::admit_fragment(
-                    root,
-                    path,
-                    &fragment.path,
-                    &text(object, "tree_hash")?,
-                    &tx,
-                    target,
-                )?;
-                admitted += 1;
             }
             failpoint("artifact-after-object-import")?;
         }

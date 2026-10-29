@@ -426,6 +426,184 @@ pub(super) fn reusable(root: &Path, path: &str) -> Result<Option<Value>> {
     Ok(Some(value))
 }
 
+/// One validated object inside a disposable incoming segment.
+pub(super) struct ReceivedFragment<'a> {
+    /// Logical Nix store root declared by the validated manifest.
+    pub(super) logical: &'a str,
+    /// Aligned byte offset in the incoming file.
+    pub(super) offset: u64,
+    /// Exact canonical tar fragment length.
+    pub(super) size: u64,
+    /// Digests and metadata computed by the receiver, never trusted from the sender.
+    pub(super) identity: &'a airlock_nix_core::artifact::fragment::Identity,
+}
+
+/// Publish validated incoming bytes without copying them into another backing file.
+/// The caller holds admission exclusion. An interrupted publication leaves only
+/// ordinary segment/transaction records for existing recovery and GC to inspect.
+pub(super) fn publish_received(
+    root: &Path,
+    incoming: &Path,
+    fragments: &[ReceivedFragment<'_>],
+    transaction: &str,
+    target: u64,
+) -> Result<std::collections::BTreeMap<String, Value>> {
+    ensure!(!fragments.is_empty(), "empty received segment");
+    let mut ordered: Vec<_> = fragments.iter().collect();
+    ordered.sort_by_key(|fragment| fragment.offset);
+    let size = fs::metadata(incoming)?.len();
+    let mut end = 0;
+    for fragment in &ordered {
+        entry(fragment.logical)?;
+        ensure!(
+            fragment.offset >= end
+                && fragment.offset % ALIGNMENT == 0
+                && fragment.size > 0
+                && fragment.size % 512 == 0,
+            "invalid received extent"
+        );
+        end = fragment
+            .offset
+            .checked_add(fragment.size)
+            .context("received extent overflow")?;
+        ensure!(end <= size, "received extent is truncated");
+    }
+    let _lock = PoolLock::acquire(&root.join("objects/segments.lock"))?;
+    // Do not select this segment for ordinary append: its extents are already fixed.
+    let id = create(root, target, transaction, true)?;
+    let backing = blob(root, &id)?;
+    let file = File::open(incoming)?;
+    file.set_permissions(fs::Permissions::from_mode(0o400))?;
+    file.sync_all()?;
+    fs::rename(incoming, &backing)?;
+    sync_dir(backing.parent().context("missing segment parent")?)?;
+    sync_dir(incoming.parent().context("missing staging parent")?)?;
+    let mut metadata: Value = read(&metadata(root, &id)?)?;
+    metadata["used_bytes"] = json!(size);
+    metadata["object_count"] = json!(fragments.len());
+    metadata["oversized"] = json!(size > target);
+    metadata["objects"] = json!(ordered.iter().map(|fragment| json!({
+        "entry": entry(fragment.logical).expect("validated entry"), "offset": fragment.offset,
+        "size": fragment.size, "sha256": fragment.identity.sha256,
+    })).collect::<Vec<_>>());
+    write_meta(root, &id, &metadata)?;
+    seal(root, &id, transaction, "received-artifact")?;
+    failpoint("artifact-after-segment-publish")?;
+
+    let mut result = std::collections::BTreeMap::new();
+    for fragment in fragments {
+        let extent = Extent {
+            segment_id: id.clone(),
+            segment_blob: backing.clone(),
+            segment_offset: fragment.offset,
+            size: fragment.size,
+            sha256: fragment.identity.sha256.clone(),
+        };
+        let value = publish_fragment(
+            root,
+            fragment.logical,
+            &fragment.identity.tree_hash,
+            &extent,
+            transaction,
+            &fragment.identity.index,
+        )?;
+        let mut location = value;
+        location
+            .as_object_mut()
+            .context("invalid fragment identity")?
+            .remove("index");
+        let object = json!({"schema":"airlock.closure-store.object.v2", "path":fragment.logical,
+            "entry":entry(fragment.logical)?, "tree_hash":fragment.identity.tree_hash,
+            "tar_fragment":location, "tree_materialized":false, "admitted_at":now()});
+        write(
+            &root
+                .join("objects/metadata")
+                .join(format!("{name}.json", name = entry(fragment.logical)?)),
+            &object,
+            0o644,
+        )?;
+        result.insert(fragment.logical.to_owned(), object);
+    }
+    Ok(result)
+}
+
+/// Bind a durable extent to locally derived file metadata before any generation can reference it.
+fn publish_fragment(
+    root: &Path,
+    logical: &str,
+    tree_hash: &str,
+    location: &Extent,
+    transaction: &str,
+    index: &[airlock_nix_core::artifact::fragment::IndexEntry],
+) -> Result<Value> {
+    // A failed earlier admission may have published only one of the paired
+    // records. Never let that incomplete state overwrite an established tree
+    // identity with a different payload under the same Nix store name.
+    for path in [
+        object_metadata(root, entry(logical)?)?,
+        root.join("objects/metadata")
+            .join(format!("{name}.json", name = entry(logical)?)),
+    ] {
+        if path.try_exists()? {
+            let existing: Value = read(&path)?;
+            ensure!(
+                existing["tree_hash"] == tree_hash,
+                "existing object hash mismatch"
+            );
+        }
+    }
+    failpoint("object-after-append")?;
+    let mut location_json = serde_json::to_value(location)?;
+    location_json["status"] = json!("current");
+    location_json["created_at"] = json!(now());
+    location_json["transaction"] = json!(transaction);
+    let mut value = serde_json::to_value(location)?;
+    let index_bytes = serde_json::to_vec(index)?;
+    for (key, field) in json!({
+        "schema":"airlock.closure-store.object-tar-fragment.v1", "path":logical,
+        "entry":entry(logical)?, "tree_hash":tree_hash, "format":"posix-tar-fragment-v1",
+        "admitted_at":now(), "transaction":transaction, "locations":[location_json],
+        "index":index, "index_sha256":hex(&Sha256::digest(&index_bytes)),
+    })
+    .as_object()
+    .context("invalid fragment fields")?
+    {
+        value[key] = field.clone();
+    }
+    write(&object_metadata(root, entry(logical)?)?, &value, 0o644)?;
+    failpoint("object-after-metadata")?;
+    Ok(value)
+}
+
+/// Return locally cached file metadata, deriving it once for older admitted objects.
+/// A cached index is bound to the admitted fragment metadata and checked for corruption.
+pub(super) fn index(
+    root: &Path,
+    name: &str,
+    value: &Value,
+) -> Result<Vec<airlock_nix_core::artifact::fragment::IndexEntry>> {
+    if let Some(index) = value.get("index") {
+        let index: Vec<airlock_nix_core::artifact::fragment::IndexEntry> =
+            serde_json::from_value(index.clone())?;
+        ensure!(
+            value["index_sha256"] == hex(&Sha256::digest(serde_json::to_vec(&index)?)),
+            "cached file index checksum mismatch"
+        );
+        return Ok(index);
+    }
+    let extent = extent(root, value, false)?;
+    let index = airlock_nix_core::artifact::fragment::index(
+        File::open(extent.segment_blob)?,
+        extent.segment_offset,
+        extent.size,
+    )?;
+    let mut value = value.clone();
+    value["index"] = serde_json::to_value(&index)?;
+    value["index_sha256"] = json!(hex(&Sha256::digest(serde_json::to_vec(&index)?)));
+    write(&object_metadata(root, name)?, &value, 0o644)?;
+    Ok(index)
+}
+
 pub(super) fn admit_fragment(
     root: &Path,
     logical: &str,
@@ -469,29 +647,9 @@ pub(super) fn admit_fragment(
                 "cached fragment checksum mismatch"
             );
         }
-        failpoint("object-after-append")?;
-        let mut location_json = serde_json::to_value(&location)?;
-        location_json["status"] = json!("current");
-        location_json["created_at"] = json!(now());
-        location_json["transaction"] = json!(transaction);
-        let mut value = serde_json::to_value(location)?;
-        for (key, field) in json!({
-            "schema": "airlock.closure-store.object-tar-fragment.v1",
-            "path": logical,
-            "entry": name,
-            "tree_hash": tree_hash,
-            "format": "posix-tar-fragment-v1",
-            "admitted_at": now(),
-            "transaction": transaction,
-            "locations": [location_json],
-        })
-        .as_object()
-        .context("invalid object fields")?
-        {
-            value[key] = field.clone();
-        }
-        write(&meta, &value, 0o644)?;
-        failpoint("object-after-metadata")?;
+        let index =
+            airlock_nix_core::artifact::fragment::index(File::open(fragment)?, 0, location.size)?;
+        let value = publish_fragment(root, logical, tree_hash, &location, transaction, &index)?;
         (value, true)
     };
 
@@ -506,12 +664,17 @@ pub(super) fn admit_fragment(
         "object tree identity mismatch"
     );
 
+    let mut location = value.clone();
+    location
+        .as_object_mut()
+        .context("invalid fragment identity")?
+        .remove("index");
     let object = json!({
         "schema": "airlock.closure-store.object.v2",
         "path": logical,
         "entry": name,
         "tree_hash": tree_hash,
-        "tar_fragment": value,
+        "tar_fragment": location,
         "tree_materialized": false,
         "admitted_at": old.get("admitted_at").cloned().unwrap_or_else(|| json!(now())),
     });

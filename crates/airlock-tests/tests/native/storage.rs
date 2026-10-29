@@ -378,14 +378,99 @@ fn interrupted_admissions_preserve_the_selected_committed_view() -> Result<()> {
     Ok(())
 }
 
+/// Interrupted segment promotion cannot publish a generation or strand permanently protected bytes.
+#[test]
+fn interrupted_received_segments_recover_without_activation() -> Result<()> {
+    for failure in [
+        "artifact-after-segment-publish",
+        "object-after-metadata",
+        "artifact-before-generation-commit",
+    ] {
+        let store = Store::new()?;
+        let output = common::run(
+            store
+                .receiver()
+                .env("AIRLOCK_CLOSURE_STORE_FAILPOINT", failure),
+            Some(store.artifact()?),
+        )?;
+        assert!(!output.status.success(), "{failure}");
+        store.run(&["pool", "recover", "--pool-root", store.pool_text()])?;
+        assert!(manifests(&store)?.is_empty());
+        store.run(&[
+            "pool",
+            "gc",
+            "--pool-root",
+            store.pool_text(),
+            "--keep-generations",
+            "0",
+        ])?;
+        assert_eq!(
+            fs::read_dir(store.pool.join("objects/segments"))?.count(),
+            0
+        );
+        let receipt = common::json(&mut store.receiver(), Some(store.artifact()?))?;
+        assert_eq!(receipt["status"], "passed");
+        assert_eq!(receipt["activated"], false);
+    }
+    Ok(())
+}
+
 /// A full artifact is retained without changing the selected generation.
 #[test]
 fn full_artifact_is_retained_inactive() -> Result<()> {
     let store = Store::new()?;
-    let receipt = common::json(&mut store.receiver(), Some(store.artifact()?))?;
+    let small = format!(
+        "{hash}-{name}",
+        hash = "b".repeat(32),
+        name = "long-name-".repeat(16)
+    );
+    let large = format!("{hash}-large", hash = "c".repeat(32));
+    fs::write(store.physical.join(&small), b"small payload")?;
+    fs::write(store.physical.join(&large), vec![7; 32768])?;
+    let paths = [
+        store.system.clone(),
+        format!("/nix/store/{small}"),
+        format!("/nix/store/{large}"),
+    ];
+    fs::write(
+        store.closure.join("store-paths"),
+        format!("{}\n", paths.join("\n")),
+    )?;
+    let metadata: serde_json::Map<String, Value> = paths
+        .iter()
+        .map(|path| {
+            (
+                path.clone(),
+                json!({"narHash":"sha256:fixture", "narSize":32768, "references":[]}),
+            )
+        })
+        .collect();
+    fs::write(
+        store.temporary.path().join("path-info.json"),
+        serde_json::to_vec(&metadata)?,
+    )?;
+    let receipt = common::json(
+        store
+            .receiver()
+            .env("AIRLOCK_CLOSURE_STORE_SEGMENT_TARGET_BYTES", "16384"),
+        Some(store.artifact()?),
+    )?;
+    let fragments: Vec<_> = paths
+        .iter()
+        .map(|path| {
+            read(
+                store
+                    .pool
+                    .join("objects/blob-metadata")
+                    .join(format!("{}.json", path.rsplit('/').next().unwrap())),
+            )
+        })
+        .collect::<Result<_>>()?;
+    assert_eq!(fragments[0]["segment_id"], fragments[1]["segment_id"]);
+    assert_ne!(fragments[1]["segment_id"], fragments[2]["segment_id"]);
     assert_eq!(receipt["retained"], true);
     assert_eq!(receipt["activated"], false);
-    assert_eq!(receipt["objects_admitted"], 1);
+    assert_eq!(receipt["objects_admitted"], 3);
     assert_eq!(receipt["domain"], "usr-home");
     let manifest = read(receipt["manifest"].as_str().unwrap())?;
     assert_eq!(manifest["domain"], "usr-home-runtime-store");

@@ -1,0 +1,24 @@
+Expose the existing OCI metadata-only tar index reader to local callers.
+Airlock supplies only dom0-derived headers and offsets into the exact VM closure;
+package data is not copied into the indexing input.
+
+--- a/mkfs/main.c
++++ b/mkfs/main.c
+@@ -627,6 +627,11 @@
+-	if (!strcmp(cfg, "headerball"))
+-		erofstar.headeronly_mode = true;
+-
+-	if (erofstar.headeronly_mode || !strcmp(optarg, "i") ||
+-	    !strcmp(optarg, "0"))
+-		erofstar.index_mode = true;
++	if (!strcmp(cfg, "headerball"))
++		erofstar.headeronly_mode = true;
++
++	/* Expose the existing OCI metadata-only index reader for local indexes. */
++	if (!strcmp(cfg, "ddtaridx")) {
++		erofstar.ddtaridx_mode = true;
++		erofstar.index_mode = true;
++	}
++	if (erofstar.headeronly_mode || !strcmp(optarg, "i") ||
++	    !strcmp(optarg, "0"))
++		erofstar.index_mode = true;

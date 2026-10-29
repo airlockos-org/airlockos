@@ -414,7 +414,7 @@ pub(super) fn attach(root: &Path, domain: &str, generation: u64, attaching: bool
     Ok(result)
 }
 
-/// A frozen closure and its authenticated predecessor used to build one EROFS index.
+/// A frozen closure and optional predecessor used to assemble one exact EROFS view.
 pub(super) struct ViewRequest<'a> {
     /// Pool containing the canonical immutable fragments.
     pub(super) root: &'a Path,
@@ -430,7 +430,7 @@ pub(super) struct ViewRequest<'a> {
     pub(super) target: u64,
     /// Previously admitted objects whose payload bytes need not be reread.
     pub(super) trusted: &'a BTreeSet<String>,
-    /// Authenticated prior index eligible for an additive extension.
+    /// Prior view to authenticate before replacing it; cached file metadata is independent of membership.
     pub(super) previous: Option<&'a Value>,
 }
 
@@ -523,54 +523,15 @@ pub(super) fn materialize(request: ViewRequest<'_>) -> Result<Value> {
         || !object_refs.is_file()
         || !view_manifest.is_file()
     {
-        let mut depth = 0;
-        let mut inherited = Vec::new();
-        let mut predecessor = None;
+        let depth = 0;
         if let Some(previous) = previous.filter(|_| !image_build()) {
-            let old_depth = number(previous, "index_depth")?;
-            let old_paths: BTreeSet<String> = serde_json::from_value(previous["paths"].clone())?;
-            if old_depth < 16 && old_paths.is_subset(&paths.iter().cloned().collect()) {
-                verify(root, previous)?;
-                let map: Value = read(Path::new(&text(previous, "canonical_blob_map")?))?;
-                inherited = extents(&map)?
-                    .into_iter()
-                    .filter(|e| e.object != ".tar-eof")
-                    .collect();
-                ensure!(
-                    inherited
-                        .iter()
-                        .map(|e| format!("/nix/store/{}", e.object))
-                        .collect::<BTreeSet<_>>()
-                        == old_paths
-                        && inherited.len() == old_paths.len(),
-                    "predecessor objects mismatch"
-                );
-                let mut logical = 0;
-                for item in &inherited {
-                    ensure!(
-                        item.logical_offset == logical,
-                        "predecessor has non-contiguous offsets"
-                    );
-                    logical = logical
-                        .checked_add(item.length)
-                        .context("predecessor offset overflow")?;
-                }
-                depth = old_depth + 1;
-                predecessor = Some(text(previous, "canonical_metadata_image")?);
-            }
+            verify(root, previous)?;
         }
-
-        let inherited_names: BTreeSet<_> = inherited.iter().map(|e| e.object.clone()).collect();
-        let mut order: Vec<_> = inherited.iter().map(|e| e.object.clone()).collect();
-        for path in paths {
-            let entry = entry(path)?.to_owned();
-            if !inherited_names.contains(&entry) {
-                order.push(entry);
-            }
-        }
-
-        let reused = inherited.len();
-        let base_offset: u64 = inherited.iter().map(|e| e.length).sum();
+        let order: Vec<_> = paths
+            .iter()
+            .map(|path| entry(path).map(str::to_owned))
+            .collect::<Result<_>>()?;
+        let mut reused = 0;
         let mut items = Vec::new();
         let mut segments = BTreeMap::new();
         let mut logical = 0u64;
@@ -594,12 +555,6 @@ pub(super) fn materialize(request: ViewRequest<'_>) -> Result<Value> {
                 extent.size % 512 == 0 && extent.segment_offset % 512 == 0,
                 "object extent not tar aligned"
             );
-            if let Some(old) = inherited.iter().find(|e| e.object == name) {
-                ensure!(
-                    old.length == extent.size && old.object_sha256 == extent.sha256,
-                    "predecessor object identity changed"
-                );
-            }
             let segment_meta: Value = read(&segments::metadata(root, &extent.segment_id)?)?;
             segments.insert(extent.segment_id.clone(), json!({"id":extent.segment_id,"blob":extent.segment_blob,"size":fs::metadata(&extent.segment_blob)?.len(),"status":segment_meta["status"]}));
             items.push(MapExtent {
@@ -631,19 +586,7 @@ pub(super) fn materialize(request: ViewRequest<'_>) -> Result<Value> {
             "objects": order,
             "extents": items,
         });
-        let mut source_map = map.clone();
-        if predecessor.is_some() {
-            let items: Vec<_> = items[reused..]
-                .iter()
-                .cloned()
-                .map(|mut item| {
-                    item.logical_offset -= base_offset;
-                    item
-                })
-                .collect();
-            source_map["logical_size"] = json!(logical - base_offset);
-            source_map["extents"] = serde_json::to_value(items)?;
-        }
+        let source_map = map.clone();
 
         let temporary_metadata = tempfile::NamedTempFile::new_in(&directory)?;
         let started = std::time::Instant::now();
@@ -658,6 +601,47 @@ pub(super) fn materialize(request: ViewRequest<'_>) -> Result<Value> {
         };
         if shared {
             super::progress::detail("Reusing verified shared EROFS index");
+        } else if !image_build() {
+            // Reassemble only file metadata. The external data map contains
+            // exactly this closure, including after replacements and removals.
+            // Cached headers avoid rereading unchanged package fragments and
+            // building temporary loop/device-mapper devices for index input.
+            let mut source = tempfile::NamedTempFile::new_in(root.join("tmp"))?;
+            {
+                let mut archive = tar::Builder::new(std::io::BufWriter::new(source.as_file_mut()));
+                for item in &items {
+                    if item.object == ".tar-eof" {
+                        continue;
+                    }
+                    let value: Value = read(&segments::object_metadata(root, &item.object)?)?;
+                    reused += usize::from(value.get("index").is_some());
+                    let entries = segments::index(root, &item.object, &value)?;
+                    airlock_nix_core::artifact::fragment::append_index(
+                        &mut archive,
+                        &entries,
+                        &item.object,
+                        item.logical_offset,
+                        item.length,
+                    )?;
+                }
+                archive.into_inner()?.flush()?;
+            }
+            command(
+                &tool("mkfs.erofs", "AIRLOCK_MKFS_EROFS"),
+                &[
+                    "--quiet",
+                    "--tar=ddtaridx",
+                    temporary_metadata
+                        .path()
+                        .to_str()
+                        .context("invalid metadata path")?,
+                    source
+                        .path()
+                        .to_str()
+                        .context("invalid index source path")?,
+                ],
+                None,
+            )?;
         } else {
             let mut temporary = tempfile::NamedTempFile::new_in(root.join("tmp"))?;
             let source_mode = std::env::var("AIRLOCK_CLOSURE_STORE_INDEX_SOURCE")
@@ -706,14 +690,6 @@ pub(super) fn materialize(request: ViewRequest<'_>) -> Result<Value> {
                 .map(str::to_owned)
                 .unwrap_or_else(|| temporary.path().to_string_lossy().into_owned());
             let mut args = vec!["--quiet".to_owned(), "--tar=i".to_owned()];
-            if let Some(previous) = &predecessor {
-                fs::copy(previous, temporary_metadata.path())?;
-                fs::set_permissions(temporary_metadata.path(), fs::Permissions::from_mode(0o644))?;
-                args.extend([
-                    "--incremental=data".into(),
-                    format!("--tar-offset={base_offset}"),
-                ]);
-            }
             if let Some(key) = &image_key {
                 args.extend([
                     "-T".into(),

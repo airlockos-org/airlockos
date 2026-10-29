@@ -3,6 +3,9 @@
 
 mod root;
 
+/// Single-pass validation and reusable file metadata for package fragments.
+pub mod fragment;
+
 /// Reproducible package fragments and logical indexes cached by image builds.
 pub mod cache;
 
@@ -115,7 +118,7 @@ pub fn write_message(output: &mut dyn Write, value: &Value) -> Result<()> {
     Ok(())
 }
 
-fn append(archive: &mut tar::Builder<&mut dyn Write>, name: &str, path: &Path) -> Result<()> {
+fn append<W: Write>(archive: &mut tar::Builder<W>, name: &str, path: &Path) -> Result<()> {
     let mut header = tar::Header::new_gnu();
     header.set_size(fs::metadata(path)?.len());
     header.set_mode(0o400);
@@ -245,10 +248,7 @@ impl Source {
                 .context("missing NAR hash")?;
             let size = info["narSize"].as_u64().context("invalid NAR size")?;
             let name = entry(&path)?;
-            let mut object = json!({"path":path,"entry":name,"references":references,"nar_hash":hash,"nar_size":size,"fragment":format!("objects/{name}.tar")});
-            if !incremental {
-                object["tree_hash"] = json!(tree_hash(&self.physical(&path)?)?);
-            }
+            let object = json!({"path":path,"entry":name,"references":references,"nar_hash":hash,"nar_size":size,"fragment":format!("objects/{name}.tar")});
             objects.push(object);
         }
         let paths: BTreeSet<_> = objects.iter().filter_map(|o| o["path"].as_str()).collect();
@@ -339,7 +339,7 @@ impl Source {
             (paths, root_descriptor.is_some(), BTreeMap::new())
         };
         let temporary = tempfile::tempdir()?;
-        let mut archive = tar::Builder::new(output);
+        let mut archive = tar::Builder::new(std::io::BufWriter::new(output));
         if missing_root {
             let path = temporary.path().join("root.sparse");
             let mut output = File::create(&path)?;
@@ -367,20 +367,35 @@ impl Source {
                 continue;
             }
             let physical = self.physical(&path)?;
-            if request.is_some() {
-                object["tree_hash"] = json!(tree_hash(&physical)?);
-            }
             let fragment = temporary.path().join(format!("{}.tar", entry(&path)?));
             create_tar_fragment(&physical, &fragment)?;
             object["fragment_size"] = json!(fs::metadata(&fragment)?.len());
-            object["fragment_sha256"] = json!(hash(&fragment)?);
-            append(
-                &mut archive,
+            // Emit the outer header first, then validate and forward the inner
+            // fragment in one pass. Fragment sizes are always block aligned, so
+            // no padding is required after the directly written payload.
+            let mut header = tar::Header::new_gnu();
+            let length = fs::metadata(&fragment)?.len();
+            header.set_size(length);
+            header.set_mode(0o400);
+            header.set_mtime(1);
+            header.set_uid(0);
+            header.set_gid(0);
+            header.set_cksum();
+            archive.append_data(
+                &mut header,
                 object["fragment"]
                     .as_str()
                     .context("missing fragment name")?,
-                &fragment,
+                std::io::empty(),
             )?;
+            let identity = fragment::inspect(
+                File::open(&fragment)?,
+                archive.get_mut(),
+                length,
+                entry(&path)?,
+            )?;
+            object["tree_hash"] = json!(identity.tree_hash);
+            object["fragment_sha256"] = json!(identity.sha256);
             fs::remove_file(fragment)?;
         }
         let bytes = serde_json::to_vec(&inventory)?;
@@ -393,7 +408,7 @@ impl Source {
         header.set_gid(0);
         header.set_cksum();
         archive.append_data(&mut header, "manifest.json", bytes.as_slice())?;
-        archive.finish()?;
+        archive.into_inner()?.flush()?;
         Ok(inventory)
     }
 

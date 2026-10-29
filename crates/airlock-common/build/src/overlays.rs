@@ -292,7 +292,7 @@ pub fn image_tools(workspace: &Workspace) -> NixValue {
                                 NixValue::list([patch("erofs-incremental-data.patch")]),
                                 NixValue::list([]),
                             ),
-                            NixValue::list([patch("erofs-tar-index-offset.patch")]),
+                            NixValue::list([patch("erofs-tar-metadata-index.patch")]),
                         ]),
                     }
                 }));
