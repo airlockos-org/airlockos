@@ -4,18 +4,18 @@
       "flake": false,
       "locked": {
         "dir": "crates",
-        "lastModified": 1793289845,
-        "narHash": "sha256-bUzP00F1NHOqFra9YxJgxGXLsg0xPAwNUH24OV5aIaU=",
+        "lastModified": 1793292596,
+        "narHash": "sha256-tZ83m24/6rAEgqzjaSJZ4lF3sp0CRc0xNqui/Hk3fik=",
         "ref": "refs/heads/main",
-        "rev": "3ef9206532ab9bc6818cb9c3f0d91a46ee861a09",
-        "revCount": 328,
+        "rev": "2ae8cf05760992996845e2ca7d827a16f1757d5d",
+        "revCount": 331,
         "type": "git",
         "url": "https://github.com/airlockos-org/airlockos.git"
       },
       "original": {
         "dir": "crates",
         "ref": "main",
-        "rev": "3ef9206532ab9bc6818cb9c3f0d91a46ee861a09",
+        "rev": "2ae8cf05760992996845e2ca7d827a16f1757d5d",
         "type": "git",
         "url": "https://github.com/airlockos-org/airlockos.git"
       }
