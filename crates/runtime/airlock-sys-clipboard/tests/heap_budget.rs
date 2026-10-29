@@ -72,7 +72,6 @@ fn maximum_connection_framing_payload_and_exhaustion_recover() {
     let (live, peak) = HEAP.usage();
     assert!(live >= RAM_LIMIT);
     assert!(peak <= APP_HEAP_BYTES);
-    println!("APP_HEAP_STRESS cap={APP_HEAP_BYTES} live={live} peak={peak}");
 
     // Exhaust the remaining arena through a fallible API; no kernel fallback exists.
     let mut pressure = Vec::<u8>::new();
@@ -114,4 +113,5 @@ fn maximum_connection_framing_payload_and_exhaustion_recover() {
         )
         .unwrap();
     clipboard.reserve(4, caller).unwrap();
+    println!("APP_HEAP_STRESS cap={APP_HEAP_BYTES} live={live} peak={peak}");
 }

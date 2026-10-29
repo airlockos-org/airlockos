@@ -71,7 +71,9 @@ impl<const N: usize> FixedHeap<N> {
             state: UnsafeCell::new(State {
                 allocator: TalcCell::new(Manual),
                 initialized: false,
-                budget: airlock_clipboard_core::resources::Budget::new(N),
+                // Zero initialization keeps the large static arena in ELF .bss.
+                // Its real byte budget is installed when the sole extent is claimed.
+                budget: airlock_clipboard_core::resources::Budget::new(0),
             }),
             arena: UnsafeCell::new(Arena {
                 bytes: [MaybeUninit::uninit(); N],
@@ -95,6 +97,9 @@ impl<const N: usize> FixedHeap<N> {
             let base = self.arena.get().cast::<u8>();
             // SAFETY: the stable, aligned N-byte arena is private and claimed once.
             state.initialized = unsafe { state.allocator.claim(base, N) }.is_some();
+            if state.initialized {
+                state.budget = airlock_clipboard_core::resources::Budget::new(N);
+            }
         }
         run(state)
     }
