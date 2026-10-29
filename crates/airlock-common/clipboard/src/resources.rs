@@ -20,7 +20,7 @@ pub struct Budget {
 impl Budget {
     /// Start with all byte credits available; no allocation is performed.
     pub const fn new(limit: usize) -> (budget: Self)
-        ensures budget.valid(), budget.used_bytes() == 0,
+        ensures budget.valid(), budget.used_bytes() == 0, budget.limit_bytes() == limit,
     { Self { limit, used: 0, peak: 0 } }
 
     /// Configured byte limit for this ledger.
@@ -37,7 +37,7 @@ impl Budget {
     /// Charge one successful allocation; rejection preserves the previous state.
     pub fn reserve(&mut self, bytes: usize) -> (accepted: bool)
         requires old(self).valid(),
-        ensures final(self).valid(),
+        ensures final(self).valid(), final(self).limit_bytes() == old(self).limit_bytes(),
             accepted ==> final(self).used_bytes() == old(self).used_bytes() + bytes,
             !accepted ==> final(self).used_bytes() == old(self).used_bytes(),
     {
@@ -50,7 +50,7 @@ impl Budget {
     /// Return credits only for a corresponding freed allocation's original layout.
     pub fn release(&mut self, bytes: usize) -> (released: bool)
         requires old(self).valid(),
-        ensures final(self).valid(),
+        ensures final(self).valid(), final(self).limit_bytes() == old(self).limit_bytes(),
             released ==> final(self).used_bytes() + bytes == old(self).used_bytes(),
             !released ==> final(self).used_bytes() == old(self).used_bytes(),
     {
