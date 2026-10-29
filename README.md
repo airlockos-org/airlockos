@@ -14,10 +14,10 @@ machines (VMs), including dom0, the privileged control VM.
 
 <p align="center">
   <a href="https://youtu.be/h528TDh-PLU">
-    <img src="docs/assets/desktop-video-preview-play.png" width="600" alt="Watch the AirlockOS desktop video: GNOME workspace overview with Files and Calculator">
+    <img src="docs/assets/desktop-demo.gif" width="600" alt="Animated demonstration of GNOME applications and VM workspaces in AirlockOS">
   </a>
   <br>
-  <em>AirlockOS desktop and VM workspaces. <a href="https://youtu.be/h528TDh-PLU">Watch the video.</a></em>
+  <em>AirlockOS desktop and VM workspaces. <a href="https://youtu.be/h528TDh-PLU">Watch on YouTube.</a></em>
 </p>
 
 - [NixOS](https://nixos.org/) for dom0, the desktop, networking, and user applications.
