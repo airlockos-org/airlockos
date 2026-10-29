@@ -4,8 +4,10 @@ Run from the airlock repository root with the `airlock-machine` submodule
 initialized and checked out at the revision committed in this repository.
 Commit the intended changes before building: the installer uses committed source,
 not working-tree edits. When application code changes, update
-`airlock-machine/application-revision` and the `airlock-apps` pins in both
-repositories' `flake.lock` files, then commit the updated submodule revision here.
+`airlock-machine/application-revision` and both the `airlock-apps` and
+`nixos-qubes` pins in each repository's `flake.lock`, then commit the updated
+submodule revision here. Both inputs select directories from the same application
+Git snapshot and must use the same revision and source hash.
 
 Set `AIRLOCK_DATA_ROOT` to the development storage directory, on a disk other
 than the USB being provisioned. Prepare offline Cargo dependencies before the
