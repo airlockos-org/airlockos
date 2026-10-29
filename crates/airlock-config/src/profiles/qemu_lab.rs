@@ -36,7 +36,7 @@ pub fn machine() -> Result<MachineSnapshot, AuthoringError> {
     machine.add(&gui)?;
 
     let controller = Vm::controller("sys-ctrl", &firewall, GiB(16))?;
-    // Whole-machine Nix evaluation needs room for every VM system; the controller starts on demand.
+    // Whole-machine Nix evaluation needs room for every VM system, including background controller startup.
     controller.set_memory(Memory::Fixed(MiB(16384)));
     controller.add_module(application_session());
     controller.add_module(NixosModule::with_arguments([] as [&str; 0], |_| {

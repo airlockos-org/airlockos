@@ -40,6 +40,36 @@ fn guest_unit(name: &GuestName) -> String {
     format!("airlock-boot-guest@{name}.service")
 }
 
+/// Warm the default controller after its assistant without inventing a provider relationship.
+/// Real provider dependencies take precedence: an assistant that depends on the
+/// controller must be allowed to start it first. Only VMs already selected for
+/// startup participate; this scheduling preference never adds a VM to `starts`.
+fn order_background_workers(
+    starts: &[GuestName],
+    dependencies: &mut BTreeMap<GuestName, BTreeSet<GuestName>>,
+) -> Result<()> {
+    let assistant: GuestName = "usr-assistant".parse()?;
+    let controller: GuestName = "sys-ctrl".parse()?;
+    if !starts.contains(&assistant) || !starts.contains(&controller) {
+        return Ok(());
+    }
+    let mut pending = vec![assistant.clone()];
+    let mut visited = BTreeSet::new();
+    while let Some(name) = pending.pop() {
+        if name == controller {
+            return Ok(());
+        }
+        if visited.insert(name.clone()) {
+            pending.extend(dependencies.get(&name).into_iter().flatten().cloned());
+        }
+    }
+    dependencies
+        .entry(controller)
+        .or_default()
+        .insert(assistant);
+    Ok(())
+}
+
 /// Group independent starts while preserving every declared provider relationship.
 fn start_batches(
     starts: &[GuestName],
@@ -111,6 +141,48 @@ mod tests {
             start_batches(&starts, &BTreeSet::from([net, firewall]), &dependencies)?,
             vec![vec![assistant, home], vec![controller]]
         );
+        Ok(())
+    }
+
+    /// Controller warmup waits for assistant readiness and cannot override provider order or autostart selection.
+    #[test]
+    fn controller_warmup_follows_assistant_without_starting_disabled_vms() -> Result<()> {
+        let assistant: GuestName = "usr-assistant".parse()?;
+        let controller: GuestName = "sys-ctrl".parse()?;
+        let firewall: GuestName = "sys-firewall".parse()?;
+        let starts = vec![controller.clone(), assistant.clone()];
+        let original = BTreeMap::from([
+            (assistant.clone(), BTreeSet::from([firewall.clone()])),
+            (controller.clone(), BTreeSet::from([firewall.clone()])),
+        ]);
+        let mut dependencies = original.clone();
+        order_background_workers(&starts, &mut dependencies)?;
+        assert_eq!(
+            start_batches(&starts, &BTreeSet::from([firewall.clone()]), &dependencies)?,
+            vec![vec![assistant.clone()], vec![controller.clone()]]
+        );
+        assert_eq!(
+            start_batches(
+                &starts,
+                &BTreeSet::from([assistant.clone(), firewall.clone()]),
+                &dependencies
+            )?,
+            vec![vec![controller.clone()]]
+        );
+
+        let mut disabled = original.clone();
+        order_background_workers(std::slice::from_ref(&assistant), &mut disabled)?;
+        assert_eq!(disabled, original);
+        order_background_workers(std::slice::from_ref(&controller), &mut disabled)?;
+        assert_eq!(disabled, original);
+
+        let mut provider = BTreeMap::from([
+            (assistant.clone(), BTreeSet::from([firewall.clone()])),
+            (firewall.clone(), BTreeSet::from([controller.clone()])),
+        ]);
+        let before = provider.clone();
+        order_background_workers(&starts, &mut provider)?;
+        assert_eq!(provider, before);
         Ok(())
     }
 
@@ -976,11 +1048,9 @@ impl Coordinator {
             false,
         )?
         .start;
-        let batches = start_batches(
-            &starts,
-            &running,
-            &planning::dependencies(selected.inputs.topology(), false)?,
-        )?;
+        let mut dependencies = planning::dependencies(selected.inputs.topology(), false)?;
+        order_background_workers(&starts, &mut dependencies)?;
+        let batches = start_batches(&starts, &running, &dependencies)?;
         let topology_path = runtime()?.join("autostart-topology.json");
         public_save(&topology_path, selected.inputs.raw())?;
         let executable = std::env::current_exe()?;

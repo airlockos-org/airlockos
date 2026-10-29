@@ -179,8 +179,8 @@ pub(crate) fn domain(inputs: &Inputs, vm: &VmSnapshot) -> DomainArguments {
             services.extend([("guivm", true), ("guivm-gui-agent", true)]);
             ("sys-gui", true.into(), Virtualization::Pvh)
         }
-        // Qrexec starts the controller on the first system-change request.
-        Role::Controller { .. } => ("sys-ctrl", false.into(), Virtualization::Pvh),
+        // Background boot starts the controller after the assistant is ready.
+        Role::Controller { .. } => ("sys-ctrl", true.into(), Virtualization::Pvh),
         Role::Assistant { .. } => {
             features.extend([
                 ("airlock-label-color", "0xd3d3d3"),

@@ -72,7 +72,8 @@ software and configuration; it does not reverse private application data.
 `make qemu-lab-start` builds and opens the interactive Airlock machine in the QEMU lab.
 Commit source changes and align the machine/application pins before building.
 The outer guest defaults to 32 GiB so the controller can evaluate whole-machine
-updates; the controller VM starts on demand. Its Rust definition is in [qemu_lab.rs](../crates/airlock-config/src/profiles/qemu_lab.rs);
+updates; the controller VM starts in the background after usr-assistant is ready.
+Its Rust definition is in [qemu_lab.rs](../crates/airlock-config/src/profiles/qemu_lab.rs);
 it uses the existing X11 display relay and normal VM services. Log in to the
 nested desktop as `user` with the development password `airlock`. `make qemu-lab-resume`
 keeps the selected image and writable disk without rebuilding. `make qemu-lab-status`
