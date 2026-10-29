@@ -20,9 +20,13 @@ machines (VMs), including dom0, the privileged control VM.
 - [Qubes VM isolation, device assignment, and inter-VM RPC policy](https://airlockos.org/docs/architecture/).
 - [GNOME desktop displaying applications from multiple VMs](https://airlockos.org/docs/architecture/gui-and-input/).
 
-[![GNOME workspace overview showing Files and Calculator. Click to watch the AirlockOS desktop video.](docs/assets/desktop-video-preview.png)](https://youtu.be/h528TDh-PLU)
-
-**[Watch: AirlockOS desktop and VM workspaces](https://youtu.be/h528TDh-PLU)**
+<p align="center">
+  <a href="https://youtu.be/h528TDh-PLU">
+    <img src="docs/assets/desktop-video-preview.png" width="600" alt="GNOME workspace overview showing Files and Calculator in AirlockOS">
+  </a>
+  <br>
+  <em>AirlockOS desktop and VM workspaces. <a href="https://youtu.be/h528TDh-PLU">Watch the video.</a></em>
+</p>
 
 AirlockOS is under active development. Qubes OS security equivalence has not
 been established. See [Security](SECURITY.md) for limitations and reporting.
