@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 646" role="img" aria-labelledby="title description">
+  <title id="title">AirlockOS VM layout</title>
+  <desc id="description">Xen is shown as a vertical strip beside dom0 and the system and user VMs. Dom0 is the privileged control VM. Four system VMs handle the desktop, network devices, network policy, and builds. Two user VMs provide separate workspaces for personal applications and system configuration and administration. Each VM runs NixOS. Dom0 manages the shared global Nix store and provides read-only system closure views to the other VMs. System and user group labels describe roles, not additional isolation boundaries.</desc>
+  <style>
+    :root { --canvas: #f8fafc; --surface: #fff; --line: #dce3eb; --boundary: #99afc1; --text: #243341; --muted: #627284; --accent: #bb512e; --tint: #fff6f0; --base: #edf2f6; }
+    @media (prefers-color-scheme: dark) { :root { --canvas: #101820; --surface: #17232e; --line: #344655; --boundary: #688295; --text: #e1eaf2; --muted: #a9bac9; --accent: #ffad87; --tint: #30231f; --base: #1c2b36; } }
+    text { font-family: Inter, system-ui, sans-serif; fill: var(--text); }
+    .label { font-size: 12px; font-weight: 600; letter-spacing: 1.2px; fill: var(--muted); }
+    .name { font-family: ui-monospace, monospace; font-size: 18px; font-weight: 500; }
+    .detail { font-size: 14px; fill: var(--muted); }
+    .vm { fill: var(--surface); stroke: var(--boundary); stroke-width: 1.5; }
+  </style>
+  <rect x="1" y="1" width="898" height="644" rx="16" fill="var(--canvas)" stroke="var(--line)"/>
+  <text x="32" y="36" class="label">VM LAYOUT</text>
+  <text x="868" y="36" text-anchor="end" class="detail">NixOS in every VM</text>
+
+  <rect x="32" y="60" width="152" height="544" rx="8" fill="var(--base)"/>
+  <text x="108" y="300" text-anchor="middle" font-size="24" font-weight="500">Xen</text>
+  <text x="108" y="326" text-anchor="middle" font-size="16">Hypervisor</text>
+  <text x="108" y="362" text-anchor="middle" class="detail">Runs every VM</text>
+  <text x="108" y="384" text-anchor="middle" class="detail">including dom0</text>
+
+  <rect x="224" y="60" width="644" height="132" rx="8" fill="var(--tint)" stroke="var(--accent)" stroke-width="1.5"/>
+  <text x="244" y="94" class="name">dom0</text>
+  <text x="318" y="94" class="detail">Privileged control VM</text>
+  <text x="244" y="122" class="detail">VM lifecycle · Device assignment · RPC policy · Deployment</text>
+  <text x="244" y="166" class="detail">Shared global Nix store · Read-only closure views for other VMs</text>
+
+  <text x="224" y="228" class="label">SYSTEM VMS</text>
+  <rect x="224" y="258" width="312" height="82" rx="8" class="vm"/>
+  <text x="244" y="290" class="name">sys-gui</text>
+  <text x="244" y="316" class="detail">GNOME desktop</text>
+  <rect x="556" y="258" width="312" height="82" rx="8" class="vm"/>
+  <text x="576" y="290" class="name">sys-net</text>
+  <text x="576" y="316" class="detail">Network devices</text>
+  <rect x="224" y="364" width="312" height="82" rx="8" class="vm"/>
+  <text x="244" y="396" class="name">sys-firewall</text>
+  <text x="244" y="422" class="detail">Network policy</text>
+  <rect x="556" y="364" width="312" height="82" rx="8" class="vm"/>
+  <text x="576" y="396" class="name">sys-ctrl</text>
+  <text x="576" y="422" class="detail">Release builds</text>
+
+  <text x="224" y="482" class="label">USER VMS</text>
+  <rect x="224" y="510" width="312" height="94" rx="8" class="vm"/>
+  <text x="244" y="548" class="name">usr-home</text>
+  <text x="244" y="574" class="detail">User applications · Personal files</text>
+  <rect x="556" y="510" width="312" height="94" rx="8" class="vm"/>
+  <text x="576" y="548" class="name">usr-assistant</text>
+  <text x="576" y="574" class="detail">Configuration and administration</text>
+
+  <text x="32" y="634" class="detail">Boxes mark VM boundaries; system and user labels group roles.</text>
+</svg>
