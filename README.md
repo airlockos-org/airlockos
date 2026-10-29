@@ -24,7 +24,7 @@ machines (VMs), including dom0, the privileged control VM.
 
 <p align="center">
   <a href="https://youtu.be/h528TDh-PLU">
-    <img src="docs/assets/desktop-video-preview.png" width="600" alt="GNOME workspace overview showing Files and Calculator in AirlockOS">
+    <img src="docs/assets/desktop-video-preview-play.png" width="600" alt="Watch the AirlockOS desktop video: GNOME workspace overview with Files and Calculator">
   </a>
   <br>
   <em>AirlockOS desktop and VM workspaces. <a href="https://youtu.be/h528TDh-PLU">Watch the video.</a></em>
