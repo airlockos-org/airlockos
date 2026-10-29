@@ -20,8 +20,6 @@ machines (VMs), including dom0, the privileged control VM.
 - [Qubes VM isolation, device assignment, and inter-VM RPC policy](https://airlockos.org/docs/architecture/).
 - [GNOME desktop displaying applications from multiple VMs](https://airlockos.org/docs/architecture/gui-and-input/).
 
-[![VM layout: Xen runs dom0 and the system and user VMs. Dom0 manages the shared Nix store and provides read-only closure views to the other VMs.](docs/assets/system-overview.svg)](docs/assets/system-overview.svg)
-
 [![GNOME workspace overview showing Files and Calculator. Click to watch the AirlockOS desktop video.](docs/assets/desktop-video-preview.png)](https://youtu.be/h528TDh-PLU)
 
 **[Watch: AirlockOS desktop and VM workspaces](https://youtu.be/h528TDh-PLU)**
