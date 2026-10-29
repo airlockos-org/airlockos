@@ -6,6 +6,7 @@ use airlock_nix_core::artifact::{
     self, ERROR_SCHEMA, FULL_SCHEMA, INCREMENTAL_SCHEMA, MAX_MESSAGE, PROBE_SCHEMA, REQUEST_SCHEMA,
     read_message, write_message,
 };
+use airlock_nix_core::runtime::progress;
 use airlock_nix_core::{
     admission::ExpectedAdmission,
     identity::{GitRevision, GuestName, LockHash},
@@ -241,8 +242,16 @@ fn receive_members(
                 .strip_suffix(".tar")
                 .context("missing fragment suffix")?;
             let mut buffered = std::io::BufWriter::new(&mut output);
-            let identity = artifact::fragment::inspect(&mut member, &mut buffered, size, entry)?;
+            let mut receiving = progress::Span::start("receiving_object");
+            receiving.update(json!({"object":entry}));
+            let identity = artifact::fragment::inspect(
+                &mut member,
+                progress::CountingWriter::new(&mut buffered, &mut receiving, size),
+                size,
+                entry,
+            )?;
             buffered.flush()?;
+            receiving.complete();
             segment_size = offset
                 .checked_add(size)
                 .context("staged segment overflow")?;
@@ -455,7 +464,11 @@ fn admit(
     reused: &BTreeMap<String, Value>,
     root_reused: bool,
 ) -> Result<Value> {
-    let objects = validate_payload(manifest, fragments, domain, reused, root_reused)?;
+    let validation_start = std::time::Instant::now();
+    let objects = progress::phase("validating_manifest", || {
+        validate_payload(manifest, fragments, domain, reused, root_reused)
+    })?;
+    let validation_seconds = validation_start.elapsed().as_secs_f64();
     let descriptor: Option<root::Descriptor> =
         serde_json::from_value(manifest["root_artifact"].clone())?;
     let root_image = if let Some(descriptor) = &descriptor {
@@ -557,9 +570,9 @@ fn admit(
                 });
         }
         for (path, fragments) in groups {
-            received.extend(segments::publish_received(
-                root, path, &fragments, &tx, target,
-            )?);
+            received.extend(progress::phase("publishing_segment", || {
+                segments::publish_received(root, path, &fragments, &tx, target)
+            })?);
         }
         let mut admitted = 0;
         let mut reused_count = 0;
@@ -584,15 +597,17 @@ fn admit(
             &text(manifest, "root_source")?,
             &text(manifest, "kernel_name")?,
         );
-        let mut store = views::materialize(views::ViewRequest {
-            root,
-            generation_dir: directory,
-            paths: &paths,
-            closure: &closure,
-            transaction: &tx,
-            target,
-            trusted: &paths.iter().cloned().collect(),
-            previous: None,
+        let mut store = progress::phase("indexing_closure", || {
+            views::materialize(views::ViewRequest {
+                root,
+                generation_dir: directory,
+                paths: &paths,
+                closure: &closure,
+                transaction: &tx,
+                target,
+                trusted: &paths.iter().cloned().collect(),
+                previous: None,
+            })
         })?;
         for (key, value) in json!({
             "mode": "shared-closure",
@@ -665,7 +680,7 @@ fn admit(
             "root_reused": root_reused,
             "root_payload_bytes_transferred": fragments.get("root.sparse").map_or(0,|f|f.size),
             "root_logical_bytes": manifest["root_artifact"]["logical_bytes"],
-            "timings": {},
+            "timings": {"manifest_validation_seconds":validation_seconds},
             "source_revision": manifest["source_revision"],
             "lock_hash": manifest["lock_hash"],
         });
@@ -788,8 +803,11 @@ pub(super) fn receive(
         .as_ref()
         .map(|i| &i["root_artifact"])
         .filter(|v| !v.is_null());
-    let (manifest, fragments) =
-        receive_members(input, temporary.path(), allowed.as_ref(), descriptor)?;
+    let receive_start = std::time::Instant::now();
+    let (manifest, fragments) = progress::phase("receiving_payload", || {
+        receive_members(input, temporary.path(), allowed.as_ref(), descriptor)
+    })?;
+    let receive_seconds = receive_start.elapsed().as_secs_f64();
     if let Some(inventory) = &inventory {
         let mut comparable = manifest.clone();
         let old = objects(inventory, domain, true)?;
@@ -818,15 +836,21 @@ pub(super) fn receive(
             "incremental artifacts require negotiation"
         );
     }
-    admit(
-        pool,
-        &manifest,
-        &fragments,
-        domain,
-        approved_by,
-        &reused,
-        root_reused,
-    )
+    let admission_start = std::time::Instant::now();
+    let mut receipt = progress::phase("admitting_artifacts", || {
+        admit(
+            pool,
+            &manifest,
+            &fragments,
+            domain,
+            approved_by,
+            &reused,
+            root_reused,
+        )
+    })?;
+    receipt["timings"]["receive_seconds"] = json!(receive_seconds);
+    receipt["timings"]["admission_seconds"] = json!(admission_start.elapsed().as_secs_f64());
+    Ok(receipt)
 }
 
 pub(super) fn report_error(output: &mut dyn Write, error: &anyhow::Error) {

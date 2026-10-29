@@ -4,7 +4,7 @@ use airlock_nix_core::{
     admission::AdmissionReceipt,
     identity::{GitRevision, GuestName, SourceIdentity},
     root_artifact::RootDescriptor,
-    runtime::process,
+    runtime::{process, progress},
     store_path::{StoreArtifact, StoreFile, StorePath},
 };
 use anyhow::{Context, Result, ensure};
@@ -127,12 +127,8 @@ enum BuildAction {
 
 /// Execute one bounded worker helper; failed builds never become installable strings.
 fn text(command: &mut Command) -> Result<String> {
-    let output = process::run(command, None, Some(Duration::from_secs(14400)))?;
+    let output = process::run_forwarded(command, None, Some(Duration::from_secs(14400)))?;
     if !output.status.success() {
-        eprint!(
-            "{diagnostic}",
-            diagnostic = String::from_utf8_lossy(&output.stderr)
-        );
         return Err(crate::HelperExit {
             code: output
                 .status
@@ -470,6 +466,7 @@ fn preflight(request: &Request, offline: bool) -> Result<Prepared> {
         available >= 4 * 1024 * 1024 * 1024,
         "private Nix store needs at least 4 GiB free; available={available}"
     );
+    let preparation = progress::Span::start("preparing_inputs");
     let installed = if request.compiler.is_file() {
         text(
             Command::new(&request.compiler)
@@ -494,6 +491,8 @@ fn preflight(request: &Request, offline: bool) -> Result<Prepared> {
     } else {
         installed
     };
+    preparation.complete();
+    let evaluation = progress::Span::start("evaluating_inputs");
     let mut prepared = Prepared {
         source,
         overrides: Vec::new(),
@@ -548,6 +547,7 @@ fn preflight(request: &Request, offline: bool) -> Result<Prepared> {
         metadata(false)?;
     }
     prepared.offline_ready = ready;
+    evaluation.complete();
     Ok(prepared)
 }
 
@@ -621,11 +621,13 @@ fn build(request: &Request, action: &BuildAction) -> Result<()> {
     } else {
         suffix.to_owned()
     };
+    let building = progress::Span::start("building_system");
     let results: Value = serde_json::from_str(&text(
         nix("build", &prepared, offline)
             .arg(format!("{source}{suffix}", source = prepared.source))
             .args(["--no-link", "--json"]),
     )?)?;
+    building.complete();
     let output: StorePath = results[0]["outputs"]["out"]
         .as_str()
         .context("build did not return an output")?
@@ -668,6 +670,7 @@ fn build(request: &Request, action: &BuildAction) -> Result<()> {
 
     let admissions = request.state.join("admissions");
     private(&admissions)?;
+    let transferring = progress::Span::start("transferring_guest");
     let receipt: AdmissionReceipt = serde_json::from_str(&text(
         Command::new("airlock")
             .args(["artifact", "send", "--physical-store-root"])
@@ -691,6 +694,7 @@ fn build(request: &Request, action: &BuildAction) -> Result<()> {
                 &prepared.lock,
             ]),
     )?)?;
+    transferring.complete();
     let domain: GuestName = target.parse()?;
     let expected = SourceIdentity {
         revision: prepared.revision.parse()?,

@@ -136,7 +136,25 @@ impl Coordinator {
             state::trusted(&path)?;
             let record: ApprovalRecord = state::read(&path)?;
             ensure!(record.request_id == request_id, "review identity differs");
-            let mut result = serde_json::to_value(record)?;
+            let mut result = serde_json::to_value(&record)?;
+            match self.current() {
+                Ok(Some(current)) => {
+                    let matches = current.metadata.details.operation.as_ref().is_some_and(|operation|
+                    matches!(&operation.authority, OperationAuthority::Reviewed { request_id, .. } if *request_id == record.request_id));
+                    if matches {
+                        result["deployment_phase"] = serde_json::to_value(current.phase)?;
+                        match airlock_nix_core::runtime::progress::status(
+                            &self.state.join("progress").join(current.id.as_str()),
+                        ) {
+                            Ok(Some(progress)) => result["progress"] = progress,
+                            Ok(None) => (),
+                            Err(error) => result["progress_error"] = json!(error.to_string()),
+                        }
+                    }
+                }
+                Ok(None) => (),
+                Err(error) => result["progress_error"] = json!(error.to_string()),
+            }
             result["lock"] = serde_json::to_value(lock::status(&self.state.join("lock"))?)?;
             return Ok(result);
         }

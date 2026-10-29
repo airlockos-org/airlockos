@@ -593,3 +593,50 @@ fn empty_and_lossy_reviews_preserve_copy_and_decision_boundaries() -> Result<()>
     }
     Ok(())
 }
+
+/// Agent status includes live diagnostic counters while preserving the recorded job decision.
+#[test]
+fn review_status_exposes_progress_without_rewriting_the_job() -> Result<()> {
+    use airlock_nix_core::{runtime::progress, state::StateStore};
+    let temporary = tempfile::tempdir()?;
+    let root = temporary
+        .path()
+        .join(".local/share/airlock/controller/rust-v1");
+    fs::create_dir_all(&root)?;
+    StateStore::initialize(&root)?;
+    let id = "c".repeat(32);
+    let directory = root.join("progress").join(&id);
+    {
+        let _recording = progress::record_to(&directory)?;
+        let mut span = progress::Span::start("transferring_guest");
+        span.update(json!({"objects_reused":12,"bytes_completed":1024,"bytes_total":2048}));
+        span.complete();
+    }
+    let job = json!({"request_id":id,"status":"failed","error":"original failure"});
+    let path = root.join("records").join(format!("job-{id}.json"));
+    let bytes = serde_json::to_vec(&job)?;
+    fs::create_dir_all(path.parent().unwrap())?;
+    fs::write(&path, &bytes)?;
+    let output = crate::common::json(
+        Command::new(crate::common::binary(
+            "AIRLOCK_SYS_CTRL_BIN",
+            "airlock-sys-ctrl-service",
+        ))
+        .arg("review-status-serve")
+        .env("HOME", temporary.path())
+        .env("QREXEC_REMOTE_DOMAIN", "usr-assistant"),
+        Some(format!("{request}\n", request = json!({"request_id":id})).into_bytes()),
+    )?;
+    assert_eq!(output["status"], "failed");
+    assert_eq!(output["error"], "original failure");
+    assert_eq!(
+        output["progress"]["current"]["metrics"]["bytes_completed"],
+        1024
+    );
+    assert_eq!(
+        output["progress"]["current"]["metrics"]["objects_reused"],
+        12
+    );
+    assert_eq!(fs::read(&path)?, bytes);
+    Ok(())
+}

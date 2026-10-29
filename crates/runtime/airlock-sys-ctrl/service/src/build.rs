@@ -13,6 +13,7 @@ use airlock_nix_core::{
     identity::*,
     review::{DeploymentPlan, PreparedPlan},
     root_artifact::RootDescriptor,
+    runtime::progress,
     state::{OperationLock, StateStore},
     store_path::{StoreFile, StorePath},
 };
@@ -170,7 +171,7 @@ fn build_release(store: &StateStore, grant: &Grant, lock: &OperationLock) -> Res
 pub(super) fn execute(store: &StateStore, grant: &Grant, lock: &OperationLock) -> Result<Value> {
     grant.check(lock)?;
     if grant.header.action.is_machine() {
-        let release = build_release(store, grant, lock)?;
+        let release = progress::phase("building_release", || build_release(store, grant, lock))?;
         if grant.header.action == Action::MachineBuild {
             return Ok(
                 json!({"schema":MACHINE_SCHEMA,"release":release,"revision":grant.header.revision,"lock_hash":grant.header.lock_hash}),
@@ -209,7 +210,9 @@ pub(super) fn execute(store: &StateStore, grant: &Grant, lock: &OperationLock) -
     } else {
         "airlock.Ctrl.GuestApply"
     };
-    let result = process::rpc(service, &serde_json::to_value(&receipt)?, None)?;
+    let result = progress::phase("planning_guest", || {
+        process::rpc(service, &serde_json::to_value(&receipt)?, None)
+    })?;
     check_plan(&result, grant)?;
 
     records::save(
@@ -447,7 +450,9 @@ fn send_release(
     }
 
     let start = Instant::now();
-    let authorization = send_transport("prepare", &transport, grant, lock, &json!({}))?;
+    let authorization = progress::phase("preparing_dom0", || {
+        send_transport("prepare", &transport, grant, lock, &json!({}))
+    })?;
     #[derive(Deserialize)]
     struct Admission {
         /// Wire format identifier used to reject unsupported record versions.
@@ -484,7 +489,7 @@ fn send_release(
     records::save(store, &name(grant, "admission-prepare"), &authorization)?;
 
     let metadata_start = Instant::now();
-    let metadata = machine_metadata(&topology)?;
+    let metadata = progress::phase("querying_package_metadata", || machine_metadata(&topology))?;
     let metadata_seconds = metadata_start.elapsed().as_secs_f64();
     let mut metadata_file = tempfile::NamedTempFile::new()?;
     serde_json::to_writer(&mut metadata_file, &metadata)?;
@@ -540,6 +545,11 @@ fn send_release(
     } else {
         "apply"
     };
+    let planning = progress::Span::start(if action == "plan" {
+        "planning_machine"
+    } else {
+        "submitting_deployment"
+    });
     let mut result = send_transport(
         action,
         &transport,
@@ -547,6 +557,7 @@ fn send_release(
         lock,
         &serde_json::to_value(&receipts)?,
     )?;
+    planning.complete();
     check_plan(&result, grant)?;
     for key in ["paths_transferred", "nar_bytes", "compressed_bytes"] {
         let first = result

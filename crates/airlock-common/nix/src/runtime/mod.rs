@@ -3,6 +3,9 @@
 
 pub mod process;
 
+/// Structured observational stages shared by workers, dom0 and request status.
+pub mod progress;
+
 pub mod protocol;
 
 #[cfg(feature = "artifacts")]

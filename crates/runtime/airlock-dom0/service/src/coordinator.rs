@@ -151,6 +151,15 @@ impl Coordinator {
             .transpose()?
             .unwrap_or(json!({"phase":"image-baseline"}));
 
+        if let Some(record) = &latest {
+            match airlock_nix_core::runtime::progress::status(
+                &self.state.join("progress").join(record.id.as_str()),
+            ) {
+                Ok(Some(progress)) => result["progress"] = progress,
+                Ok(None) => (),
+                Err(error) => result["progress_error"] = json!(error.to_string()),
+            }
+        }
         let current = state::host()?;
         let selection = self.selection()?;
         result["selection"] = serde_json::to_value(&selection)?;

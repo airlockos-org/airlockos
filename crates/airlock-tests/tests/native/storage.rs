@@ -471,6 +471,17 @@ fn full_artifact_is_retained_inactive() -> Result<()> {
     assert_eq!(receipt["retained"], true);
     assert_eq!(receipt["activated"], false);
     assert_eq!(receipt["objects_admitted"], 3);
+    for key in [
+        "receive_seconds",
+        "admission_seconds",
+        "manifest_validation_seconds",
+    ] {
+        assert!(
+            receipt["timings"][key]
+                .as_f64()
+                .is_some_and(|seconds| seconds >= 0.0)
+        );
+    }
     assert_eq!(receipt["domain"], "usr-home");
     let manifest = read(receipt["manifest"].as_str().unwrap())?;
     assert_eq!(manifest["domain"], "usr-home-runtime-store");

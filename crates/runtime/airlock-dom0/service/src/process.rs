@@ -782,6 +782,7 @@ impl Runner {
         let deadline = Instant::now() + timeout;
         let mut limited = false;
         let status = loop {
+            airlock_nix_core::runtime::progress::heartbeat();
             if exited(child.group)? {
                 break child.finish()?;
             }

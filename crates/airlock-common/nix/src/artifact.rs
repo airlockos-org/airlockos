@@ -18,7 +18,7 @@ pub use root::{RootDescriptor, decode as decode_root, encode as encode_root};
 
 pub use airlock_store_packer::{create_tar_fragment, tree_hash, validate_store_path};
 
-use crate::runtime::process::OwnedChild;
+use crate::runtime::{process::OwnedChild, progress};
 use crate::{admission::AdmissionReceipt, identity::SourceIdentity};
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
@@ -338,6 +338,11 @@ impl Source {
         } else {
             (paths, root_descriptor.is_some(), BTreeMap::new())
         };
+        let mut payload_progress = progress::Span::start("sending_payload");
+        let total = missing.len();
+        let object_count = inventory["object_count"].clone();
+        let mut completed = 0;
+        payload_progress.update(json!({"objects_total":object_count, "objects_to_transfer":total, "objects_reused":reused.len(), "objects_completed":completed}));
         let temporary = tempfile::tempdir()?;
         let mut archive = tar::Builder::new(std::io::BufWriter::new(output));
         if missing_root {
@@ -368,7 +373,9 @@ impl Source {
             }
             let physical = self.physical(&path)?;
             let fragment = temporary.path().join(format!("{}.tar", entry(&path)?));
-            create_tar_fragment(&physical, &fragment)?;
+            progress::phase("packing_object", || {
+                create_tar_fragment(&physical, &fragment)
+            })?;
             object["fragment_size"] = json!(fs::metadata(&fragment)?.len());
             // Emit the outer header first, then validate and forward the inner
             // fragment in one pass. Fragment sizes are always block aligned, so
@@ -388,15 +395,20 @@ impl Source {
                     .context("missing fragment name")?,
                 std::io::empty(),
             )?;
+            let mut sending = progress::Span::start("sending_object");
+            sending.update(json!({"object":path}));
             let identity = fragment::inspect(
                 File::open(&fragment)?,
-                archive.get_mut(),
+                progress::CountingWriter::new(archive.get_mut(), &mut sending, length),
                 length,
                 entry(&path)?,
             )?;
+            sending.complete();
             object["tree_hash"] = json!(identity.tree_hash);
             object["fragment_sha256"] = json!(identity.sha256);
             fs::remove_file(fragment)?;
+            completed += 1;
+            payload_progress.update(json!({"objects_total":object_count, "objects_to_transfer":total, "objects_reused":reused.len(), "objects_completed":completed}));
         }
         let bytes = serde_json::to_vec(&inventory)?;
         ensure!(bytes.len() <= MAX_MESSAGE, "artifact manifest too large");
@@ -409,6 +421,7 @@ impl Source {
         header.set_cksum();
         archive.append_data(&mut header, "manifest.json", bytes.as_slice())?;
         archive.into_inner()?.flush()?;
+        payload_progress.complete();
         Ok(inventory)
     }
 
@@ -454,12 +467,14 @@ impl Source {
             }
             ensure!(probe["reuse"] == false, "invalid generation reuse response");
         }
-        let inventory = self.inventory(true)?;
+        let inventory = progress::phase("inventory", || self.inventory(true))?;
         write_message(output, &inventory)?;
-        let request = receiver_message(input)?;
+        let request = progress::phase("negotiating_objects", || receiver_message(input))?;
         let manifest = self.payload(output, inventory, Some(&request))?;
         output.flush()?;
-        let receipt = self.validate_receipt(receiver_message(input)?)?;
+        let receipt = progress::phase("awaiting_dom0_admission", || {
+            self.validate_receipt(receiver_message(input)?)
+        })?;
         let root: Option<RootDescriptor> =
             serde_json::from_value(manifest["root_artifact"].clone())?;
         ensure!(

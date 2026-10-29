@@ -74,6 +74,8 @@ struct Capture<T> {
     pipe: Option<T>,
     /// Captured stream data, bounded independently of the other output stream.
     bytes: Vec<u8>,
+    /// Incomplete structured stderr events, isolated to this child stream.
+    frames: super::progress::Frames,
 }
 
 impl<T: Read + AsFd> Capture<T> {
@@ -82,10 +84,11 @@ impl<T: Read + AsFd> Capture<T> {
         Ok(Self {
             pipe: Some(pipe),
             bytes: Vec::new(),
+            frames: super::progress::Frames::default(),
         })
     }
 
-    fn read_ready(&mut self, forward_stderr: bool) -> Result<bool> {
+    fn read_ready(&mut self, stderr: bool, forward_stderr: bool) -> Result<bool> {
         let Some(pipe) = &mut self.pipe else {
             return Ok(false);
         };
@@ -93,18 +96,30 @@ impl<T: Read + AsFd> Capture<T> {
         let mut buffer = [0; 65536];
         match pipe.read(&mut buffer) {
             Ok(0) => {
+                let pending = self.frames.finish();
+                require(
+                    pending.len() <= LIMIT - self.bytes.len(),
+                    "child output exceeded the capture limit",
+                )?;
+                self.bytes.extend_from_slice(&pending);
                 self.pipe = None;
                 Ok(true)
             }
             Ok(size) => {
+                let captured = if stderr {
+                    super::progress::diagnostic(&buffer[..size]);
+                    self.frames.push(&buffer[..size], forward_stderr)
+                } else {
+                    buffer[..size].to_vec()
+                };
                 require(
-                    size <= LIMIT - self.bytes.len(),
+                    captured.len() <= LIMIT - self.bytes.len(),
                     "child output exceeded the capture limit",
                 )?;
                 if forward_stderr {
                     let _ = io::stderr().write_all(&buffer[..size]);
                 }
-                self.bytes.extend_from_slice(&buffer[..size]);
+                self.bytes.extend_from_slice(&captured);
                 Ok(true)
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(false),
@@ -126,6 +141,15 @@ pub fn run(
     timeout: Option<Duration>,
 ) -> Result<Output> {
     run_capture(command, input, timeout, false)
+}
+
+/// Run a helper with the normal bounded capture while forwarding live stderr diagnostics.
+pub fn run_forwarded(
+    command: &mut Command,
+    input: Option<Vec<u8>>,
+    timeout: Option<Duration>,
+) -> Result<Output> {
+    run_capture(command, input, timeout, true)
 }
 
 fn run_capture(
@@ -159,6 +183,7 @@ fn run_capture(
     let mut status = None;
     let mut exited_at = None;
     loop {
+        super::progress::heartbeat();
         require(
             !timeout.is_some_and(|limit| start.elapsed() >= limit),
             "child command timed out; no success was recorded",
@@ -175,8 +200,8 @@ fn run_capture(
             }
         }
 
-        let mut progressed = stdout.read_ready(false)?;
-        progressed |= stderr.read_ready(forward_stderr)?;
+        let mut progressed = stdout.read_ready(false, false)?;
+        progressed |= stderr.read_ready(true, forward_stderr)?;
         if sent == input.len() {
             stdin = None;
         }

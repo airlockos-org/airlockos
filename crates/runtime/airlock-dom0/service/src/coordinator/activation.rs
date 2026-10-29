@@ -1,4 +1,5 @@
 use super::*;
+use airlock_nix_core::runtime::progress;
 
 struct Activation<'a> {
     // Immutable candidate whose artifacts and source were checked during preflight.
@@ -339,19 +340,29 @@ impl Coordinator {
         baseline.recheck()?;
         lock.update(Phase::Preflight, Some(&record.id))?;
         let mut durable = self.publish_intent(&record, authorization)?;
-        let result = self.activate(
-            Activation {
-                release: &r,
-                baseline: &baseline,
-                snapshots: &snapshots,
-                copies: &copies,
-                recovery: mode.is_recovery(),
-            },
-            &mut record,
-            lock,
-            &mut durable,
-            pinned,
-        );
+        let _recording =
+            match progress::record_to(&self.state.join("progress").join(record.id.as_str())) {
+                Ok(recording) => Some(recording),
+                Err(error) => {
+                    eprintln!("progress recording unavailable: {error}");
+                    None
+                }
+            };
+        let result = progress::phase("activation", || {
+            self.activate(
+                Activation {
+                    release: &r,
+                    baseline: &baseline,
+                    snapshots: &snapshots,
+                    copies: &copies,
+                    recovery: mode.is_recovery(),
+                },
+                &mut record,
+                lock,
+                &mut durable,
+                pinned,
+            )
+        });
         durable.finish(result.is_ok());
         if let Err(error) = result {
             let failed = record.phase;
@@ -437,7 +448,7 @@ impl Coordinator {
             } else {
                 durable.host(record, action)?
             };
-            self.host_effect(request)?;
+            progress::phase("activating_host", || self.host_effect(request))?;
         }
 
         let mut retirement = Vec::new();
@@ -465,8 +476,10 @@ impl Coordinator {
         self.publish_phase(record, Phase::Stopping, lock)?;
         for name in &record.plan.stop {
             let observation = self.shutdown_observation(&baseline.topology, name)?;
-            self.runner
-                .shutdown_deployment(durable.shutdown(record, name, &observation)?)?;
+            progress::phase("stopping_vm", || {
+                self.runner
+                    .shutdown_deployment(durable.shutdown(record, name, &observation)?)
+            })?;
         }
 
         self.require_quiescent(record)?;
@@ -484,6 +497,7 @@ impl Coordinator {
 
         self.require_quiescent(record)?;
         self.publish_phase(record, Phase::Configuring, lock)?;
+        let configuring = progress::Span::start("configuring_vms");
         self.prepare_copies(copies)?;
         if record.plan.pci_handoff.is_some() {
             self.pci_handoff(durable, record, recovery)?;
@@ -522,6 +536,7 @@ impl Coordinator {
         } else {
             CompletedSetup::legacy(&result_path)?
         };
+        configuring.complete();
         self.finish_activation(
             activation,
             record,
@@ -573,13 +588,17 @@ impl Coordinator {
         self.publish_phase(record, Phase::Starting, lock)?;
         for name in &record.plan.start {
             if !self.running()?.contains(name) {
-                self.runner.start_deployment(durable.start(record, name)?)?;
+                progress::phase("starting_vm", || {
+                    self.runner.start_deployment(durable.start(record, name)?)
+                })?;
             }
         }
 
         self.publish_phase(record, Phase::Verifying, lock)?;
         let required = record.plan.start.iter().cloned().collect();
-        let verified = self.verify_deployment(r, record, &required)?;
+        let verified = progress::phase("verifying_deployment", || {
+            self.verify_deployment(r, record, &required)
+        })?;
         if !snapshots.is_empty() {
             self.publish_phase(record, Phase::GuiReconnecting, lock)?;
             record.metadata.details.gui_reconnected = Some(self.gui_verify(snapshots)?);

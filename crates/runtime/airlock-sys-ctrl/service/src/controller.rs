@@ -652,19 +652,29 @@ fn work(id: JobId) -> Result<u8> {
     )?)?;
     header.candidate()?;
 
-    let result = (|| -> Result<Value> {
+    let progress_directory = records::root()?.join("progress").join(id.as_str());
+    let _recording = match airlock_nix_core::runtime::progress::record_to(&progress_directory) {
+        Ok(recording) => Some(recording),
+        Err(error) => {
+            eprintln!("progress recording unavailable: {error}");
+            None
+        }
+    };
+    let result = airlock_nix_core::runtime::progress::phase("request", || -> Result<Value> {
         require(
             protocol::identity(&repo())? == header.source(),
             "controller source changed before review",
         )?;
-        let grant = authorize(&store, &mut job, &header, &mut lock)?;
+        let grant = airlock_nix_core::runtime::progress::phase("awaiting_source_approval", || {
+            authorize(&store, &mut job, &header, &mut lock)
+        })?;
         job.approved(&grant.id)?;
         records::save_job(&store, &mut job)?;
         lock.update_phase("building".into())?;
 
         grant.check(&lock)?;
         build::execute(&store, &grant, &lock)
-    })();
+    });
 
     match result {
         Ok(payload) => {
@@ -718,6 +728,12 @@ fn status(id: &JobId, refresh: bool) -> Result<Value> {
     let job = records::job(id)?;
     let mut value = serde_json::to_value(&job)?;
     let store = StateStore::open(&records::root()?)?;
+    let directory = records::root()?.join("progress").join(id.as_str());
+    match airlock_nix_core::runtime::progress::status(&directory) {
+        Ok(Some(progress)) => value["progress"] = progress,
+        Ok(None) => (),
+        Err(error) => value["progress_error"] = json!(error.to_string()),
+    }
     value["controller_lock"] = serde_json::to_value(store.operation_status(&operation_key()?)?)?;
 
     if refresh
@@ -730,6 +746,12 @@ fn status(id: &JobId, refresh: bool) -> Result<Value> {
         match control(&json!({"op":"status","request_id":auth})) {
             Ok(latest) => {
                 value["lock"] = latest.get("lock").cloned().unwrap_or(Value::Null);
+                if let Some(progress) = latest.get("progress") {
+                    value["deployment_progress"] = progress.clone();
+                }
+                if let Some(phase) = latest.get("deployment_phase") {
+                    value["deployment_phase"] = phase.clone();
+                }
                 value["deployment_observation"] = latest;
             }
             Err(error) => {
