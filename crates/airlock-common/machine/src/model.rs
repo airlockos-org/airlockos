@@ -345,8 +345,8 @@ impl Topology {
                 );
                 if artifact.authority == airlock_nix_core::hermit_artifact::AuthorityMode::Normal {
                     ensure!(
-                        memory >= 128,
-                        "{name}: normal clipboard requires at least 128 MiB"
+                        memory >= 24,
+                        "{name}: normal clipboard requires at least 24 MiB"
                     );
                     let gui = d
                         .features

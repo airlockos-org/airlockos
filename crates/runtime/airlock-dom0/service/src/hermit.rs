@@ -22,7 +22,7 @@ fn verify_owned(artifact: &Descriptor, memory_mib: u64, owner: u32) -> Result<Im
     artifact.validate(false)?;
     ensure!(
         (16..=256).contains(&memory_mib)
-            && (artifact.authority != AuthorityMode::Normal || memory_mib >= 128),
+            && (artifact.authority != AuthorityMode::Normal || memory_mib >= 24),
         "invalid Hermit memory allocation"
     );
 
@@ -709,11 +709,11 @@ mod tests {
         assert!(boot_xml_with_authority(&xml(), &artifact(), 32, nonce, Some(7)).is_err());
         let mut normal = artifact();
         normal.authority = AuthorityMode::Normal;
-        let xml = xml().replace(">32<", ">128<");
-        assert!(boot_xml(&xml, &normal, 128, nonce).is_err());
-        assert!(boot_xml_with_authority(&xml, &normal, 128, nonce, Some(0)).is_err());
+        let xml = xml().replace(">32<", ">24<");
+        assert!(boot_xml(&xml, &normal, 24, nonce).is_err());
+        assert!(boot_xml_with_authority(&xml, &normal, 24, nonce, Some(0)).is_err());
         assert!(
-            boot_xml_with_authority(&xml, &normal, 128, nonce, Some(7))
+            boot_xml_with_authority(&xml, &normal, 24, nonce, Some(7))
                 .unwrap()
                 .contains("airlock.authority=7")
         );

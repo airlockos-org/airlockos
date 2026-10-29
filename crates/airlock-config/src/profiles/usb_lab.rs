@@ -32,7 +32,7 @@ pub fn machine(firewall_diagnostics: bool) -> Result<MachineSnapshot, AuthoringE
     let assistant = Vm::assistant("usr-assistant", &firewall, GiB(16))?;
     machine.add(&assistant)?;
 
-    let clipboard = Vm::hermit("sys-clipboard", MiB(128), HermitApplication::Clipboard)?;
+    let clipboard = Vm::hermit("sys-clipboard", MiB(24), HermitApplication::Clipboard)?;
     clipboard.set_autostart(true);
     machine.add(&clipboard)?;
     crate::components::clipboard::connect(&gui, &clipboard);

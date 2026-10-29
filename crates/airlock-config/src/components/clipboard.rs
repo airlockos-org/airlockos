@@ -18,8 +18,8 @@ use rusix::{
 };
 
 /// Share normal clipboard content among this GUI and every VM assigned to it.
-/// Keep the current 128 MiB guest allocation and supply encrypted temporary storage.
-/// Payloads above 5 MiB stream to disk; lower guest allocations need separate validation.
+/// Require at least 24 MiB of guest RAM and supply encrypted temporary storage.
+/// The application owns an 8 MiB heap; payloads above 5 MiB stream to disk.
 /// File offers remain local; no protected mode or gesture authority is enabled.
 pub fn connect(gui: &VmHandle<Gui>, service: &VmHandle<Service, Hermit>) {
     gui.clipboard_service(service);
@@ -39,10 +39,10 @@ pub(crate) fn configure(
                 reason: "missing clipboard service".into(),
             })?;
         if !matches!(service.backend, GuestBackend::Hermit { .. })
-            || service.settings.memory.bounds().0.0 < 128
+            || service.settings.memory.bounds().0.0 < 24
         {
             return Err(AuthoringError::InvalidClipboard {
-                reason: "normal clipboard requires a Hermit service with at least 128 MiB".into(),
+                reason: "normal clipboard requires a Hermit service with at least 24 MiB".into(),
             });
         }
         if let GuestBackend::Hermit { scratch, .. } = &mut service.backend {

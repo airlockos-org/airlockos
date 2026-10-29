@@ -899,16 +899,17 @@ fn clipboard_follows_display_membership_and_checks_service_ownership() {
     assert!(dependencies[f.home.name()].contains(service.name()));
     airlock_config::generate(&frozen).unwrap();
 
-    service.set_memory(Memory::Fixed(MiB(32)));
+    service.set_memory(Memory::Fixed(MiB(16)));
     assert!(matches!(
         f.machine.finish(),
         Err(Error::InvalidClipboard { .. })
     ));
-    service.set_memory(Memory::Fixed(MiB(128)));
+    service.set_memory(Memory::Fixed(MiB(24)));
     let second = Vm::gui("sys-other-gui", &f.home).unwrap();
     f.machine.add(&second).unwrap();
     f.home.set_gui(&second);
     let updated = f.machine.finish().unwrap();
+    airlock_config::generate(&updated).unwrap();
     assert!(
         !updated.clipboard_connections()[0]
             .participants

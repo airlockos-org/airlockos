@@ -35,8 +35,8 @@ unverified boundaries. The native arena test combines maximum packet buffers,
 queued replies, format metadata and a 5 MiB offer, then exercises exhaustion and reuse.
 
 The 8 MiB heap cap excludes application static allocator bookkeeping, code, stacks,
-kernel allocations and Xen mappings. Those still need separate budgets and proof
-or measurement before reducing the current 128 MiB guest allocation. The app build
+kernel allocations and Xen mappings. The configured guest allocation is 24 MiB; those components remain outside the
+application proof and require runtime validation at that allocation. The app build
 lock includes the pinned external builder's build-std dependencies plus the isolated
 application lock; its vendor output is authenticated by the build recipe's hash.
 Payload usage events distinguish RAM and disk bytes without recording content.

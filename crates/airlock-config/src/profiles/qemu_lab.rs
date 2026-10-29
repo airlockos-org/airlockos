@@ -59,7 +59,7 @@ pub fn machine() -> Result<MachineSnapshot, AuthoringError> {
 
     let clipboard = Vm::hermit_with_scratch(
         "sys-clipboard",
-        MiB(128),
+        MiB(24),
         HermitApplication::Clipboard,
         MiB(128),
     )?;

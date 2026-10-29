@@ -28,7 +28,7 @@ pub fn machine() -> Result<MachineSnapshot, AuthoringError> {
     let command = Vm::command("usr-cmd", &firewall, GiB(8))?;
     machine.add(&command)?;
 
-    let clipboard = Vm::hermit("sys-clipboard", MiB(128), HermitApplication::Clipboard)?;
+    let clipboard = Vm::hermit("sys-clipboard", MiB(24), HermitApplication::Clipboard)?;
     clipboard.set_autostart(true);
     machine.add(&clipboard)?;
     crate::components::clipboard::connect(&gui, &clipboard);
