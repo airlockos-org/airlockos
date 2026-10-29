@@ -25,5 +25,4 @@ machines (VMs), including dom0, the privileged control VM.
 AirlockOS is under active development. Qubes OS security equivalence has not
 been established. See [Security](SECURITY.md) for limitations and reporting.
 
-Original code is [MIT licensed](LICENSE). Dependencies retain their own terms;
-see [third-party notices](THIRD_PARTY.md).
+Original code is [MIT licensed](LICENSE). Dependencies retain their own terms.
