@@ -17,3 +17,11 @@ pub mod authority;
 
 /// Verified offer-name policy, representation uniqueness and bounded layout.
 pub mod formats;
+
+/// Verified bounded parsing over immutable packet snapshots.
+pub mod packet;
+
+/// Verified frame ordering, replay rejection and bounded packet ownership.
+pub mod framing;
+
+mod library;

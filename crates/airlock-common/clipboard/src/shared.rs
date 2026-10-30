@@ -77,7 +77,10 @@ enum State {
         deadline: u64,
     },
     /// Every byte arrived and flush completed before the transfer deadline.
-    Published(Content),
+    Published(
+        /// Complete metadata whose private extent is available for repeated reads.
+        Content,
+    ),
 }
 
 /// One shared clipboard with exactly one private storage extent.

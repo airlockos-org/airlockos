@@ -13,17 +13,29 @@ use xen_transport::{Channel, Error as TransportError, Kind, Message, Peer};
 /// Provisioning authority and data permission have distinct ownership and dispatch.
 enum Role {
     /// Sole GUI-bound connection owns the capability that may admit data callers.
-    Authority(Provisioner),
+    Authority(
+        /// Object-bound capability held only by the GUI control connection.
+        Provisioner,
+    ),
     /// One revocable membership, never constructible from request metadata.
-    Data(Caller),
+    Data(
+        /// Revocable permission owned by this admitted data connection.
+        Caller,
+    ),
 }
 
 /// Exclusive transport ownership through handshake, operation and completed cleanup.
 enum Transport {
     /// Grant offer exists but the peer has not completed the handshake.
-    Pending(Pending),
+    Pending(
+        /// Offered resources whose cleanup can still require peer cooperation.
+        Pending,
+    ),
     /// Authenticated endpoint ready to send and receive framed messages.
-    Connected(Channel<Endpoint>),
+    Connected(
+        /// Sole channel owning its live endpoint and grant mappings.
+        Channel<Endpoint>,
+    ),
     /// Cleanup succeeded; no mappings or grants remain owned by this connection.
     Closed,
 }
@@ -99,12 +111,9 @@ impl Connection {
                 Err(TransportError::Empty) => return Ok(None),
                 Err(error) => return Err(error),
             };
-            if frame.kind != Kind::Request || frame.id <= self.sequence {
-                return Err(TransportError::Malformed);
-            }
             self.activity = now;
             if let Some(bytes) = self.incoming.push(&frame)? {
-                self.sequence = frame.id;
+                self.sequence = self.incoming.completed_id();
                 return Request::decode(&bytes).map(Some);
             }
         }

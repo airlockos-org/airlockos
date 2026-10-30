@@ -175,9 +175,10 @@ pub struct Provisioner {
 /// Observed participant metadata is deliberately insufficient to construct this type.
 ///
 /// ```compile_fail
-/// use airlock_clipboard_core::authority::{Caller, Participant};
+/// use airlock_clipboard_core::shared::{Clipboard, Participant};
+/// let (mut clipboard, _provisioner) = Clipboard::new(1024);
 /// let identity = Participant::from_binding(1, 1).unwrap();
-/// let caller = Caller { identity };
+/// clipboard.reserve(0, &identity);
 /// ```
 pub struct Caller {
     /// Object identity prevents a ticket from another clipboard being replayed.

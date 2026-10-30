@@ -7,10 +7,10 @@ use airlock_clipboard_core::shared::{
 use xen_transport::{Backend, Channel, Error as TransportError, Kind, MAX_PAYLOAD, Message};
 
 /// Largest complete control packet, including all offered format names.
-pub const MAX_PACKET: usize = 16 * 1024;
+pub use airlock_clipboard_core::packet::MAX_PACKET;
 
 /// Largest payload chunk in one desktop representation operation.
-pub const DATA_CHUNK: usize = 4096;
+pub use airlock_clipboard_core::packet::DATA_CHUNK;
 
 /// Operations accepted only after the transport has established caller identity.
 pub enum Request {
@@ -148,36 +148,45 @@ pub fn execute_with_clock<S: airlock_clipboard_core::shared::storage::Storage>(
     result.unwrap_or_else(Reply::Error)
 }
 
+/// Preserve stable wire failure categories at the external Xen transport boundary.
+fn packet_error(error: airlock_clipboard_core::packet::PacketError) -> TransportError {
+    match error {
+        airlock_clipboard_core::packet::PacketError::Malformed => TransportError::Malformed,
+        airlock_clipboard_core::packet::PacketError::TooLarge
+        | airlock_clipboard_core::packet::PacketError::Capacity => TransportError::TooLarge,
+    }
+}
+
 /// Cursor that checks every wire length before reading or allocating.
 struct Reader<'a> {
-    /// Remaining bytes of one already bounded packet.
-    bytes: &'a [u8],
+    /// Verified position and immutable snapshot; callers cannot reconstruct indices.
+    cursor: airlock_clipboard_core::packet::Cursor<'a>,
 }
 
 impl<'a> Reader<'a> {
+    fn new(bytes: &'a [u8]) -> Result<Self, TransportError> {
+        Ok(Self {
+            cursor: airlock_clipboard_core::packet::Cursor::new(bytes).map_err(packet_error)?,
+        })
+    }
+
     fn take(&mut self, len: usize) -> Result<&'a [u8], TransportError> {
-        if len > self.bytes.len() {
-            return Err(TransportError::Malformed);
-        }
-        let (head, tail) = self.bytes.split_at(len);
-        self.bytes = tail;
-        Ok(head)
+        self.cursor
+            .take(len)
+            .map(|span| span.as_bytes())
+            .map_err(packet_error)
     }
 
     fn byte(&mut self) -> Result<u8, TransportError> {
-        Ok(self.take(1)?[0])
+        self.cursor.byte().map_err(packet_error)
     }
 
     fn number(&mut self) -> Result<u64, TransportError> {
-        Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+        self.cursor.number().map_err(packet_error)
     }
 
     fn size(&mut self, maximum: usize) -> Result<usize, TransportError> {
-        let n = usize::try_from(self.number()?).map_err(|_| TransportError::TooLarge)?;
-        if n > maximum {
-            return Err(TransportError::TooLarge);
-        }
-        Ok(n)
+        self.cursor.size(maximum).map_err(packet_error)
     }
 
     fn formats(&mut self) -> Result<Vec<Format>, TransportError> {
@@ -201,11 +210,7 @@ impl<'a> Reader<'a> {
     }
 
     fn finish(self) -> Result<(), TransportError> {
-        if self.bytes.is_empty() {
-            Ok(())
-        } else {
-            Err(TransportError::Malformed)
-        }
+        self.cursor.finish().map_err(packet_error)
     }
 }
 
@@ -277,7 +282,7 @@ impl Request {
         if bytes.len() > MAX_PACKET {
             return Err(TransportError::TooLarge);
         }
-        let mut reader = Reader { bytes };
+        let mut reader = Reader::new(bytes)?;
         if reader.byte()? != 2 {
             return Err(TransportError::Malformed);
         }
@@ -292,14 +297,14 @@ impl Request {
                 let generation = reader.number()?;
                 let format = reader.size(MAX_FORMATS - 1)?;
                 let offset = reader.size(airlock_clipboard_core::shared::DEFAULT_CAPACITY)?;
-                if reader.bytes.len() > DATA_CHUNK {
+                if reader.cursor.remaining() > DATA_CHUNK {
                     return Err(TransportError::TooLarge);
                 }
                 let mut bytes = Vec::new();
                 bytes
-                    .try_reserve_exact(reader.bytes.len())
+                    .try_reserve_exact(reader.cursor.remaining())
                     .map_err(|_| TransportError::TooLarge)?;
-                bytes.extend_from_slice(reader.take(reader.bytes.len())?);
+                bytes.extend_from_slice(reader.take(reader.cursor.remaining())?);
                 Self::Write {
                     generation,
                     format,
@@ -401,7 +406,7 @@ impl Reply {
         if bytes.len() > MAX_PACKET {
             return Err(TransportError::TooLarge);
         }
-        let mut reader = Reader { bytes };
+        let mut reader = Reader::new(bytes)?;
         if reader.byte()? != 2 {
             return Err(TransportError::Malformed);
         }
@@ -423,10 +428,10 @@ impl Reply {
                 Self::Offer(generation, offer)
             }
             3 => {
-                if reader.bytes.len() > DATA_CHUNK {
+                if reader.cursor.remaining() > DATA_CHUNK {
                     return Err(TransportError::TooLarge);
                 }
-                Self::Data(reader.take(reader.bytes.len())?.to_vec())
+                Self::Data(reader.take(reader.cursor.remaining())?.to_vec())
             }
             4 => Self::Connected {
                 epoch: reader.number()?,
@@ -451,50 +456,52 @@ impl Reply {
     }
 }
 
-/// One bounded packet assembled across ordered transport frames.
-#[derive(Default)]
+/// One verified, bounded packet assembler for this connection's lifetime.
 pub struct Incoming {
-    /// Sequence identity and declared total length of the active packet.
-    active: Option<(u64, usize)>,
-    /// Private bytes accumulated so far.
-    bytes: Vec<u8>,
+    /// Immutable direction expected on this connection, chosen before reading frames.
+    expected: Kind,
+    /// Owns the exact contiguous prefix and rejects completed request identifiers.
+    assembly: airlock_clipboard_core::framing::Assembly,
+}
+
+impl Default for Incoming {
+    fn default() -> Self {
+        Self {
+            expected: Kind::Request,
+            assembly: airlock_clipboard_core::framing::Assembly::new(),
+        }
+    }
 }
 
 impl Incoming {
-    /// Accept the next contiguous frame, returning a complete packet exactly once.
+    /// Receive only response frames for an exclusively owned request/reply client.
+    pub fn responses() -> Self {
+        Self {
+            expected: Kind::Response,
+            assembly: airlock_clipboard_core::framing::Assembly::new(),
+        }
+    }
+
+    /// Accept one owned transport snapshot; terminal errors require connection retirement.
     pub fn push(&mut self, message: &Message) -> Result<Option<Vec<u8>>, TransportError> {
-        let bytes = message.payload();
-        if bytes.len() < 8 {
+        if message.kind != self.expected {
+            self.assembly.reject();
             return Err(TransportError::Malformed);
         }
-        let length = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
-        let offset = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
-        if length == 0 || length > MAX_PACKET || bytes.len() == 8 {
-            return Err(TransportError::TooLarge);
-        }
-        if self.active.is_none() {
-            if offset != 0 {
-                return Err(TransportError::Malformed);
-            }
-            self.bytes
-                .try_reserve_exact(length)
-                .map_err(|_| TransportError::TooLarge)?;
-            self.active = Some((message.id, length));
-        }
-        if self.active != Some((message.id, length))
-            || offset != self.bytes.len()
-            || offset + bytes.len() - 8 > length
-        {
-            return Err(TransportError::Malformed);
-        }
-        self.bytes.extend_from_slice(&bytes[8..]);
-        if self.bytes.len() == length {
-            self.active = None;
-            return Ok(Some(std::mem::take(&mut self.bytes)));
-        }
-        Ok(None)
+        self.assembly
+            .push(message.id, message.payload())
+            .map_err(packet_error)
+    }
+
+    /// Correlate a response with the exact request whose packet completed validation.
+    pub fn completed_id(&self) -> u64 {
+        self.assembly.completed_id()
     }
 }
+
+// This protocol reuses the existing transport's payload size; a dependency change
+// must not silently alter framing or invalidate the verified range bounds.
+const _: () = assert!(MAX_PAYLOAD == airlock_clipboard_core::framing::FRAME_LIMIT);
 
 /// Frame a complete packet with explicit total length and offset in every frame.
 pub fn frames(kind: Kind, id: u64, bytes: &[u8]) -> Result<Vec<Message>, TransportError> {
@@ -525,10 +532,10 @@ pub fn exchange<B: Backend>(
     for frame in frames(Kind::Request, id, &request.encode())? {
         channel.send(&frame, deadline)?;
     }
-    let mut incoming = Incoming::default();
+    let mut incoming = Incoming::responses();
     loop {
         let message = channel.recv(deadline)?;
-        if message.id != id || message.kind != Kind::Response {
+        if message.id != id {
             return Err(TransportError::Malformed);
         }
         if let Some(bytes) = incoming.push(&message)? {
@@ -567,6 +574,36 @@ mod tests {
         let mut invalid = Request::Offer.encode();
         invalid.push(0);
         assert!(Request::decode(&invalid).is_err());
+    }
+
+    #[test]
+    fn replay_interleaving_and_wrong_direction_require_a_fresh_connection() {
+        let packet = vec![7; DATA_CHUNK];
+        let first = frames(Kind::Request, 1, &packet).unwrap();
+        let next = frames(Kind::Request, 2, &packet).unwrap();
+        let mut incoming = Incoming::default();
+        for frame in &first {
+            incoming.push(frame).unwrap();
+        }
+        assert_eq!(incoming.completed_id(), 1);
+        assert!(incoming.push(&first[0]).is_err());
+        assert!(incoming.push(&next[0]).is_err());
+
+        let mut incoming = Incoming::default();
+        incoming.push(&first[0]).unwrap();
+        assert!(incoming.push(&next[1]).is_err());
+        assert!(incoming.push(&first[1]).is_err());
+
+        let responses = frames(Kind::Response, 1, &packet).unwrap();
+        let mut incoming = Incoming::default();
+        assert!(incoming.push(&responses[0]).is_err());
+        assert!(incoming.push(&first[0]).is_err());
+        let mut response_receiver = Incoming::responses();
+        let mut reconstructed = None;
+        for frame in &responses {
+            reconstructed = response_receiver.push(frame).unwrap();
+        }
+        assert_eq!(reconstructed.unwrap(), packet);
     }
 
     #[test]
