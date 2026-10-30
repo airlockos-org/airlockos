@@ -1,7 +1,7 @@
-//! Consume Qubes' existing configuration stream without creating control authority.
-//! Native QubesDB supplies a bounded private replica; complete per-source rule
-//! snapshots and toolstack-bound interface lifetimes remain separate objects.
-//! Packet policy and forwarding belong to the firewall consumer.
+//! Interpret Qubes network configuration and firewall policy from native
+//! QubesDB events. This crate owns bounded retained values, source quotas,
+//! addressing, policy snapshots and interface-binding decisions. The protocol
+//! client lives in airlock-qubesdb; packet forwarding belongs to the consumer.
 //!
 //! Compatibility is pinned to QubesDB 4.3.2, core-admin 4.3.44 and Linux agent
 //! 4.4.0 from this repository's nixos-qubes recipes. XenStore negotiates devices;
@@ -28,17 +28,17 @@ pub mod backend;
 pub mod binding;
 pub mod boot;
 
-mod bytes;
+pub(crate) use airlock_qubesdb::bytes;
+#[cfg(verus_keep_ghost)]
+pub(crate) use airlock_qubesdb::wire;
 
 mod number;
 
 pub mod config;
 pub mod control;
 
-pub mod database;
+pub mod cache;
 
 pub mod policy;
 pub mod projection;
 pub mod rule;
-
-pub mod wire;

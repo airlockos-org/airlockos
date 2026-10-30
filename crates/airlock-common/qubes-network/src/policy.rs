@@ -18,12 +18,12 @@ use vstd::prelude::*;
 use crate::address;
 use crate::address::Ip;
 use crate::bytes::{copy, equal, find, prefix};
+use crate::cache::Cache;
+#[cfg(verus_keep_ghost)]
+use crate::cache::MAX_ENTRIES;
 use crate::config::Config;
 #[cfg(verus_keep_ghost)]
 use crate::config::observed;
-use crate::database::Cache;
-#[cfg(verus_keep_ghost)]
-use crate::database::MAX_ENTRIES;
 use crate::number;
 use crate::rule::{self, Action, Rule};
 

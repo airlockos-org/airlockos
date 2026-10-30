@@ -16,10 +16,10 @@ use vstd::prelude::*;
 
 use crate::address::Ip;
 use crate::bytes::{equal, prefix};
+use crate::cache::Cache;
 use crate::config::Config;
 #[cfg(verus_keep_ghost)]
 use crate::config::MAX_CLIENTS;
-use crate::database::Cache;
 use crate::policy::{self, Path, Rejection, Snapshot};
 
 verus! {
@@ -230,7 +230,7 @@ impl View {
     /// committed to the private replica. A source's first descendant mutation
     /// blocks it before another packet operation; only a live empty root WRITE
     /// can publish a replacement. Resource-bounded construction is atomic under
-    /// the exclusive mutable borrow. Native ACK generation belongs to Replica.
+    /// the exclusive mutable borrow. Native ACK generation belongs to qubesdb.
     pub fn changed(&mut self, cache: &Cache, key: &[u8], removed: bool) -> (accepted: bool)
         requires old(self).valid(), cache.valid(), 0 < key@.len() < 64,
         ensures final(self).valid(),

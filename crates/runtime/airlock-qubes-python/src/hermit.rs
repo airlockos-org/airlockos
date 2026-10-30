@@ -4,7 +4,7 @@
 use crate::argument;
 use airlock_nix_core::hermit_artifact::{AuthorityMode, Descriptor, ScratchDisk};
 use airlock_qubes::descriptor;
-use airlock_qubes_control::{READY_PATH, config::MAX_CLIENTS};
+use airlock_qubes_network::{READY_PATH, config::MAX_CLIENTS};
 use pyo3::{
     prelude::*,
     types::{PyDict, PyTuple},

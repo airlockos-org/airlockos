@@ -4,7 +4,7 @@
 //! reconnect or replay in the same VM boot.
 
 use airlock_boot_core::Challenge;
-use airlock_qubes_control::{
+use airlock_qubes_network::{
     binding::{Assigned, Bound, Request},
     control::{Control, Step},
     projection::View,

@@ -2,7 +2,8 @@
 //! connected Xen interface. Packet routing and machine role construction remain
 //! responsibilities of the firewall application and its deployment integration.
 //!
-//! The pure control crate owns framing, limits, sequencing and policy decisions.
+//! airlock-qubesdb owns framing and sequencing; airlock-qubes-network owns
+//! retained values, source quotas, policy decisions and interface binding.
 //! The Xen adapter is an explicit effect boundary: native syscall byte counts,
 //! selected peer/port, monotonic-clock correspondence, retained kernel resource
 //! ownership and cooperative single-thread scheduling are trusted dependencies.

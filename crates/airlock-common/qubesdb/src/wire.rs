@@ -11,14 +11,12 @@ use vstd::prelude::*;
 
 verus! {
 
-/// Terminal control failure. Neither category permits replay on the original
-/// connection; the runtime blocks current and future interface operations.
+/// Invalid native record framing; the original connection cannot be replayed.
+/// Consumers must discard decisions requiring a live replication stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Failure {
     /// Header/body framing does not satisfy the pinned native record grammar.
     MalformedRecord,
-    /// Replication order, acknowledgements or bounded cache admission failed.
-    Replication,
 }
 
 /// Native x86-64 qdb_hdr size, including the ABI's alignment padding.
@@ -210,10 +208,46 @@ pub fn synchronize() -> (bytes: [u8; HEADER])
     bytes
 }
 
-/// Encode the control owner's bounded guest WRITE: either its boot notice or
-/// an existing handled counter. This is not a public arbitrary-policy writer.
+/// Exact native guest WRITE domain, independent of any consumer's key meanings.
+pub open spec fn writable(path: Seq<u8>, value: Seq<u8>) -> bool {
+    0 < path.len() < 64 && path.last() != b'/' && value.len() <= MAX_VALUE
+        && (forall|i: int| 0 <= i < path.len() ==> path_byte(path[i], i))
+        && (forall|i: int| 0 <= i < value.len() ==> value[i] != 0)
+}
+
+/// Validate a complete guest WRITE, including empty values and both native bounds.
+pub(crate) fn writeable(path: &[u8], value: &[u8]) -> (accepted: bool)
+    ensures accepted == writable(path@, value@),
+{
+    if path.is_empty() || path.len() >= 64 || path[path.len()-1] == b'/' || value.len() > MAX_VALUE { return false; }
+    let mut i = 0;
+    while i < path.len()
+        invariant i <= path.len() < 64,
+            forall|j: int| 0 <= j < i ==> path_byte(path@[j], j),
+        decreases path.len()-i,
+    {
+        let byte = path[i];
+        if !(in_range(byte, b'a', b'z') || in_range(byte, b'A', b'Z')
+            || in_range(byte, b'0', b'9') || (byte == b'-' && i > 0)
+            || byte == b'_' || byte == b'/' || byte == b'.' || byte == b':' || byte == b'@') { return false; }
+        i += 1;
+    }
+    let mut i = 0;
+    while i < value.len()
+        invariant i <= value.len() <= MAX_VALUE,
+            forall|j: int| 0 <= j < i ==> value@[j] != 0,
+        decreases value.len()-i,
+    {
+        if value[i] == 0 { return false; }
+        i += 1;
+    }
+    true
+}
+
+/// Encode one client WRITE after the request boundary validates the native path
+/// and value. Key meanings and authorization remain responsibilities of consumers.
 pub(crate) fn guest_write(path: &[u8], value: &[u8]) -> (bytes: Vec<u8>)
-    requires 0 < path@.len() < 64, 0 < value@.len() <= 36,
+    requires 0 < path@.len() < 64, value@.len() <= MAX_VALUE,
         forall|i: int| 0 <= i < path@.len() ==> path_byte(path@[i], i),
     ensures bytes@.len() == HEADER+value@.len(), bytes@[0] == WRITE,
         bytes@.subrange(1, 1+path@.len() as int) == path@, bytes@[1+path@.len() as int] == 0,
@@ -225,11 +259,13 @@ pub(crate) fn guest_write(path: &[u8], value: &[u8]) -> (bytes: Vec<u8>)
         invariant i <= HEADER, bytes@.len() == i,
             forall|j: int| 0 <= j < i ==> bytes@[j] == if j == 0 { WRITE }
                 else if 1 <= j <= path@.len() { path@[j-1] }
-                else if j == 68 { value@.len() as u8 } else { 0u8 },
+                else if j == 68 { value@.len() as u8 }
+                else if j == 69 { (value@.len()/256) as u8 } else { 0u8 },
         decreases HEADER-i,
     {
         bytes.push(if i == 0 { WRITE } else if 1 <= i && i <= path.len() { path[i-1] }
-            else if i == 68 { value.len() as u8 } else { 0 });
+            else if i == 68 { value.len() as u8 }
+            else if i == 69 { (value.len()/256) as u8 } else { 0 });
         i += 1;
     }
     crate::bytes::append(&mut bytes, value);

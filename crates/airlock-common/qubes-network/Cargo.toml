@@ -1,0 +1,19 @@
+[package]
+name = "airlock-qubes-network"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+publish = false
+license = "MIT"
+description = "Qubes network configuration, client identity and firewall policy"
+
+[dependencies]
+airlock-boot-core = { path = "../boot" }
+airlock-qubesdb = { path = "../qubesdb" }
+vstd = { version = "=0.0.0-2026-10-18-0147", default-features = false, features = ["alloc"] }
+
+[package.metadata.verus]
+verify = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_keep_ghost)', 'cfg(verus_only)'] }

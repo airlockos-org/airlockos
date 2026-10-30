@@ -11,7 +11,7 @@ use vstd::prelude::*;
 use crate::address;
 use crate::address::Ip;
 use crate::bytes::find;
-use crate::database::Cache;
+use crate::cache::Cache;
 use crate::number;
 
 verus! {

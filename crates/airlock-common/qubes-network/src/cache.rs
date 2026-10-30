@@ -1,15 +1,16 @@
-//! Private bounded replica of the native QubesDB stream. The initial terminator
-//! is the only full-database synchronization barrier. Later writes/removals are
-//! applied in stream order; their paths become local watch hints, not requests
-//! to send the local-only QDB_CMD_WATCH operation across libvchan.
+//! Network consumer's retained QubesDB values. Whole-cache and per-source quotas
+//! belong here because interpreting firewall paths requires network semantics.
+//! Over-quota sources retain bounded rejection state while unrelated clients
+//! keep their complete records. Native framing and sequencing live in qubesdb.
 
 use alloc::vec::Vec;
 use vstd::prelude::*;
 
 use crate::address::Ip;
-use crate::bytes::{copy, equal, prefix};
+use crate::bytes::{equal, prefix};
 use crate::policy::Path;
-use crate::wire::{self, Message};
+#[cfg(verus_keep_ghost)]
+use crate::wire;
 
 verus! {
 
@@ -238,7 +239,7 @@ impl Cache {
     }
 
     /// Remove exactly a key or all descendants of an explicit trailing-slash
-    /// prefix. A zero result is an observation; the native replica treats it
+    /// prefix. A zero result is an observation; the network control owner treats it
     /// as desynchronization because upstream mirrors only successful removals.
     /// The entire operation is finite and leaves unrelated entries unchanged.
     pub fn remove(&mut self, key: &[u8]) -> (removed: usize)
@@ -388,179 +389,6 @@ impl Cache {
         ensures entries@ == self.entries(), entries@.len() <= MAX_ENTRIES,
             forall|i: int| 0 <= i < entries@.len() ==> entries@[i].valid(),
     { self.entries.as_slice() }
-}
-
-/// Ordered control-stream state. A lost/invalid stream cannot be revived by an
-/// entry or completion marker; a new transport requires a new replica owner.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Phase {
-    /// Whole database dump is private until its exact native terminator arrives.
-    Synchronizing,
-    /// Complete initial snapshot; replicated live mutations may now be consumed.
-    Ready,
-    /// Terminal loss, malformed sequence or resource exhaustion.
-    Failed,
-}
-
-/// One local observation after applying the exact native operation. The caller
-/// sends acknowledgements before consuming another frame, bounding output state.
-pub enum Update {
-    /// Initial snapshot became readable at the native completion barrier.
-    Initial,
-    /// Exact key or subtree changed; policy publication still needs its own
-    /// per-source marker, which is distinct from a transport acknowledgement.
-    Changed {
-        /// Original exact native path, not an untrusted packet's source address.
-        key: Vec<u8>,
-        /// True only for a native deletion, including explicit subtree removal.
-        removed: bool,
-        /// Native positive response to this same write/delete record.
-        acknowledgement: [u8; wire::HEADER],
-    },
-    /// Initial entry or harmless acknowledgement produced no application event.
-    None,
-    /// The one guest boot-notice/handled-counter WRITE received its matching ACK.
-    Barrier,
-}
-
-/// Exactly one guest-originated boot notice or handled-counter write may await
-/// its native positive response. Neither transports policy. Replica owns the
-/// pending bytes until a matching reply or terminal loss.
-enum Barrier {
-    /// No guest write is awaiting acknowledgement.
-    Idle,
-    /// One request was selected; publication completion is owned by Control.
-    Pending {
-        /// Exact internally constructed notice/handled path echoed by the ACK.
-        path: Vec<u8>,
-        /// Exact bounded notice/counter text committed locally only after the ACK.
-        value: Vec<u8>,
-    },
-}
-
-/// Bounded private replica with explicit initial-sync and terminal-loss gates.
-/// This object stores observations; the runtime separately authenticates dom0
-/// transport ownership before any configuration projection grants authority.
-pub struct Replica {
-    /// Exact observed native entries, independent of projection/publication state.
-    cache: Cache,
-    /// Governs whether any complete initial configuration is visible.
-    phase: Phase,
-    /// One exclusive native write/ACK barrier; no automatic replay after loss.
-    barrier: Barrier,
-}
-
-impl Replica {
-    /// Cache and phase remain internally consistent on every transition.
-    pub closed spec fn valid(&self) -> bool {
-        self.cache.valid() && match &self.barrier {
-            Barrier::Idle => true,
-            Barrier::Pending { path, value } => 0 < path@.len() < 64 && 0 < value@.len() <= 36
-                && (self.phase == Phase::Ready || self.phase == Phase::Failed),
-        }
-    }
-
-    /// Current initial-sync/loss observation.
-    pub closed spec fn phase(&self) -> Phase { self.phase }
-
-    /// Observe native synchronization/loss state without exposing mutation.
-    pub fn state(&self) -> (phase: Phase)
-        requires self.valid(), ensures phase == self.phase(),
-    { self.phase }
-
-    /// Exact native observed cache, including staged live policy entries.
-    pub closed spec fn cache(&self) -> Cache { self.cache }
-
-    /// Begin only at the start of a freshly connected native stream.
-    pub fn synchronizing() -> (replica: Self)
-        ensures replica.valid() && replica.phase() == Phase::Synchronizing
-            && replica.cache().entries().len() == 0,
-    { Self { cache: Cache::empty(), phase: Phase::Synchronizing, barrier: Barrier::Idle } }
-
-    /// Terminal control loss blocks all observation consumers. Old bytes remain
-    /// available only to diagnostics through internal state, never new admissions.
-    pub fn disconnect(&mut self)
-        requires old(self).valid(),
-        ensures final(self).valid() && final(self).phase() == Phase::Failed
-            && final(self).cache() == old(self).cache() && !final(self).pending(),
-    { self.phase = Phase::Failed; self.barrier = Barrier::Idle; }
-
-    /// Observe whether a guest write is awaiting its one native ACK.
-    pub closed spec fn pending(&self) -> bool { self.barrier is Pending }
-
-    /// Register the internally selected notice/handled write before publication.
-    /// Only a fresh idle live replica may own another such request.
-    pub(crate) fn barrier(&mut self, path: Vec<u8>, value: Vec<u8>) -> (accepted: bool)
-        requires old(self).valid(), 0 < path@.len() < 64, 0 < value@.len() <= 36,
-        ensures final(self).valid(), accepted ==> final(self).pending(),
-            accepted == (old(self).phase() == Phase::Ready && !old(self).pending()),
-    {
-        if self.phase != Phase::Ready || !matches!(self.barrier, Barrier::Idle) { return false; }
-        self.barrier = Barrier::Pending { path, value };
-        true
-    }
-
-    /// Consume one already-complete record in native order. Duplicate initial
-    /// keys, a second terminator, an early live mutation or a capacity failure
-    /// terminates the stream instead of exposing a partial synchronization.
-    pub fn apply(&mut self, message: Message) -> (update: Result<Update, wire::Failure>)
-        requires old(self).valid(), message.valid(),
-        ensures final(self).valid(),
-            update.is_err() ==> final(self).phase() == Phase::Failed,
-            old(self).phase() == Phase::Failed ==> update.is_err(),
-            matches!(update, Ok(Update::Initial)) ==> old(self).phase() == Phase::Synchronizing
-                && final(self).phase() == Phase::Ready,
-            matches!(update, Ok(Update::Changed { .. })) ==> old(self).phase() == Phase::Ready
-                && final(self).phase() == Phase::Ready,
-    {
-        if self.phase == Phase::Failed { return Err(wire::Failure::Replication); }
-        let (header, value) = message.into_parts();
-        let operation = header.operation();
-        let key = header.key();
-        if operation == wire::ENTRY && self.phase == Phase::Synchronizing {
-            if key.is_empty() {
-                self.phase = Phase::Ready;
-                return Ok(Update::Initial);
-            }
-            if !self.cache.put(copy(key), value, false) { self.phase = Phase::Failed; return Err(wire::Failure::Replication); }
-            return Ok(Update::None);
-        }
-        if self.phase == Phase::Ready && (operation == wire::WRITE || operation == wire::REMOVE) {
-            let acknowledgement = header.acknowledge();
-            let key = copy(key);
-            let removed = operation == wire::REMOVE;
-            if removed {
-                let discarded = self.cache.discarded_remove(key.as_slice());
-                if self.cache.remove(key.as_slice()) == 0 && !discarded { self.phase = Phase::Failed; return Err(wire::Failure::Replication); }
-            }
-            else if !self.cache.put(copy(key.as_slice()), value, true) { self.phase = Phase::Failed; return Err(wire::Failure::Replication); }
-            return Ok(Update::Changed { key, removed, acknowledgement });
-        }
-        if self.phase == Phase::Ready && operation == wire::OK {
-            let barrier = core::mem::replace(&mut self.barrier, Barrier::Idle);
-            match barrier {
-                Barrier::Pending { path, value } if equal(key, path.as_slice()) => {
-                    if !self.cache.put(path, value, true) { self.phase = Phase::Failed; return Err(wire::Failure::Replication); }
-                    return Ok(Update::Barrier);
-                }
-                _ => { self.phase = Phase::Failed; return Err(wire::Failure::Replication); }
-            }
-        }
-        self.phase = Phase::Failed;
-        Err(wire::Failure::Replication)
-    }
-
-    /// Expose only a complete live replica. This is never a firewall policy
-    /// snapshot: per-source completion and semantic validation are still required.
-    pub fn current(&self) -> (cache: Option<&Cache>)
-        requires self.valid(),
-        ensures match cache {
-            Some(value) => self.phase() == Phase::Ready && *value == self.cache() && value.valid(),
-            None => self.phase() != Phase::Ready,
-        },
-    {
-        if self.phase == Phase::Ready { Some(&self.cache) } else { None }
-    }
 }
 
 }

@@ -9,7 +9,7 @@ description = "Native Hermit QubesDB owner and interface admission"
 
 [dependencies]
 airlock-boot-core = { path = "../../airlock-common/boot" }
-airlock-qubes-control = { path = "../../airlock-common/qubes-control" }
+airlock-qubes-network = { path = "../../airlock-common/qubes-network" }
 
 [target.'cfg(target_os = "hermit")'.dependencies]
 # Native control transport and interface-lifetime support; machine adoption is separate.

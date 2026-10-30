@@ -30,7 +30,8 @@ macro_rules! manifests {
 
 const MANIFESTS: &[(&str, &str)] = manifests![
     "airlock-common/boot",
-    "airlock-common/qubes-control",
+    "airlock-common/qubesdb",
+    "airlock-common/qubes-network",
     "airlock-common/clipboard",
     "runtime/airlock-sys-clipboard",
     "runtime/airlock-hermit-control",
