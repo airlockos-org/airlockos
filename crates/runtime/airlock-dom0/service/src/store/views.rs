@@ -118,35 +118,121 @@ fn remember_image_index(key: String, path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn verify(root: &Path, store: &Value) -> Result<()> {
+/// Check a committed view's content binding and current backing without reopening
+/// package admission records or build-only file indexes. Admission and relocation
+/// validate those records before publishing the checksums recorded by the generation.
+fn checked_map(root: &Path, store: &Value) -> Result<Value> {
     for key in ["canonical_metadata_image", "canonical_blob_map"] {
         pool_path(root, Path::new(&text(store, key)?))?;
     }
+    let map: Value = read(Path::new(&text(store, "canonical_blob_map")?))?;
     ensure!(
-        integrity(store)? == store["integrity"],
+        json!({"metadata_sha256":hash(Path::new(&text(store, "canonical_metadata_image")?))?,"layout_sha256":layout_hash(&map)?})
+            == store["integrity"],
         "retained view checksum mismatch"
     );
-    let map: Value = read(Path::new(&text(store, "canonical_blob_map")?))?;
+    let mut backing = BTreeMap::new();
     let mut logical = 0;
     for item in extents(&map)? {
-        let path = segments::blob(root, &item.segment_id)?;
+        let (path, size) = match backing.entry(item.segment_id.clone()) {
+            std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                let path = segments::blob(root, &item.segment_id)?;
+                let metadata = fs::metadata(&path)?;
+                ensure!(metadata.is_file(), "retained backing is not a regular file");
+                entry.insert((path, metadata.len()))
+            }
+        };
         ensure!(
-            path == item.segment_blob,
+            *path == item.segment_blob,
             "retained backing identity mismatch"
         );
-        pool_path(root, &path)?;
         ensure!(
             item.logical_offset == logical
                 && item.length > 0
                 && item
                     .segment_offset
                     .checked_add(item.length)
-                    .is_some_and(|end| fs::metadata(&path).is_ok_and(|m| end <= m.len())),
+                    .is_some_and(|end| end <= *size),
             "retained backing is truncated or non-contiguous"
         );
         logical = logical
             .checked_add(item.length)
             .context("logical extent overflow")?;
+    }
+    ensure!(
+        logical == number(&map, "logical_size")?,
+        "view logical length mismatch"
+    );
+    Ok(map)
+}
+
+/// Bind placement independently of the physical pool mountpoint. Unlike the
+/// logical layout hash, this includes segment identities and physical offsets.
+fn placement_hash(map: &Value) -> Result<String> {
+    use sha2::{Digest, Sha256};
+
+    let rows: Vec<_> = extents(map)?
+        .into_iter()
+        .map(|item| {
+            json!([
+                item.object,
+                item.object_sha256,
+                item.logical_offset,
+                item.length,
+                item.segment_id,
+                item.segment_offset
+            ])
+        })
+        .collect();
+    Ok(hex(&Sha256::digest(serde_json::to_vec(&rows)?)))
+}
+
+/// Root-owned admission evidence travels with its canonical view and is reclaimed with it.
+pub(super) fn admission_path(map: &Path) -> PathBuf {
+    map.with_extension("admission.json")
+}
+
+/// Publish only after object admission or checked relocation has validated every row.
+/// Atomic publication fails closed after interruption: a changed map cannot use an old receipt.
+pub(super) fn certify_map(path: &Path, map: &Value) -> Result<()> {
+    let receipt = json!({
+        "schema":"airlock.closure-store.view-admission.v1",
+        "layout_sha256":layout_hash(map)?,
+        "placement_sha256":placement_hash(map)?,
+    });
+    let path = admission_path(path);
+    // Recovery and no-op maintenance preserve already published evidence.
+    if !path.is_symlink()
+        && path.try_exists()?
+        && read::<Value>(&path).is_ok_and(|old| old == receipt)
+    {
+        return Ok(());
+    }
+    write(&path, &receipt, 0o444)
+}
+
+/// Reuse admission evidence while checking the selected generation and actual backing.
+/// No package records, package payloads or build indexes are opened at VM startup.
+pub(super) fn attachment_map(root: &Path, store: &Value) -> Result<Value> {
+    let map = checked_map(root, store)?;
+    let path = admission_path(Path::new(&text(store, "canonical_blob_map")?));
+    pool_path(root, &path)?;
+    let admitted: Value = read(&path)?;
+    ensure!(
+        admitted["schema"] == "airlock.closure-store.view-admission.v1"
+            && admitted["layout_sha256"] == store["integrity"]["layout_sha256"]
+            && admitted["placement_sha256"] == placement_hash(&map)?,
+        "view admission does not match retained placement"
+    );
+    Ok(map)
+}
+
+/// Authenticate a newly assembled view against already admitted object identities.
+/// Unchanged package payloads are reused; only their small extent records are read.
+pub(super) fn verify(root: &Path, store: &Value) -> Result<()> {
+    let map = checked_map(root, store)?;
+    for item in extents(&map)? {
         let meta: Value = read(&segments::object_metadata(root, &item.object)?)?;
         ensure!(
             std::iter::once(&meta)
@@ -158,10 +244,6 @@ pub(super) fn verify(root: &Path, store: &Value) -> Result<()> {
             "view extent differs from admitted object"
         );
     }
-    ensure!(
-        logical == number(&map, "logical_size")?,
-        "view logical length mismatch"
-    );
     Ok(())
 }
 
@@ -351,7 +433,11 @@ pub(super) fn attach(root: &Path, domain: &str, generation: u64, attaching: bool
     let manifest = records::generation(root, domain, generation)?;
     let store = &manifest["store"];
     let path = text(store, "canonical_blob_map")?;
-    let map: Value = read(Path::new(&path))?;
+    let map: Value = if attaching {
+        attachment_map(root, store)?
+    } else {
+        read(Path::new(&path))?
+    };
     let name = dm_name(domain, generation, &text(store, "closure_hash")?);
     let reference = root.join("runtime").join(format!("{name}.json"));
     let mut result = json!({
@@ -364,7 +450,6 @@ pub(super) fn attach(root: &Path, domain: &str, generation: u64, attaching: bool
         "device": format!("/dev/mapper/{name}"),
     });
     if attaching {
-        verify(root, store)?;
         runtime_reference(
             root,
             &name,
@@ -525,7 +610,7 @@ pub(super) fn materialize(request: ViewRequest<'_>) -> Result<Value> {
     {
         let depth = 0;
         if let Some(previous) = previous.filter(|_| !image_build()) {
-            verify(root, previous)?;
+            attachment_map(root, previous)?;
         }
         let order: Vec<_> = paths
             .iter()
@@ -614,7 +699,7 @@ pub(super) fn materialize(request: ViewRequest<'_>) -> Result<Value> {
                         continue;
                     }
                     let value: Value = read(&segments::object_metadata(root, &item.object)?)?;
-                    reused += usize::from(value.get("index").is_some());
+                    reused += usize::from(value.get("index_sha256").is_some());
                     let entries = segments::index(root, &item.object, &value)?;
                     airlock_nix_core::artifact::fragment::append_index(
                         &mut archive,
@@ -801,12 +886,113 @@ pub(super) fn materialize(request: ViewRequest<'_>) -> Result<Value> {
         "preparation": preparation,
     });
     output["integrity"] = integrity(&output)?;
+    verify(root, &output)?;
+    certify_map(&blob_path, &map)?;
     Ok(output)
 }
 
 #[cfg(test)]
 mod image_index_tests {
     use super::*;
+
+    /// Build one admitted immutable view without kernel devices or external tools.
+    fn admitted_view(root: &Path) -> Result<(Value, Value)> {
+        ensure_pool(root)?;
+        let backing = segments::blob(root, "000001")?;
+        fs::write(&backing, vec![0u8; 1024])?;
+        let directory = root.join("views/by-closure/example");
+        fs::create_dir_all(&directory)?;
+        let metadata = directory.join("store.erofs");
+        fs::write(&metadata, "immutable filesystem metadata")?;
+        let path = directory.join("store.blob-map.json");
+        let map = json!({"logical_size":512,"extents":[{
+            "logical_offset":0,"segment_id":"000001","segment_blob":backing,
+            "segment_offset":0,"length":512,"object":"package","object_sha256":"a".repeat(64)
+        }]});
+        write(&path, &map, 0o644)?;
+        write(
+            &segments::object_metadata(root, "package")?,
+            &json!({
+                "segment_id":"000001","segment_offset":0,"size":512,"sha256":"a".repeat(64)
+            }),
+            0o644,
+        )?;
+        let mut store = json!({"canonical_metadata_image":metadata,"canonical_blob_map":path});
+        store["integrity"] = integrity(&store)?;
+        verify(root, &store)?;
+        certify_map(&path, &map)?;
+        Ok((store, map))
+    }
+
+    /// Boot reuses admission without opening package records, but rejects changed
+    /// placement, missing/truncated backing, redirected paths and damaged metadata.
+    #[test]
+    fn retained_attachment_reuses_admission_and_checks_current_storage() -> Result<()> {
+        let fixture = tempfile::tempdir()?;
+        let root = fixture.path();
+        let (store, map) = admitted_view(root)?;
+        let path = PathBuf::from(text(&store, "canonical_blob_map")?);
+        fs::write(
+            segments::object_metadata(root, "package")?,
+            "not parsed at startup",
+        )?;
+        assert!(verify(root, &store).is_err());
+        assert_eq!(attachment_map(root, &store)?, map);
+
+        let mut changed = map.clone();
+        changed["extents"][0]["segment_offset"] = json!(512);
+        write(&path, &changed, 0o644)?;
+        assert!(attachment_map(root, &store).is_err());
+        write(&path, &map, 0o644)?;
+        assert!(attachment_map(root, &store).is_ok());
+
+        let blob = segments::blob(root, "000001")?;
+        fs::write(&blob, vec![0u8; 256])?;
+        assert!(attachment_map(root, &store).is_err());
+        fs::remove_file(&blob)?;
+        assert!(attachment_map(root, &store).is_err());
+        let outside = fixture.path().join("outside");
+        fs::write(&outside, vec![0u8; 1024])?;
+        symlink(&outside, &blob)?;
+        assert!(attachment_map(root, &store).is_err());
+        fs::remove_file(&blob)?;
+        fs::write(&blob, vec![0u8; 1024])?;
+        fs::write(text(&store, "canonical_metadata_image")?, "damaged")?;
+        assert!(attachment_map(root, &store).is_err());
+        Ok(())
+    }
+
+    /// A map changed by maintenance cannot use stale evidence. Only a checked
+    /// replacement publication restores startup, independently of the pool mountpoint.
+    #[test]
+    fn admission_binds_placement_and_survives_pool_relocation() -> Result<()> {
+        let fixture = tempfile::tempdir()?;
+        let root = fixture.path().join("pool");
+        let (store, mut map) = admitted_view(&root)?;
+        let path = PathBuf::from(text(&store, "canonical_blob_map")?);
+        fs::remove_file(admission_path(&path))?;
+        assert!(attachment_map(&root, &store).is_err());
+        map["extents"][0]["segment_offset"] = json!(512);
+        write(&path, &map, 0o644)?;
+        certify_map(&path, &map)?;
+        assert!(attachment_map(&root, &store).is_ok());
+
+        let relocated = fixture.path().join("relocated");
+        fs::rename(&root, &relocated)?;
+        super::super::prepared::relocate_pool(
+            &relocated,
+            &root.to_string_lossy(),
+            &relocated.to_string_lossy(),
+        )?;
+        let mut store = store;
+        super::super::prepared::relocate(
+            &mut store,
+            &root.to_string_lossy(),
+            &relocated.to_string_lossy(),
+        );
+        assert!(attachment_map(&relocated, &store).is_ok());
+        Ok(())
+    }
 
     /// Common indexes remain content-bound, reject corruption and cannot escape their preparation scope.
     #[test]

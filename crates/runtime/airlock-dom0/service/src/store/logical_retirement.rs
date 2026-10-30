@@ -1,7 +1,7 @@
 //! Logical cleanup derives every deletion permission from the original immutable protection trace.
 //! Callers retain admission exclusion through discovery, request construction and filesystem execution.
 
-use super::{fs::*, mounts};
+use super::{fs::*, mounts, segments};
 use airlock_deployment_core::retention::{
     logical::{DeleteRequest, ResourceIndex, Target},
     tracing::Trace,
@@ -59,6 +59,16 @@ fn preflight(root: &Path, target: &Target) -> Result<PathBuf> {
         Err(error) if error.kind() == ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
+    if let Target::FragmentMetadata(name) = target {
+        let index = segments::file_index(root, name)?;
+        if index.try_exists()? {
+            ensure!(
+                fs::symlink_metadata(&index)?.is_file(),
+                "file index is not a regular file"
+            );
+            mounts::ensure_unmounted(&fs::canonicalize(&index)?)?;
+        }
+    }
     Ok(path)
 }
 
@@ -73,12 +83,13 @@ pub(super) fn prepare<'a>(root: &Path, trace: &'a Trace) -> Result<Vec<DeleteReq
     for directory in [
         "objects/metadata",
         "objects/blob-metadata",
+        "objects/file-indexes",
         "views/by-closure",
         "root-artifacts",
     ] {
         for candidate in children(&root.join(directory))? {
             let target = match directory {
-                "objects/metadata" | "objects/blob-metadata" => {
+                "objects/metadata" | "objects/blob-metadata" | "objects/file-indexes" => {
                     if candidate.extension().is_none_or(|ext| ext != "json") {
                         continue;
                     }
@@ -87,6 +98,11 @@ pub(super) fn prepare<'a>(root: &Path, trace: &'a Trace) -> Result<Vec<DeleteReq
                         .and_then(|n| n.to_str())
                         .context("invalid metadata identity")?
                         .to_owned();
+                    if directory == "objects/file-indexes"
+                        && segments::object_metadata(root, &name)?.try_exists()?
+                    {
+                        continue;
+                    }
                     if directory == "objects/metadata" {
                         Target::ObjectMetadata(name)
                     } else {
@@ -109,7 +125,11 @@ pub(super) fn prepare<'a>(root: &Path, trace: &'a Trace) -> Result<Vec<DeleteReq
                 _ => unreachable!("fixed logical cleanup namespace"),
             };
             ensure!(
-                path(root, &target)? == candidate,
+                if directory == "objects/file-indexes" {
+                    matches!(&target, Target::FragmentMetadata(name) if segments::file_index(root, name).is_ok_and(|path| path == candidate))
+                } else {
+                    path(root, &target)? == candidate
+                },
                 "logical cleanup identity mismatch"
             );
             if let Some(request) = index.reclaim(target) {
@@ -126,6 +146,15 @@ pub(super) fn execute(request: DeleteRequest<'_>) -> Result<()> {
     let root = Path::new(request.pool());
     let path = preflight(root, request.target())?;
     failpoint("gc-before-logical-delete")?;
+    if let Target::FragmentMetadata(name) = request.target() {
+        // The file-header cache has the same lifetime and protection as its
+        // admitted fragment. Remove it first so interrupted cleanup is retryable.
+        let index = segments::file_index(root, name)?;
+        remove(&index)?;
+        if let Some(parent) = index.parent().filter(|parent| parent.exists()) {
+            sync_dir(parent)?;
+        }
+    }
     match request.target() {
         Target::ObjectMetadata(_) | Target::FragmentMetadata(_) => match fs::remove_file(&path) {
             Ok(()) => {}
@@ -153,6 +182,7 @@ mod tests {
         for directory in [
             "objects/metadata",
             "objects/blob-metadata",
+            "objects/file-indexes",
             "views/by-closure",
             "root-artifacts",
         ] {
@@ -172,6 +202,8 @@ mod tests {
                 fs::write(root.join(directory).join("same.json"), b"original")?;
                 fs::write(root.join(directory).join("sibling.json"), b"sibling")?;
             }
+            fs::write(segments::file_index(root, "same")?, b"build headers")?;
+            fs::write(segments::file_index(root, "sibling")?, b"retained headers")?;
             fs::create_dir(root.join("views/by-closure/same"))?;
             fs::create_dir(root.join("root-artifacts/same"))?;
         }
@@ -211,6 +243,19 @@ mod tests {
             )?;
             execute(index.reclaim(Target::Root("same".into())).unwrap())?;
         }
+        assert!(!segments::file_index(&root, "same")?.exists());
+        assert_eq!(
+            fs::read(segments::file_index(&root, "sibling")?)?,
+            b"retained headers"
+        );
+        // Interrupted admission can leave headers without their fragment record.
+        let orphan = segments::file_index(&root, "orphan")?;
+        fs::write(&orphan, b"unpublished headers")?;
+        let request = prepare(&root, &trace)?.into_iter().find(|request| {
+            matches!(request.target(), Target::FragmentMetadata(name) if name == "orphan")
+        }).expect("orphan cache shares fragment cleanup authority");
+        execute(request)?;
+        assert!(!orphan.exists());
         assert!(other.join("views/by-closure/same").is_dir());
         assert!(other.join("root-artifacts/same").is_dir());
         assert_eq!(
@@ -241,6 +286,22 @@ mod tests {
         fs::write(metadata.join("keep"), b"preserve")?;
         assert!(execute(request).is_err());
         assert_eq!(fs::read(metadata.join("keep"))?, b"preserve");
+
+        let fragment = segments::object_metadata(&root, "redirected")?;
+        fs::write(&fragment, b"preserve fragment")?;
+        symlink(
+            outside.join("keep"),
+            segments::file_index(&root, "redirected")?,
+        )?;
+        assert!(
+            execute(
+                index
+                    .reclaim(Target::FragmentMetadata("redirected".into()))
+                    .unwrap()
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read(&fragment)?, b"preserve fragment");
 
         symlink(&outside, root.join("root-artifacts/redirected"))?;
         assert!(execute(index.reclaim(Target::Root("redirected".into())).unwrap()).is_err());

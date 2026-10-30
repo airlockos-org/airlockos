@@ -1000,10 +1000,11 @@ fn packaged_erofs_indexes_preserve_predecessors_and_reject_corruption() -> Resul
     // are still valid and a previous generation can still read them.
     let cached = store
         .pool
-        .join("objects/blob-metadata")
+        .join("objects/file-indexes")
         .join(format!("{shared}.json"));
     let mut metadata = read(&cached)?;
-    metadata["index"][0]["offset"] = json!(0);
+    metadata[0]["offset"] = json!(0);
+    fs::set_permissions(&cached, fs::Permissions::from_mode(0o600))?;
     fs::write(&cached, serde_json::to_vec(&metadata)?)?;
     let extra = format!("{hash}-extra", hash = "d".repeat(32));
     fs::write(store.physical.join(&extra), "extra")?;

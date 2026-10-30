@@ -410,7 +410,7 @@ fn reuse(root: &Path, probe: &Value, domain: &str, approved_by: &str) -> Result<
         {
             continue;
         }
-        views::verify(root, &manifest["store"])?;
+        views::attachment_map(root, &manifest["store"])?;
         let paths: Vec<String> = serde_json::from_value(manifest["store"]["paths"].clone())?;
         for path in &paths {
             ensure!(

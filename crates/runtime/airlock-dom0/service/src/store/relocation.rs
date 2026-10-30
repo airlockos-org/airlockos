@@ -323,6 +323,7 @@ pub(super) fn refresh_maps(root: &Path) -> Result<Vec<PathBuf>> {
         let mut items = views::extents(&map)?;
         let mut segments = BTreeMap::new();
         let mut changed = false;
+        let mut verified = true;
         for item in &mut items {
             let meta = segments::object_metadata(root, &item.object)?;
             if meta.try_exists()? {
@@ -352,6 +353,8 @@ pub(super) fn refresh_maps(root: &Path) -> Result<Vec<PathBuf>> {
                 changed |= (item.segment_id.as_str(), item.segment_offset)
                     != (replacement.segment_id.as_str(), replacement.segment_offset);
                 *item = replacement;
+            } else {
+                verified = false;
             }
             // Unresolved entries keep their original placement and remain in the segment summary.
             let blob = segments::blob(root, &item.segment_id)?;
@@ -367,7 +370,12 @@ pub(super) fn refresh_maps(root: &Path) -> Result<Vec<PathBuf>> {
             map["extents"] = serde_json::to_value(items)?;
             map["refreshed_at"] = json!(now());
             write(&path, &map, 0o444)?;
-            refreshed.push(path);
+            refreshed.push(path.clone());
+        }
+        // Every replacement row above passed the relocation identity gate.
+        // Reissue even after an interrupted publication whose map is already current.
+        if verified {
+            views::certify_map(&path, &map)?;
         }
     }
     Ok(refreshed)

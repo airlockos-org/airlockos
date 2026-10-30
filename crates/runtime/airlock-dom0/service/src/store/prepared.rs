@@ -228,6 +228,13 @@ pub(super) fn prepare_pool(
                     .to_owned(),
             );
         }
+        files.insert(
+            super::views::admission_path(Path::new(&text(store, "canonical_blob_map")?))
+                .strip_prefix(runtime)?
+                .to_str()
+                .context("invalid admission path")?
+                .to_owned(),
+        );
         if !manifest["builder"].is_null() {
             files.insert(
                 Path::new(&text(&manifest["builder"], "metadata_image")?)
@@ -263,6 +270,9 @@ pub(super) fn prepare_pool(
         {
             component(name)?;
             files.insert(format!("objects/blob-metadata/{name}.json"));
+            if super::segments::file_index(root, name)?.exists() {
+                files.insert(format!("objects/file-indexes/{name}.json"));
+            }
             if name != ".tar-eof" {
                 files.insert(format!("objects/metadata/{name}.json"));
             }

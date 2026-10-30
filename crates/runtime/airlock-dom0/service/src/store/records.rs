@@ -221,10 +221,10 @@ pub(super) fn running(
     }
     let manifest = generation(root, domain, selected)?;
     let store = &manifest["store"];
-    views::verify(root, store)?;
+    let checked_map = views::attachment_map(root, store)?;
     let map = text(store, "canonical_blob_map")?;
     let references = views::references(
-        &read(Path::new(&map))?,
+        &checked_map,
         &format!("running:{domain}:{selected}:{volume}"),
     )?;
     let manifest_path = manifest_path(root, domain, selected)?;

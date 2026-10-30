@@ -65,6 +65,15 @@ pub(super) fn object_metadata(root: &Path, entry: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Build-only file headers live apart from the small admitted extent identity.
+pub(super) fn file_index(root: &Path, entry: &str) -> Result<PathBuf> {
+    let path = root
+        .join("objects/file-indexes")
+        .join(format!("{entry}.json", entry = component(entry)?));
+    pool_path(root, &path)?;
+    Ok(path)
+}
+
 pub(super) fn ids(root: &Path) -> Result<Vec<String>> {
     let mut ids = std::collections::BTreeSet::new();
     for path in children(&root.join("objects/segments"))? {
@@ -507,11 +516,7 @@ pub(super) fn publish_received(
             transaction,
             &fragment.identity.index,
         )?;
-        let mut location = value;
-        location
-            .as_object_mut()
-            .context("invalid fragment identity")?
-            .remove("index");
+        let location = value;
         let object = json!({"schema":"airlock.closure-store.object.v2", "path":fragment.logical,
             "entry":entry(fragment.logical)?, "tree_hash":fragment.identity.tree_hash,
             "tar_fragment":location, "tree_materialized":false, "admitted_at":now()});
@@ -563,13 +568,14 @@ fn publish_fragment(
         "schema":"airlock.closure-store.object-tar-fragment.v1", "path":logical,
         "entry":entry(logical)?, "tree_hash":tree_hash, "format":"posix-tar-fragment-v1",
         "admitted_at":now(), "transaction":transaction, "locations":[location_json],
-        "index":index, "index_sha256":hex(&Sha256::digest(&index_bytes)),
+        "index_sha256":hex(&Sha256::digest(&index_bytes)),
     })
     .as_object()
     .context("invalid fragment fields")?
     {
         value[key] = field.clone();
     }
+    write(&file_index(root, entry(logical)?)?, &index, 0o444)?;
     write(&object_metadata(root, entry(logical)?)?, &value, 0o644)?;
     failpoint("object-after-metadata")?;
     Ok(value)
@@ -582,9 +588,9 @@ pub(super) fn index(
     name: &str,
     value: &Value,
 ) -> Result<Vec<airlock_nix_core::artifact::fragment::IndexEntry>> {
-    if let Some(index) = value.get("index") {
+    if value.get("index_sha256").is_some() {
         let index: Vec<airlock_nix_core::artifact::fragment::IndexEntry> =
-            serde_json::from_value(index.clone())?;
+            read(&file_index(root, name)?)?;
         ensure!(
             value["index_sha256"] == hex(&Sha256::digest(serde_json::to_vec(&index)?)),
             "cached file index checksum mismatch"
@@ -598,7 +604,7 @@ pub(super) fn index(
         extent.size,
     )?;
     let mut value = value.clone();
-    value["index"] = serde_json::to_value(&index)?;
+    write(&file_index(root, name)?, &index, 0o444)?;
     value["index_sha256"] = json!(hex(&Sha256::digest(serde_json::to_vec(&index)?)));
     write(&object_metadata(root, name)?, &value, 0o644)?;
     Ok(index)
@@ -664,11 +670,7 @@ pub(super) fn admit_fragment(
         "object tree identity mismatch"
     );
 
-    let mut location = value.clone();
-    location
-        .as_object_mut()
-        .context("invalid fragment identity")?
-        .remove("index");
+    let location = value.clone();
     let object = json!({
         "schema": "airlock.closure-store.object.v2",
         "path": logical,

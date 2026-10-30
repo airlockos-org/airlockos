@@ -601,7 +601,7 @@ pub(super) fn find(
         });
     };
     records::root_image(root, &manifest)?;
-    views::verify(root, &manifest["store"])?;
+    views::attachment_map(root, &manifest["store"])?;
     Ok(GenerationMatch {
         schema: GenerationMatchSchema::V1,
         domain: namespace,

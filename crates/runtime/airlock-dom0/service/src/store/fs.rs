@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    io::{BufReader, Read, Write},
     os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::Command,
@@ -20,8 +20,10 @@ pub(super) const ALIGNMENT: u64 = 4096;
 pub(super) const SEGMENT_TARGET: u64 = 2 * 1024 * 1024 * 1024;
 
 pub(super) fn read<T: DeserializeOwned>(path: &Path) -> Result<T> {
-    serde_json::from_reader(File::open(path).with_context(|| format!("open {}", path.display()))?)
-        .with_context(|| format!("read {}", path.display()))
+    serde_json::from_reader(BufReader::new(
+        File::open(path).with_context(|| format!("open {}", path.display()))?,
+    ))
+    .with_context(|| format!("read {}", path.display()))
 }
 
 pub(super) fn sync_dir(path: &Path) -> Result<()> {
@@ -369,6 +371,7 @@ pub(super) fn ensure_pool(root: &Path) -> Result<()> {
         "MANIFEST.json",
         "objects/metadata",
         "objects/blob-metadata",
+        "objects/file-indexes",
         "objects/segments",
         "domains",
         "views/by-closure",
@@ -414,6 +417,7 @@ pub(super) fn ensure_pool(root: &Path) -> Result<()> {
     for part in [
         "objects/metadata",
         "objects/blob-metadata",
+        "objects/file-indexes",
         "objects/segments",
         "domains",
         "views/by-closure",
