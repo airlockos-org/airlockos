@@ -31,16 +31,15 @@ fn maximum_connection_framing_payload_and_exhaustion_recover() {
         connections.push(incoming);
         responses.push(shared::frames(Kind::Response, 1, &packet).unwrap());
     }
-    let caller = Participant {
-        principal: 1,
-        epoch: 1,
-    };
-    let mut clipboard = Clipboard::new(RAM_LIMIT);
-    let generation = clipboard.reserve(1, caller).unwrap();
+    let (mut clipboard, provisioner) = Clipboard::new(RAM_LIMIT);
+    let caller = clipboard
+        .admit(&provisioner, Participant::from_binding(1, 1).unwrap())
+        .unwrap();
+    let generation = clipboard.reserve(1, &caller).unwrap();
     clipboard
         .declare(
             1,
-            caller,
+            &caller,
             generation,
             (0..MAX_FORMATS)
                 .map(|index| Format {
@@ -57,12 +56,12 @@ fn maximum_connection_framing_payload_and_exhaustion_recover() {
     for format in 0..MAX_FORMATS {
         for offset in (0..RAM_LIMIT / MAX_FORMATS).step_by(chunk.len()) {
             clipboard
-                .write(2, caller, generation, format, offset, &chunk)
+                .write(2, &caller, generation, format, offset, &chunk)
                 .unwrap();
         }
     }
-    clipboard.complete(2, caller, generation).unwrap();
-    let reply = shared::execute(&mut clipboard, 2, caller, shared::Request::Offer);
+    clipboard.complete(2, &caller, generation).unwrap();
+    let reply = shared::execute(&mut clipboard, 2, &caller, shared::Request::Offer);
     let encoded = reply.encode();
     let output = shared::frames(Kind::Response, 2, &encoded).unwrap();
     assert!(!output.is_empty());
@@ -91,20 +90,20 @@ fn maximum_connection_framing_payload_and_exhaustion_recover() {
     assert!(exhausted);
     assert!(Incoming::default().push(&frames[0]).is_err());
     assert!(shared::Reply::Error(Error::Capacity).try_encode().is_err());
-    assert!(matches!(clipboard.offer(caller), Err(Error::Capacity)));
+    assert!(matches!(clipboard.offer(&caller), Err(Error::Capacity)));
     drop(pressure);
-    assert!(clipboard.offer(caller).is_ok());
-    clipboard.reserve(2, caller).unwrap();
+    assert!(clipboard.offer(&caller).is_ok());
+    clipboard.reserve(2, &caller).unwrap();
     drop(connections);
     drop(responses);
     assert!(HEAP.usage().0 < live - RAM_LIMIT);
 
     // Previously pressured storage can again reserve its maximum bounded RAM offer.
-    let generation = clipboard.reserve(3, caller).unwrap();
+    let generation = clipboard.reserve(3, &caller).unwrap();
     clipboard
         .declare(
             3,
-            caller,
+            &caller,
             generation,
             vec![Format {
                 name: "text/plain".into(),
@@ -112,6 +111,6 @@ fn maximum_connection_framing_payload_and_exhaustion_recover() {
             }],
         )
         .unwrap();
-    clipboard.reserve(4, caller).unwrap();
+    clipboard.reserve(4, &caller).unwrap();
     println!("APP_HEAP_STRESS cap={APP_HEAP_BYTES} live={live} peak={peak}");
 }

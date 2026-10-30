@@ -23,14 +23,8 @@ pub const DEFAULT_CAPACITY: usize = 64 * 1024 * 1024;
 /// Deadline for completing an in-flight replacement, in monotonic nanoseconds.
 pub const WRITE_TIMEOUT: u64 = 120_000_000_000;
 
-/// Participant identity assigned by the trusted connection provisioner.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Participant {
-    /// Stable identity within the admitted machine's clipboard membership.
-    pub principal: u64,
-    /// Fresh authenticated connection lifetime; never reused after disconnect.
-    pub epoch: u64,
-}
+use crate::authority::Admissions;
+pub use crate::authority::{Caller, Participant, Provisioner};
 
 /// Failure categories carry no clipboard payload or format contents.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,8 +85,30 @@ struct Content {
     source: Participant,
     /// Representation buffers bounded by the service's total capacity.
     formats: Vec<Representation>,
-    /// Fixed incomplete-write deadline; absent after explicit completion.
-    deadline: Option<u64>,
+}
+
+/// Mutually exclusive lifecycle stages; partial content cannot be a published offer.
+enum State {
+    /// No private extent or readable content remains.
+    Empty,
+    /// A replacement owns ordering but has not declared any representations.
+    Reserved {
+        /// Latest issued replacement identity, retained across failures.
+        generation: u64,
+        /// Exact admitted incarnation allowed to declare this reservation.
+        source: Participant,
+        /// Fixed monotonic completion deadline, including format conversion time.
+        deadline: u64,
+    },
+    /// Declared representations are being filled into their single private extent.
+    Receiving {
+        /// Exact metadata and contiguous progress for this unfinished offer.
+        content: Content,
+        /// Original reservation deadline, never extended by incoming chunks.
+        deadline: u64,
+    },
+    /// Every byte arrived and flush completed before the transfer deadline.
+    Published(Content),
 }
 
 /// One shared clipboard with exactly one private storage extent.
@@ -102,36 +118,40 @@ struct Content {
 pub struct Clipboard<S = Spool<NoDisk>> {
     /// Exclusive storage shared by pending and published state, never both.
     storage: S,
+    /// Object-bound, revocable authority independent of descriptive identity.
+    admissions: Admissions,
     /// Maximum combined length of the representations in an offer.
     capacity: usize,
     /// Latest issued identity; preserved even when a replacement fails.
     generation: u64,
-    /// Complete data eligible for repeated reads.
-    published: Option<Content>,
-    /// Replacement being filled; never exposed to readers.
-    pending: Option<Content>,
+    /// Exclusive lifecycle stage; callers cannot mutate related fields independently.
+    state: State,
     /// Last monotonic observation; regressions invalidate unfinished transfers.
     last_time: u64,
 }
 
 impl Clipboard {
     /// Create a diskless clipboard, retaining at most `RAM_LIMIT` payload bytes.
-    pub fn new(capacity: usize) -> Self {
+    pub fn new(capacity: usize) -> (Self, Provisioner) {
         Self::with_storage(capacity, Spool::new(NoDisk, RAM_LIMIT))
     }
 }
 
 impl<S: Storage> Clipboard<S> {
     /// Create a clipboard with explicit policy capacity and private storage.
-    pub fn with_storage(capacity: usize, storage: S) -> Self {
-        Self {
-            storage,
-            capacity,
-            generation: 0,
-            published: None,
-            pending: None,
-            last_time: 0,
-        }
+    pub fn with_storage(capacity: usize, storage: S) -> (Self, Provisioner) {
+        let (admissions, provisioner) = Admissions::new();
+        (
+            Self {
+                admissions,
+                storage,
+                capacity,
+                generation: 0,
+                state: State::Empty,
+                last_time: 0,
+            },
+            provisioner,
+        )
     }
 
     /// Inspect storage metadata without granting mutation of private bytes.
@@ -141,14 +161,25 @@ impl<S: Storage> Clipboard<S> {
 
     /// Invalidate unfinished bytes on every terminal transfer path.
     fn abort(&mut self) {
-        self.pending = None;
+        self.state = State::Empty;
         self.storage.clear();
     }
 
-    /// Check normal-mode membership at the single shared read/write policy boundary.
-    /// The connection adapter must have authenticated both nonzero identity fields.
-    fn access(&self, caller: Participant) -> Result<(), Error> {
-        if caller.principal == 0 || caller.epoch == 0 {
+    /// Admit GUI-authenticated identity metadata using this clipboard's sole provisioner.
+    /// A fresh incarnation is mandatory; metadata from a request cannot authorize access.
+    pub fn admit(
+        &mut self,
+        provisioner: &Provisioner,
+        identity: Participant,
+    ) -> Result<Caller, Error> {
+        self.admissions
+            .admit(provisioner, identity)
+            .ok_or(Error::Unauthorized)
+    }
+
+    /// Revalidate object ownership and live membership at each policy operation.
+    fn access(&self, caller: &Caller) -> Result<(), Error> {
+        if !self.admissions.allows(caller) {
             return Err(Error::Unauthorized);
         }
         Ok(())
@@ -156,16 +187,14 @@ impl<S: Storage> Clipboard<S> {
 
     /// Forget an expired unfinished write; published content never expires.
     pub fn tick(&mut self, now: u64) {
-        if now < self.last_time
-            || self
-                .pending
-                .as_ref()
-                .is_some_and(|p| p.deadline.is_some_and(|d| now >= d))
-        {
-            // A backwards clock invalidates only unfinished data, not a published offer.
-            if self.pending.is_some() {
-                self.abort();
+        let expired = match &self.state {
+            State::Reserved { deadline, .. } | State::Receiving { deadline, .. } => {
+                now < self.last_time || now >= *deadline
             }
+            State::Empty | State::Published(_) => false,
+        };
+        if expired {
+            self.abort();
         }
         self.last_time = now;
     }
@@ -173,12 +202,7 @@ impl<S: Storage> Clipboard<S> {
     /// Begin replacing the clipboard, invalidating every older offer immediately.
     /// An empty format list clears shared availability, including when a source
     /// copies local files that must remain usable only inside its own VM.
-    pub fn begin(
-        &mut self,
-        now: u64,
-        caller: Participant,
-        formats: Vec<Format>,
-    ) -> Result<u64, Error> {
+    pub fn begin(&mut self, now: u64, caller: &Caller, formats: Vec<Format>) -> Result<u64, Error> {
         self.access(caller)?;
         self.tick(now);
         validate_formats(&formats, self.capacity)?;
@@ -189,20 +213,18 @@ impl<S: Storage> Clipboard<S> {
 
     /// Reserve replacement order as soon as the local clipboard owner changes.
     /// Slow format conversion cannot later replace a newer copy from another VM.
-    pub fn reserve(&mut self, now: u64, caller: Participant) -> Result<u64, Error> {
+    pub fn reserve(&mut self, now: u64, caller: &Caller) -> Result<u64, Error> {
         self.access(caller)?;
         self.tick(now);
         let generation = self.generation.checked_add(1).ok_or(Error::Bounds)?;
         let deadline = now.checked_add(WRITE_TIMEOUT).ok_or(Error::Bounds)?;
         self.generation = generation;
-        self.published = None;
         self.abort();
-        self.pending = Some(Content {
+        self.state = State::Reserved {
             generation,
-            source: caller,
-            formats: Vec::new(),
-            deadline: Some(deadline),
-        });
+            source: caller.identity(),
+            deadline,
+        };
         Ok(generation)
     }
 
@@ -211,22 +233,22 @@ impl<S: Storage> Clipboard<S> {
     pub fn declare(
         &mut self,
         now: u64,
-        caller: Participant,
+        caller: &Caller,
         generation: u64,
         formats: Vec<Format>,
     ) -> Result<(), Error> {
         self.access(caller)?;
         self.tick(now);
         validate_formats(&formats, self.capacity)?;
-        let pending = self.pending.as_ref().ok_or(Error::Stale)?;
-        if pending.source != caller
-            || pending.generation != generation
-            || !pending.formats.is_empty()
-        {
-            return Err(Error::Stale);
-        }
-        let deadline = pending.deadline;
-        self.pending = None;
+        let deadline = match &self.state {
+            State::Reserved {
+                generation: reserved,
+                source,
+                deadline,
+            } if *reserved == generation && *source == caller.identity() => *deadline,
+            _ => return Err(Error::Stale),
+        };
+        self.abort();
         if formats.is_empty() {
             return Ok(());
         }
@@ -246,12 +268,14 @@ impl<S: Storage> Clipboard<S> {
             });
             offset = next;
         }
-        self.pending = Some(Content {
-            generation,
-            source: caller,
-            formats: representations,
+        self.state = State::Receiving {
+            content: Content {
+                generation,
+                source: caller.identity(),
+                formats: representations,
+            },
             deadline,
-        });
+        };
         Ok(())
     }
 
@@ -259,7 +283,7 @@ impl<S: Storage> Clipboard<S> {
     pub fn write(
         &mut self,
         now: u64,
-        caller: Participant,
+        caller: &Caller,
         generation: u64,
         format: usize,
         offset: usize,
@@ -267,8 +291,11 @@ impl<S: Storage> Clipboard<S> {
     ) -> Result<(), Error> {
         self.access(caller)?;
         self.tick(now);
-        let content = self.pending.as_mut().ok_or(Error::Stale)?;
-        if content.generation != generation || content.source != caller {
+        let content = match &mut self.state {
+            State::Receiving { content, .. } => content,
+            _ => return Err(Error::Stale),
+        };
+        if content.generation != generation || content.source != caller.identity() {
             return Err(Error::Stale);
         }
         let representation = content.formats.get_mut(format).ok_or(Error::Bounds)?;
@@ -287,12 +314,7 @@ impl<S: Storage> Clipboard<S> {
     }
 
     /// Publish all representations together after every promised byte arrived.
-    pub fn complete(
-        &mut self,
-        now: u64,
-        caller: Participant,
-        generation: u64,
-    ) -> Result<(), Error> {
+    pub fn complete(&mut self, now: u64, caller: &Caller, generation: u64) -> Result<(), Error> {
         self.complete_with_clock(now, caller, generation, || now)
     }
 
@@ -301,14 +323,25 @@ impl<S: Storage> Clipboard<S> {
     pub fn complete_with_clock(
         &mut self,
         now: u64,
-        caller: Participant,
+        caller: &Caller,
         generation: u64,
         finished_at: impl FnOnce() -> u64,
     ) -> Result<(), Error> {
         self.access(caller)?;
         self.tick(now);
-        let content = self.pending.as_ref().ok_or(Error::Stale)?;
-        if content.generation != generation || content.source != caller {
+        let content = match &self.state {
+            State::Receiving { content, .. } => content,
+            State::Reserved {
+                generation: reserved,
+                source,
+                ..
+            } if *reserved == generation && *source == caller.identity() => {
+                self.abort();
+                return Err(Error::Order);
+            }
+            _ => return Err(Error::Stale),
+        };
+        if content.generation != generation || content.source != caller.identity() {
             return Err(Error::Stale);
         }
         if content.formats.is_empty() || content.formats.iter().any(|r| r.written != r.format.size)
@@ -321,17 +354,19 @@ impl<S: Storage> Clipboard<S> {
             return Err(error);
         }
         self.tick(finished_at());
-        let mut content = self.pending.take().ok_or(Error::Timeout)?;
-        content.deadline = None;
-        self.published = Some(content);
+        let state = core::mem::replace(&mut self.state, State::Empty);
+        match state {
+            State::Receiving { content, .. } => self.state = State::Published(content),
+            _ => return Err(Error::Timeout),
+        }
         Ok(())
     }
 
     /// Return the latest issued generation and any completely published offer.
     /// The generation also changes on clear, allowing endpoints to discard stale data.
-    pub fn offer(&self, caller: Participant) -> Result<(u64, Option<Offer>), Error> {
+    pub fn offer(&self, caller: &Caller) -> Result<(u64, Option<Offer>), Error> {
         self.access(caller)?;
-        let offer = if let Some(content) = &self.published {
+        let offer = if let State::Published(content) = &self.state {
             let mut formats = Vec::new();
             formats
                 .try_reserve_exact(content.formats.len())
@@ -360,18 +395,17 @@ impl<S: Storage> Clipboard<S> {
     /// Read a bounded range from exactly the requested generation, without consuming it.
     pub fn read(
         &mut self,
-        caller: Participant,
+        caller: &Caller,
         generation: u64,
         format: usize,
         offset: usize,
         maximum: usize,
     ) -> Result<Vec<u8>, Error> {
         self.access(caller)?;
-        let content = self
-            .published
-            .as_ref()
-            .filter(|c| c.generation == generation)
-            .ok_or(Error::Stale)?;
+        let content = match &self.state {
+            State::Published(content) if content.generation == generation => content,
+            _ => return Err(Error::Stale),
+        };
         let representation = content.formats.get(format).ok_or(Error::Bounds)?;
         if offset > representation.format.size || maximum == 0 {
             return Err(Error::Bounds);
@@ -384,7 +418,7 @@ impl<S: Storage> Clipboard<S> {
             .map_err(|_| Error::Capacity)?;
         bytes.resize(count, 0);
         if let Err(error) = self.storage.read(start, &mut bytes) {
-            self.published = None;
+            self.state = State::Empty;
             self.storage.clear();
             // Exhaustion cannot wrap a stale generation back into validity.
             self.generation = self.generation.saturating_add(1);
@@ -393,9 +427,18 @@ impl<S: Storage> Clipboard<S> {
         Ok(bytes)
     }
 
-    /// Abort only this connection's unfinished write; completed copies remain readable.
-    pub fn disconnect(&mut self, caller: Participant) {
-        if self.pending.as_ref().is_some_and(|p| p.source == caller) {
+    /// Revoke this live connection and abort its unfinished write; completed copies remain readable.
+    pub fn disconnect(&mut self, caller: &Caller) {
+        if self.access(caller).is_err() {
+            return;
+        }
+        self.admissions.revoke(caller);
+        let owns_pending = match &self.state {
+            State::Reserved { source, .. } => *source == caller.identity(),
+            State::Receiving { content, .. } => content.source == caller.identity(),
+            _ => false,
+        };
+        if owns_pending {
             self.abort();
         }
     }

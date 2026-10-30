@@ -11,3 +11,6 @@ pub mod shared;
 
 /// Verified connection resource admission and cleanup accounting.
 pub mod resources;
+
+/// Object-bound authority and revocable clipboard caller capabilities.
+pub mod authority;

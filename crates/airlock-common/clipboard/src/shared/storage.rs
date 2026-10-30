@@ -1,6 +1,16 @@
 //! One private extent per offer, backed by bounded RAM or an ephemeral block disk.
 //! No on-disk metadata survives a service boot. The runtime must supply encrypted
 //! temporary storage with a fresh key on restart; this module provides no history.
+//!
+//! Publication is atomic within one single-threaded service lifetime: readers see
+//! either the complete flushed offer or no offer. Chunk writes are not commit
+//! points. Success acknowledges this volatile publication, not survival of process
+//! failure, guest restart, machine crash or power loss. All content may be lost in
+//! any of those events, including after a successful reply; recovery starts empty
+//! with a fresh Qubes encryption key and never replays old disk bytes. There is no
+//! persistent authoritative metadata requiring a file or multi-file transaction.
+//! A flush error can leave device bytes changed; poisoning and logical invalidation
+//! preserve that uncertainty without publishing or retrying the failed operation.
 
 use super::Error;
 use alloc::vec::Vec;

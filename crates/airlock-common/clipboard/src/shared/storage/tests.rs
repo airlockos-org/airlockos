@@ -4,7 +4,8 @@
 extern crate std;
 
 use super::*;
-use crate::shared::{Clipboard, Format, Participant, WRITE_TIMEOUT};
+use crate::shared::tests::fixture;
+use crate::shared::{Caller, Clipboard, Format, Participant, WRITE_TIMEOUT};
 use alloc::{rc::Rc, string::ToString, vec};
 use core::cell::Cell;
 use std::{
@@ -105,18 +106,6 @@ impl Drop for Disk {
     }
 }
 
-/// Authenticated source in the test connection lifetime.
-const SOURCE: Participant = Participant {
-    principal: 1,
-    epoch: 1,
-};
-
-/// A second admitted participant, independent of the source connection.
-const TARGET: Participant = Participant {
-    principal: 2,
-    epoch: 2,
-};
-
 /// Describe an exact representation without constructing its private contents.
 fn format(name: &str, size: usize) -> Format {
     Format {
@@ -128,6 +117,7 @@ fn format(name: &str, size: usize) -> Format {
 /// Stream deterministic chunks through the clipboard's ordinary write interface.
 fn fill(
     clipboard: &mut Clipboard<Spool<Disk>>,
+    caller: &Caller,
     generation: u64,
     format: usize,
     size: usize,
@@ -139,7 +129,7 @@ fn fill(
         clipboard
             .write(
                 now,
-                SOURCE,
+                caller,
                 generation,
                 format,
                 offset,
@@ -152,12 +142,12 @@ fn fill(
 #[test]
 fn aggregate_threshold_maximum_and_repeated_paste_use_bounded_ram() {
     let fault = Rc::new(Cell::new(Fault::None));
-    let mut clipboard = Clipboard::with_storage(
+    let (mut clipboard, _provisioner, source, target) = fixture(Clipboard::with_storage(
         crate::shared::DEFAULT_CAPACITY,
         Spool::new(Disk::new(crate::shared::DEFAULT_CAPACITY, fault), RAM_LIMIT),
-    );
+    ));
     let ram = clipboard
-        .begin(0, SOURCE, vec![format("text/plain", RAM_LIMIT)])
+        .begin(0, &source, vec![format("text/plain", RAM_LIMIT)])
         .unwrap();
     assert_eq!(
         clipboard.storage().usage(),
@@ -166,11 +156,11 @@ fn aggregate_threshold_maximum_and_repeated_paste_use_bounded_ram() {
             disk_bytes: 0
         }
     );
-    fill(&mut clipboard, ram, 0, RAM_LIMIT, 7);
-    clipboard.complete(2, SOURCE, ram).unwrap();
+    fill(&mut clipboard, &source, ram, 0, RAM_LIMIT, 7);
+    clipboard.complete(2, &source, ram).unwrap();
     assert_eq!(
         clipboard
-            .read(TARGET, ram, 0, RAM_LIMIT - 1, usize::MAX)
+            .read(&target, ram, 0, RAM_LIMIT - 1, usize::MAX)
             .unwrap(),
         vec![7]
     );
@@ -179,7 +169,7 @@ fn aggregate_threshold_maximum_and_repeated_paste_use_bounded_ram() {
     let disk = clipboard
         .begin(
             3,
-            SOURCE,
+            &source,
             vec![format("text/plain", RAM_LIMIT), format("image/png", 1)],
         )
         .unwrap();
@@ -190,22 +180,28 @@ fn aggregate_threshold_maximum_and_repeated_paste_use_bounded_ram() {
             disk_bytes: RAM_LIMIT + 1
         }
     );
-    fill(&mut clipboard, disk, 0, RAM_LIMIT, 8);
-    fill(&mut clipboard, disk, 1, 1, 9);
-    clipboard.complete(4, SOURCE, disk).unwrap();
-    assert_eq!(clipboard.read(TARGET, disk, 1, 0, CHUNK).unwrap(), vec![9]);
+    fill(&mut clipboard, &source, disk, 0, RAM_LIMIT, 8);
+    fill(&mut clipboard, &source, disk, 1, 1, 9);
+    clipboard.complete(4, &source, disk).unwrap();
+    assert_eq!(clipboard.read(&target, disk, 1, 0, CHUNK).unwrap(), vec![9]);
 
     let maximum = crate::shared::DEFAULT_CAPACITY;
     let full = clipboard
-        .begin(5, SOURCE, vec![format("application/octet-stream", maximum)])
+        .begin(
+            5,
+            &source,
+            vec![format("application/octet-stream", maximum)],
+        )
         .unwrap();
-    fill(&mut clipboard, full, 0, maximum, 42);
-    clipboard.complete(6, SOURCE, full).unwrap();
-    clipboard.disconnect(SOURCE);
+    fill(&mut clipboard, &source, full, 0, maximum, 42);
+    clipboard.complete(6, &source, full).unwrap();
+    clipboard.disconnect(&source);
     for _ in 0..2 {
         for offset in (0..maximum).step_by(CHUNK) {
             assert_eq!(
-                clipboard.read(TARGET, full, 0, offset, usize::MAX).unwrap(),
+                clipboard
+                    .read(&target, full, 0, offset, usize::MAX)
+                    .unwrap(),
                 [42; CHUNK]
             );
         }
@@ -218,71 +214,80 @@ fn aggregate_threshold_maximum_and_repeated_paste_use_bounded_ram() {
         }
     );
     assert_eq!(
-        clipboard.begin(7, SOURCE, vec![format("text/plain", maximum + 1)]),
+        clipboard.begin(7, &target, vec![format("text/plain", maximum + 1)]),
         Err(Error::Bounds)
     );
-    clipboard.begin(8, SOURCE, vec![]).unwrap();
+    clipboard.begin(8, &target, vec![]).unwrap();
     assert_eq!(clipboard.storage().usage(), Usage::default());
-    assert_eq!(clipboard.read(TARGET, full, 0, 0, 1), Err(Error::Stale));
+    assert_eq!(clipboard.read(&target, full, 0, 0, 1), Err(Error::Stale));
 }
 
 #[test]
 fn unaligned_interleaved_formats_and_all_terminal_paths_retire_the_extent() {
     let fault = Rc::new(Cell::new(Fault::None));
     let disk = Disk::new(4096, fault);
-    let mut clipboard = Clipboard::with_storage(4096, Spool::new(disk, 4));
+    let (mut clipboard, provisioner, mut source, target) =
+        fixture(Clipboard::with_storage(4096, Spool::new(disk, 4)));
     let generation = clipboard
         .begin(
             0,
-            SOURCE,
+            &source,
             vec![format("text/plain", 513), format("text/html", 513)],
         )
         .unwrap();
     // Both formats share a sector. Interleaved writes must preserve its other half.
-    fill(&mut clipboard, generation, 1, 513, 2);
-    fill(&mut clipboard, generation, 0, 513, 1);
-    clipboard.complete(2, SOURCE, generation).unwrap();
+    fill(&mut clipboard, &source, generation, 1, 513, 2);
+    fill(&mut clipboard, &source, generation, 0, 513, 1);
+    clipboard.complete(2, &source, generation).unwrap();
     assert_eq!(
-        clipboard.read(TARGET, generation, 0, 0, CHUNK).unwrap(),
+        clipboard.read(&target, generation, 0, 0, CHUNK).unwrap(),
         vec![1; 513]
     );
     assert_eq!(
-        clipboard.read(TARGET, generation, 1, 0, CHUNK).unwrap(),
+        clipboard.read(&target, generation, 1, 0, CHUNK).unwrap(),
         vec![2; 513]
     );
 
     for reason in 0..4 {
         let generation = clipboard
-            .begin(3, SOURCE, vec![format("text/plain", 1024)])
+            .begin(3, &source, vec![format("text/plain", 1024)])
             .unwrap();
         match reason {
-            0 => clipboard.disconnect(SOURCE),
+            0 => {
+                clipboard.disconnect(&source);
+                source = clipboard
+                    .admit(&provisioner, Participant::from_binding(1, 21).unwrap())
+                    .unwrap();
+            }
             1 => clipboard.tick(WRITE_TIMEOUT + 3),
             2 => assert_eq!(
-                clipboard.write(4, SOURCE, generation, 0, 1, b"a"),
+                clipboard.write(4, &source, generation, 0, 1, b"a"),
                 Err(Error::Order)
             ),
-            _ => assert_eq!(clipboard.complete(4, SOURCE, generation), Err(Error::Order)),
+            _ => assert_eq!(
+                clipboard.complete(4, &source, generation),
+                Err(Error::Order)
+            ),
         }
-        assert!(clipboard.offer(TARGET).unwrap().1.is_none());
+        assert!(clipboard.offer(&target).unwrap().1.is_none());
         assert_eq!(clipboard.storage().usage(), Usage::default());
     }
     let generation = clipboard
-        .begin(0, SOURCE, vec![format("text/plain", 8)])
+        .begin(0, &source, vec![format("text/plain", 8)])
         .unwrap();
-    fill(&mut clipboard, generation, 0, 8, 3);
+    fill(&mut clipboard, &source, generation, 0, 8, 3);
     assert_eq!(
-        clipboard.complete_with_clock(2, SOURCE, generation, || WRITE_TIMEOUT),
+        clipboard.complete_with_clock(2, &source, generation, || WRITE_TIMEOUT),
         Err(Error::Timeout)
     );
     assert_eq!(clipboard.storage().usage(), Usage::default());
-    let mut restarted = Clipboard::with_storage(
+    let (mut restarted, _provisioner, _source, target) = fixture(Clipboard::with_storage(
         4096,
         Spool::new(Disk::new(4096, Rc::new(Cell::new(Fault::None))), 4),
-    );
-    assert!(restarted.offer(TARGET).unwrap().1.is_none());
+    ));
+    assert!(restarted.offer(&target).unwrap().1.is_none());
     assert_eq!(
-        restarted.read(TARGET, generation, 0, 0, 1),
+        restarted.read(&target, generation, 0, 0, 1),
         Err(Error::Stale)
     );
 }
@@ -291,19 +296,21 @@ fn unaligned_interleaved_formats_and_all_terminal_paths_retire_the_extent() {
 fn storage_failures_invalidate_content_and_never_fall_back_to_large_ram() {
     for failure in [Fault::Write, Fault::Flush, Fault::Read] {
         let fault = Rc::new(Cell::new(Fault::None));
-        let mut clipboard =
-            Clipboard::with_storage(8192, Spool::new(Disk::new(4096, fault.clone()), 4));
+        let (mut clipboard, _provisioner, source, target) = fixture(Clipboard::with_storage(
+            8192,
+            Spool::new(Disk::new(4096, fault.clone()), 4),
+        ));
         assert_eq!(
-            clipboard.begin(0, SOURCE, vec![format("text/plain", 4097)]),
+            clipboard.begin(0, &source, vec![format("text/plain", 4097)]),
             Err(Error::Capacity)
         );
         let generation = clipboard
-            .begin(1, SOURCE, vec![format("text/plain", 1024)])
+            .begin(1, &source, vec![format("text/plain", 1024)])
             .unwrap();
         if failure == Fault::Write {
             fault.set(failure);
         }
-        let result = clipboard.write(2, SOURCE, generation, 0, 0, &[3; 1024]);
+        let result = clipboard.write(2, &source, generation, 0, 0, &[3; 1024]);
         if failure == Fault::Write {
             assert_eq!(result, Err(Error::Io));
         } else {
@@ -311,28 +318,28 @@ fn storage_failures_invalidate_content_and_never_fall_back_to_large_ram() {
             if failure == Fault::Flush {
                 fault.set(failure);
             }
-            let result = clipboard.complete(3, SOURCE, generation);
+            let result = clipboard.complete(3, &source, generation);
             if failure == Fault::Flush {
                 assert_eq!(result, Err(Error::Io));
             } else {
                 result.unwrap();
                 fault.set(failure);
                 assert_eq!(
-                    clipboard.read(TARGET, generation, 0, 0, 1024),
+                    clipboard.read(&target, generation, 0, 0, 1024),
                     Err(Error::Io)
                 );
-                assert!(clipboard.offer(TARGET).unwrap().0 > generation);
+                assert!(clipboard.offer(&target).unwrap().0 > generation);
             }
         }
-        assert!(clipboard.offer(TARGET).unwrap().1.is_none());
+        assert!(clipboard.offer(&target).unwrap().1.is_none());
         assert_eq!(clipboard.storage().usage(), Usage::default());
         assert_eq!(
-            clipboard.begin(4, SOURCE, vec![format("text/plain", 1024)]),
+            clipboard.begin(4, &source, vec![format("text/plain", 1024)]),
             Err(Error::Io)
         );
         // A poisoned disk cannot cause a payload-sized RAM fallback.
         clipboard
-            .begin(5, SOURCE, vec![format("text/plain", 4)])
+            .begin(5, &source, vec![format("text/plain", 4)])
             .unwrap();
         assert_eq!(clipboard.storage().usage().ram_bytes, 4);
     }

@@ -2,7 +2,7 @@
 //! Packets are bounded before allocation and fragmented across existing Xen frames.
 
 use airlock_clipboard_core::shared::{
-    Clipboard, Error, Format, MAX_FORMAT_NAME, MAX_FORMATS, Offer, Participant,
+    Caller, Clipboard, Error, Format, MAX_FORMAT_NAME, MAX_FORMATS, Offer, Participant,
 };
 use xen_transport::{Backend, Channel, Error as TransportError, Kind, MAX_PAYLOAD, Message};
 
@@ -100,7 +100,7 @@ pub enum Reply {
 pub fn execute<S: airlock_clipboard_core::shared::storage::Storage>(
     clipboard: &mut Clipboard<S>,
     now: u64,
-    caller: Participant,
+    caller: &Caller,
     request: Request,
 ) -> Reply {
     execute_with_clock(clipboard, now, caller, request, || now)
@@ -110,7 +110,7 @@ pub fn execute<S: airlock_clipboard_core::shared::storage::Storage>(
 pub fn execute_with_clock<S: airlock_clipboard_core::shared::storage::Storage>(
     clipboard: &mut Clipboard<S>,
     now: u64,
-    caller: Participant,
+    caller: &Caller,
     request: Request,
     finished_at: impl FnOnce() -> u64,
 ) -> Reply {
@@ -364,8 +364,8 @@ impl Reply {
                 number(&mut bytes, *generation);
                 bytes.push(u8::from(offer.is_some()));
                 if let Some(offer) = offer {
-                    number(&mut bytes, offer.source.principal);
-                    number(&mut bytes, offer.source.epoch);
+                    number(&mut bytes, offer.source.principal());
+                    number(&mut bytes, offer.source.epoch());
                     formats(&mut bytes, &offer.formats);
                 }
             }
@@ -414,10 +414,8 @@ impl Reply {
                     0 => None,
                     1 => Some(Offer {
                         generation,
-                        source: Participant {
-                            principal: reader.number()?,
-                            epoch: reader.number()?,
-                        },
+                        source: Participant::from_binding(reader.number()?, reader.number()?)
+                            .ok_or(TransportError::Malformed)?,
                         formats: reader.formats()?,
                     }),
                     _ => return Err(TransportError::Malformed),
@@ -573,16 +571,15 @@ mod tests {
 
     #[test]
     fn data_endpoint_cannot_provision_another_identity() {
-        let mut clipboard = Clipboard::new(1024);
-        let caller = Participant {
-            principal: 1,
-            epoch: 2,
-        };
+        let (mut clipboard, provisioner) = Clipboard::new(1024);
+        let caller = clipboard
+            .admit(&provisioner, Participant::from_binding(1, 2).unwrap())
+            .unwrap();
         assert!(matches!(
             execute(
                 &mut clipboard,
                 0,
-                caller,
+                &caller,
                 Request::Connect {
                     principal: 2,
                     domain: 3
