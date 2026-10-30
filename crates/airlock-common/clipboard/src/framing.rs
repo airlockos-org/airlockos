@@ -201,3 +201,134 @@ impl Default for Assembly {
         Self::new()
     }
 }
+
+verus! {
+
+/// One stack-owned frame payload; its private length cannot exceed the Xen limit.
+pub struct FramePayload {
+    /// Complete header and body; unused tail bytes are never exposed.
+    bytes: [u8; FRAME_LIMIT],
+    /// Checked exposed prefix length, including the eight-byte header.
+    length: usize,
+}
+
+impl FramePayload {
+    /// Exact exposed header/body bytes, independent of the unused array tail.
+    pub closed spec fn contents(&self) -> Seq<u8> { self.bytes@.take(self.length as int) }
+
+    /// The exposed prefix lies inside this stack-owned Xen payload.
+    pub closed spec fn valid(&self) -> bool { self.length <= FRAME_LIMIT }
+
+    /// Borrow precisely the constructed frame without reconstructing a length.
+    pub fn as_bytes(&self) -> (bytes: &[u8])
+        requires self.valid(),
+        ensures bytes@ == self.contents(),
+    { &self.bytes[..self.length] }
+}
+
+/// Bounded, forward-only sender over the exact immutable packet supplied by its owner.
+pub struct Fragments<'a> {
+    /// Stable serialized packet, borrowed until all frames have been generated.
+    bytes: &'a [u8],
+    /// Prefix already emitted in source order.
+    offset: usize,
+}
+
+impl<'a> Fragments<'a> {
+    /// Stable packet and cursor bounds; no payload is copied or allocated on construction.
+    pub closed spec fn valid(&self) -> bool {
+        0 < self.bytes@.len() <= MAX_PACKET && self.offset <= self.bytes@.len()
+    }
+
+    /// Exact source packet carried through every generated frame.
+    pub closed spec fn packet(&self) -> Seq<u8> { self.bytes@ }
+
+    /// Bytes already emitted, never decreased or repeated.
+    pub closed spec fn position(&self) -> usize { self.offset }
+
+    /// Admit a nonempty bounded packet before reserving output frame metadata.
+    pub fn new(bytes: &'a [u8]) -> (out: Result<Self, PacketError>)
+        ensures out.is_ok() == (0 < bytes.len() <= MAX_PACKET),
+            out.is_ok() ==> out.unwrap().valid() && out.unwrap().packet() == bytes@ && out.unwrap().position() == 0,
+    {
+        if bytes.is_empty() || bytes.len() > MAX_PACKET { return Err(PacketError::TooLarge); }
+        Ok(Self { bytes, offset: 0 })
+    }
+
+    /// Compute the exact remaining frame count without overflow or allocation.
+    pub fn remaining(&self) -> (count: usize)
+        requires self.valid(),
+        ensures count == (self.packet().len() - self.position() + FRAME_LIMIT - 9) / (FRAME_LIMIT - 8),
+            count <= (MAX_PACKET + FRAME_LIMIT - 9) / (FRAME_LIMIT - 8),
+    {
+        let remaining = self.bytes.len() - self.offset;
+        remaining / (FRAME_LIMIT - 8) + if remaining.is_multiple_of(FRAME_LIMIT - 8) { 0 } else { 1 }
+    }
+
+    /// Emit the next exact contiguous body, with canonical little-endian framing words.
+    pub fn next_frame(&mut self) -> (out: Option<FramePayload>)
+        requires old(self).valid(),
+        ensures final(self).valid(), final(self).packet() == old(self).packet(),
+            out.is_none() == (old(self).position() == old(self).packet().len()),
+            out.is_some() ==> old(self).position() < final(self).position() <= old(self).packet().len()
+                && out.unwrap().valid()
+                && out.unwrap().contents() == vstd::bytes::spec_u64_to_le_bytes(old(self).packet().len() as u64).take(4)
+                    + vstd::bytes::spec_u64_to_le_bytes(old(self).position() as u64).take(4)
+                    + old(self).packet().subrange(old(self).position() as int, final(self).position() as int),
+            out.is_none() ==> final(self).position() == old(self).position(),
+    {
+        if self.offset == self.bytes.len() { return None; }
+        let count = (self.bytes.len() - self.offset).min(FRAME_LIMIT - 8);
+        let mut bytes = [0; FRAME_LIMIT];
+        let total = self.bytes.len() as u64;
+        let offset = self.offset as u64;
+        let total_word = word32(total);
+        let offset_word = word32(offset);
+        bytes[..4].copy_from_slice(&total_word);
+        bytes[4..8].copy_from_slice(&offset_word);
+        bytes[8..8 + count].copy_from_slice(&self.bytes[self.offset..self.offset + count]);
+        self.offset += count;
+        Some(FramePayload { bytes, length: 8 + count })
+    }
+}
+
+/// Encode the low four little-endian bytes without allocation or an unchecked byte conversion.
+fn word32(value: u64) -> (word: [u8; 4])
+    ensures word@ == vstd::bytes::spec_u64_to_le_bytes(value).take(4),
+{
+    let word = [(value & 0xff) as u8, ((value >> 8) & 0xff) as u8,
+        ((value >> 16) & 0xff) as u8, ((value >> 24) & 0xff) as u8];
+    proof { vstd::bytes::spec_u64_to_le_bytes_to_open(value); }
+    assert(word@ =~= vstd::bytes::spec_u64_to_le_bytes(value).take(4));
+    word
+}
+
+}
+
+#[cfg(test)]
+mod sender_tests {
+    use super::*;
+    use alloc::{vec, vec::Vec};
+
+    #[test]
+    fn sender_and_receiver_preserve_every_boundary_and_exact_byte() {
+        assert!(Fragments::new(&[]).is_err());
+        let oversized = vec![0; MAX_PACKET + 1];
+        assert!(Fragments::new(&oversized).is_err());
+        for size in [1, FRAME_LIMIT - 8, FRAME_LIMIT - 7, MAX_PACKET] {
+            let packet: Vec<u8> = (0..size).map(|offset| (offset % 251) as u8).collect();
+            let mut sender = Fragments::new(&packet).unwrap();
+            let expected = sender.remaining();
+            let mut receiver = Assembly::new();
+            let mut received = None;
+            let mut count = 0;
+            while let Some(frame) = sender.next_frame() {
+                received = receiver.push(1, frame.as_bytes()).unwrap();
+                count += 1;
+            }
+            assert_eq!(count, expected);
+            assert_eq!(received.unwrap(), packet);
+            assert!(sender.next_frame().is_none());
+        }
+    }
+}

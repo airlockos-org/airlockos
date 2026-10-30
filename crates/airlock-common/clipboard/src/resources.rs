@@ -101,6 +101,12 @@ impl Slots {
             && self.live + self.retiring <= SLOT_LIMIT
     }
 
+    /// Inspect admission while an exclusive owner holds the ledger stable across construction.
+    pub fn can_admit(&self) -> (accepted: bool)
+        requires self.valid(),
+        ensures accepted == (self.live_count() < LIVE_LIMIT && self.live_count() + self.retiring_count() < SLOT_LIMIT),
+    { self.live < LIVE_LIMIT && self.live + self.retiring < SLOT_LIMIT }
+
     /// Reserve before creating a transport endpoint; rejection changes no ownership.
     pub fn admit(&mut self) -> (accepted: bool)
         requires old(self).valid(),
@@ -155,7 +161,9 @@ impl Slots {
 
     /// Observe counts for adapter correspondence checks and payload-free diagnostics.
     pub fn counts(&self) -> (counts: (usize, usize))
+        requires self.valid(),
         ensures counts.0 == self.live_count(), counts.1 == self.retiring_count(),
+            counts.0 <= LIVE_LIMIT, counts.1 <= SLOT_LIMIT, counts.0 + counts.1 <= SLOT_LIMIT,
     { (self.live, self.retiring) }
 }
 

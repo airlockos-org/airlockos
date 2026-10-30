@@ -210,6 +210,11 @@ impl<S: Storage> Clipboard<S> {
             && self.storage.view() == previous.storage.view()
     }
 
+    /// Reflexivity is exposed without revealing the private lifecycle representation.
+    pub(crate) proof fn unchanged_self(&self)
+        ensures self.unchanged(self),
+    {}
+
     /// Reservation binds a newly issued generation and deadline to the exact admitted source.
     pub closed spec fn reserved_for(&self, caller: &Caller, generation: Generation, now: Time) -> bool {
         self.generation == generation && self.storage.view().len() == 0 && match &self.state {
@@ -260,6 +265,34 @@ impl<S: Storage> Clipboard<S> {
                     content.formats[format as int].offset + offset + bytes.len()),
             _ => false,
         }
+    }
+
+    /// Offer observation corresponds exactly to the published state and latest issued identity.
+    pub closed spec fn observed(&self, observation: (Generation, Option<Offer>)) -> bool {
+        observation.0 == self.generation && match (&self.state, observation.1) {
+            (State::Published(content), Some(offer)) => offer.generation == content.generation
+                && offer.source == content.source && offer.formats@.len() == content.formats@.len()
+                && (forall|i: int| 0 <= i < content.formats@.len() ==> offer.formats[i].name@ == content.formats[i].format.name@
+                    && offer.formats[i].size == content.formats[i].format.size),
+            (State::Published(_), None) => false,
+            (_, None) => true,
+            _ => false,
+        }
+    }
+
+    /// A declaration installs only the exact checked metadata of its owned reservation.
+    pub closed spec fn declared(&self, previous: &Self, caller: &Caller, generation: Generation, formats: Seq<Format>) -> bool {
+        self.generation == generation && crate::formats::accepted(formats, self.capacity)
+            && match (&previous.state, &self.state) {
+                (State::Reserved { generation: reserved, source, deadline: before }, State::Receiving { content, deadline }) =>
+                    *reserved == generation && *source == caller.subject() && deadline == before
+                    && content.generation == generation && content.source == caller.subject()
+                    && content.formats@.len() == formats.len() && self.storage.view().len() == crate::formats::payload_bytes(formats)
+                    && (forall|i: int| 0 <= i < formats.len() ==> content.formats[i].format == formats[i] && content.formats[i].written == 0),
+                (State::Reserved { generation: reserved, source, .. }, State::Empty) =>
+                    *reserved == generation && *source == caller.subject() && formats.len() == 0 && self.storage.view().len() == 0,
+                _ => false,
+            }
     }
 
     /// Encapsulated metadata bounds, authority and private storage ownership.
@@ -333,7 +366,7 @@ impl<S: Storage> Clipboard<S> {
     }
 
     /// Revalidate object ownership and live membership at each policy operation.
-    fn access(&self, caller: &Caller) -> (out: Result<(), Error>)
+    pub(crate) fn access(&self, caller: &Caller) -> (out: Result<(), Error>)
         ensures out.is_ok() == self.authorized(caller), out.is_err() ==> out == Err(Error::Unauthorized),
     {
         if !self.admissions.allows(caller) {
@@ -418,6 +451,7 @@ impl<S: Storage> Clipboard<S> {
         requires old(self).valid(),
         ensures final(self).valid(), final(self).stable_owner(old(self)),
             !old(self).authorized(caller) ==> out == Err(Error::Unauthorized) && final(self).unchanged(old(self)),
+            out.is_ok() ==> final(self).declared(old(self), caller, generation, formats@),
     {
         self.access(caller)?;
         self.tick(now);
@@ -445,7 +479,7 @@ impl<S: Storage> Clipboard<S> {
         let mut representations: Vec<Representation> = Vec::new();
         representations
             .try_reserve_exact(formats.len())
-            .map_err(|_| Error::Capacity)?;
+            .map_err(|_error| -> (error: Error) ensures error == Error::Capacity { Error::Capacity })?;
         self.storage.allocate(total)?;
         let mut offset = 0;
         let count = formats.len();
@@ -643,27 +677,35 @@ impl<S: Storage> Clipboard<S> {
 
     /// Return the latest issued generation and any completely published offer.
     /// The generation also changes on clear, allowing endpoints to discard stale data.
-    pub fn offer(&self, caller: &Caller) -> Result<(Generation, Option<Offer>), Error>
+    pub fn offer(&self, caller: &Caller) -> (out: Result<(Generation, Option<Offer>), Error>)
         requires self.valid(),
-        ensures self.valid(),
+        ensures self.valid(), out.is_ok() ==> self.observed(out.unwrap()),
+            !self.authorized(caller) ==> out == Err(Error::Unauthorized),
+            self.authorized(caller) ==> out.is_ok() || out == Err(Error::Capacity),
     {
         self.access(caller)?;
         let offer = if let State::Published(content) = &self.state {
-            let mut formats = Vec::new();
+            let mut formats: Vec<Format> = Vec::new();
             formats
                 .try_reserve_exact(content.formats.len())
-                .map_err(|_| Error::Capacity)?;
-            for representation in &content.formats
-                invariant self.valid(),
+                .map_err(|_error| -> (error: Error) ensures error == Error::Capacity { Error::Capacity })?;
+            let mut index = 0;
+            while index < content.formats.len()
+                invariant self.valid(), self.authorized(caller), formats@.len() == index, index <= content.formats.len(),
+                    forall|i: int| 0 <= i < index ==> formats[i].name@ == content.formats[i].format.name@
+                        && formats[i].size == content.formats[i].format.size,
+                decreases content.formats.len() - index,
             {
+                let representation = &content.formats[index];
                 let mut name = String::new();
                 name.try_reserve_exact(representation.format.name.as_str().len())
-                    .map_err(|_| Error::Capacity)?;
+                    .map_err(|_error| -> (error: Error) ensures error == Error::Capacity { Error::Capacity })?;
                 name.push_str(&representation.format.name);
                 formats.push(Format {
                     name,
                     size: representation.format.size,
                 });
+                index += 1;
             }
             Some(Offer {
                 generation: content.generation,
@@ -709,7 +751,7 @@ impl<S: Storage> Clipboard<S> {
         let mut bytes = Vec::new();
         bytes
             .try_reserve_exact(count)
-            .map_err(|_| Error::Capacity)?;
+            .map_err(|_error| -> (error: Error) ensures error == Error::Capacity { Error::Capacity })?;
         bytes.resize(count, 0);
         if let Err(error) = self.storage.read(start, &mut bytes) {
             self.state = State::Empty;
@@ -724,7 +766,7 @@ impl<S: Storage> Clipboard<S> {
     /// Revoke this live connection and abort its unfinished write; completed copies remain readable.
     pub fn disconnect(&mut self, caller: &Caller)
         requires old(self).valid(),
-        ensures final(self).valid(), !final(self).authorized(caller),
+        ensures final(self).valid(), !final(self).authorized(caller), final(self).retained_publication(old(self)),
     {
         if self.access(caller).is_err() {
             return;

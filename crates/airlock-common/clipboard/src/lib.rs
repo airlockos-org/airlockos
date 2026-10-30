@@ -28,3 +28,12 @@ mod library;
 
 /// Opaque replacement identities and checked time/deadline arithmetic.
 pub mod values;
+
+/// Bounded clipboard wire claims, encoded independently of Xen or application authority.
+pub mod protocol;
+
+/// Owned endpoint admission and quarantine coupled to checked resource accounting.
+pub mod connections;
+
+/// Validated deployment boot observations, separate from runtime caller authority.
+pub mod boot;
