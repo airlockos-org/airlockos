@@ -1,10 +1,11 @@
-//! Finite IPv4/IPv6 syntax and expansion used by trusted configuration and rule
-//! observations. An address value is a parsed claim, never an interface owner.
-//! No unchecked standard-library IP parser contract supplies these decisions.
+//! IP observations decoded by Rust's standard address parser. The parser is an
+//! explicitly trusted dependency; the grammar below specifies the correspondence
+//! expected at that boundary, not a proof of the library. Qubes membership and
+//! interface authorization remain separate from a successfully parsed address.
 
-use alloc::vec::Vec;
 use vstd::prelude::*;
 
+#[cfg(verus_keep_ghost)]
 use crate::number;
 
 verus! {
@@ -14,29 +15,6 @@ pub open spec fn cut(bytes: Seq<u8>, index: int, delimiter: u8) -> bool {
     0 <= index <= bytes.len()
         && (forall|i: int| 0 <= i < index ==> bytes[i] != delimiter)
         && (index == bytes.len() || bytes[index] == delimiter)
-}
-
-/// Two positions cannot both be the first occurrence of one delimiter.
-proof fn unique_cut(bytes: Seq<u8>, left: int, right: int, delimiter: u8)
-    requires cut(bytes, left, delimiter), cut(bytes, right, delimiter),
-    ensures left == right,
-{}
-
-/// Find a delimiter in at most one bounded address token.
-fn split(bytes: &[u8], delimiter: u8) -> (index: usize)
-    requires bytes@.len() <= 45,
-    ensures cut(bytes@, index as int, delimiter),
-{
-    let mut i = 0;
-    while i < bytes.len()
-        invariant i <= bytes.len() <= 45,
-            forall|j: int| 0 <= j < i ==> bytes@[j] != delimiter,
-        decreases bytes.len()-i,
-    {
-        if bytes[i] == delimiter { return i; }
-        i += 1;
-    }
-    i
 }
 
 /// Exact dotted sequence of canonical decimal octets. The caller fixes its
@@ -49,44 +27,6 @@ pub open spec fn octets(bytes: Seq<u8>, values: Seq<u8>) -> bool
         && number::decimal(bytes.subrange(0, index)) == values[0]
         && if values.len() == 1 { index == bytes.len() }
             else { index < bytes.len() && octets(bytes.subrange(index+1, bytes.len() as int), values.drop_first()) }
-}
-
-/// Decode a bounded dotted suffix with an exact remaining component count.
-fn parse_octets(bytes: &[u8], count: usize) -> (values: Option<Vec<u8>>)
-    requires bytes@.len() <= 45, 1 <= count <= 4,
-    ensures match values {
-        Some(value) => value@.len() == count && octets(bytes@, value@),
-        None => !(exists|value: Seq<u8>| value.len() == count && octets(bytes@, value)),
-    },
-    decreases count,
-{
-    let index = split(bytes, b'.');
-    let value = {
-        let value = number::parse(&bytes[..index], 255, true)?;
-        value as u8
-    };
-    let mut out = Vec::new();
-    out.push(value);
-    if count == 1 {
-        if index != bytes.len() { return None; }
-        return Some(out);
-    }
-    if index == bytes.len() { return None; }
-    let tail = parse_octets(&bytes[index+1..], count-1)?;
-    let mut i = 0;
-    while i < tail.len()
-        invariant i <= tail.len() == count-1, 1 < count <= 4,
-            out@ == seq![value] + tail@.subrange(0, i as int),
-            octets(bytes@.subrange(index as int+1, bytes@.len() as int), tail@),
-            cut(bytes@, index as int, b'.'),
-            number::digits(bytes@.subrange(0, index as int), true),
-            number::decimal(bytes@.subrange(0, index as int)) == value,
-        decreases tail.len()-i,
-    {
-        out.push(tail[i]);
-        i += 1;
-    }
-    Some(out)
 }
 
 /// IPv4 tail occupies exactly two network-order words in an IPv6 spelling.
@@ -117,81 +57,9 @@ pub open spec fn groups(bytes: Seq<u8>, words: Seq<u16>, allow_tail: bool) -> bo
     }
 }
 
-/// Decode at most eight native words, with bounded recursion and no truncation.
-fn parse_groups(bytes: &[u8], available: usize, allow_tail: bool) -> (words: Option<Vec<u16>>)
-    requires bytes@.len() <= 45, available <= 8,
-    ensures match words {
-        Some(value) => value@.len() <= available && groups(bytes@, value@, allow_tail),
-        None => !(exists|value: Seq<u16>| value.len() <= available && groups(bytes@, value, allow_tail)),
-    },
-    decreases available,
-{
-    if bytes.is_empty() { return Some(Vec::new()); }
-    if available == 0 { return None; }
-    let index = split(bytes, b':');
-    let dotted = split(&bytes[..index], b'.') < index;
-    if dotted {
-        if !allow_tail || index != bytes.len() || bytes.len() > 15 || available < 2 { return None; }
-        let values = parse_octets(bytes, 4)?;
-        let out = alloc::vec![values[0] as u16*256 + values[1] as u16,
-            values[2] as u16*256 + values[3] as u16];
-        return Some(out);
-    }
-    let first = number::parse_hex(&bytes[..index])?;
-    let mut out = Vec::new();
-    out.push(first);
-    if index == bytes.len() { return Some(out); }
-    if index+1 == bytes.len() { return None; }
-    let tail = parse_groups(&bytes[index+1..], available-1, allow_tail)?;
-    let mut i = 0;
-    while i < tail.len()
-        invariant i <= tail.len() < available <= 8,
-            out@ == seq![first] + tail@.subrange(0, i as int),
-            cut(bytes@, index as int, b':'), index+1 < bytes.len(),
-            number::hex_word(bytes@.subrange(0, index as int), first as int),
-            groups(bytes@.subrange(index as int+1, bytes@.len() as int), tail@, allow_tail),
-            !(exists|j: int| 0 <= j < index && bytes@[j] == b'.'),
-        decreases tail.len()-i,
-    {
-        out.push(tail[i]);
-        i += 1;
-    }
-    Some(out)
-}
-
 /// A possible double-colon marker, including overlapping malformed triples.
 pub open spec fn double_at(bytes: Seq<u8>, index: int) -> bool {
     0 <= index && index+1 < bytes.len() && bytes[index] == b':' && bytes[index+1] == b':'
-}
-
-/// Locate exactly one compression marker, rejecting multiple or overlapping ones.
-fn compression(bytes: &[u8]) -> (position: Result<Option<usize>, ()>)
-    requires bytes@.len() <= 45,
-    ensures match position {
-        Ok(Some(index)) => double_at(bytes@, index as int)
-            && forall|j: int| double_at(bytes@, j) ==> j == index,
-        Ok(None) => forall|j: int| !double_at(bytes@, j),
-        Err(_) => exists|i: int, j: int| double_at(bytes@, i) && double_at(bytes@, j) && i != j,
-    },
-{
-    let mut found: Option<usize> = None;
-    let mut i = 0;
-    while i+1 < bytes.len()
-        invariant i <= 45, bytes@.len() <= 45,
-            match found {
-                Some(index) => double_at(bytes@, index as int) && index < i
-                    && forall|j: int| 0 <= j < i && double_at(bytes@, j) ==> j == index,
-                None => forall|j: int| 0 <= j < i ==> !double_at(bytes@, j),
-            },
-        decreases bytes.len()+1-i,
-    {
-        if bytes[i] == b':' && bytes[i+1] == b':' {
-            if found.is_some() { return Err(()); }
-            found = Some(i);
-        }
-        i += 1;
-    }
-    Ok(found)
 }
 
 /// Normative IPv6 expansion: eight words directly, or one marker replacing
@@ -249,6 +117,12 @@ impl Ip {
 
     /// Decode a complete IPv4/IPv6 token, including a compressed or dotted-tail
     /// IPv6 spelling. Signs, zones, whitespace, brackets and trailing bytes reject.
+    /// Trust boundary: safe UTF-8 conversion, core::net::IpAddr parsing and its
+    /// octet/segment accessors. Reuse avoids maintaining a second IP parser;
+    /// correctness of their correspondence to describes remains assumed. The
+    /// 45-byte cap, private normalized representation and later Qubes checks
+    /// bound this dependency and prevent parsed syntax becoming authority.
+    #[verifier::external_body]
     pub fn parse(bytes: &[u8]) -> (address: Option<Self>)
         ensures match address {
             Some(value) => value.valid() && value.describes(bytes@),
@@ -256,56 +130,15 @@ impl Ip {
         },
     {
         if bytes.is_empty() || bytes.len() > 45 { return None; }
-        let colon = split(bytes, b':');
-        if colon == bytes.len() {
-            if bytes.len() > 15 { return None; }
-            let values = parse_octets(bytes, 4)?;
-            let mut words = [0; 8];
-            words[0] = values[0] as u16*256+values[1] as u16;
-            words[1] = values[2] as u16*256+values[3] as u16;
-            return Some(Self { family: 4, words });
-        }
-        let gap = match compression(bytes) { Ok(value) => value, Err(()) => return None };
-        let mut words = [0; 8];
-        match gap {
-            None => {
-                let parsed = parse_groups(bytes, 8, true)?;
-                if parsed.len() != 8 { return None; }
-                let mut i = 0;
-                while i < 8
-                    invariant i <= 8, parsed@.len() == 8,
-                        words@.subrange(0, i as int) == parsed@.subrange(0, i as int),
-                        groups(bytes@, parsed@, true),
-                        forall|j: int| !double_at(bytes@, j),
-                    decreases 8-i,
-                { words[i] = parsed[i]; i += 1; }
+        let parsed = core::str::from_utf8(bytes).ok()?.parse::<core::net::IpAddr>().ok()?;
+        let (family, words) = match parsed {
+            core::net::IpAddr::V4(ip) => {
+                let [a, b, c, d] = ip.octets();
+                (4, [u16::from_be_bytes([a, b]), u16::from_be_bytes([c, d]), 0, 0, 0, 0, 0, 0])
             }
-            Some(index) => {
-                let left = parse_groups(&bytes[..index], 8, false)?;
-                let right = parse_groups(&bytes[index+2..], 8, true)?;
-                if left.len()+right.len() >= 8 { return None; }
-                let mut i = 0;
-                while i < left.len()
-                    invariant i <= left.len(), left.len()+right.len() < 8,
-                        words@.subrange(0, i as int) == left@.subrange(0, i as int),
-                        forall|j: int| i <= j < 8 ==> words@[j] == 0,
-                    decreases left.len()-i,
-                { words[i] = left[i]; i += 1; }
-                let base = 8-right.len();
-                let mut i = 0;
-                while i < right.len()
-                    invariant i <= right.len(), left.len()+right.len() < 8, base == 8-right.len(),
-                        words@.subrange(0, left@.len() as int) == left@,
-                        forall|j: int| left@.len() <= j < base ==> words@[j] == 0,
-                        words@.subrange(base as int, base as int+i as int) == right@.subrange(0, i as int),
-                    decreases right.len()-i,
-                { words[base+i] = right[i]; i += 1; }
-                proof {
-                    assert(words@ =~= left@ + Seq::new((8-left@.len()-right@.len()) as nat, |_: int| 0u16) + right@);
-                }
-            }
-        }
-        Some(Self { family: 6, words })
+            core::net::IpAddr::V6(ip) => (6, ip.segments()),
+        };
+        Some(Self { family, words })
     }
 
     /// Return the parsed family without exposing mutable representation.

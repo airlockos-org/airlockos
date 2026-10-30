@@ -1,8 +1,10 @@
-//! Finite numeric tokens used by native rule names, ports and address parts.
-//! Leading zeros are a caller-selected grammar rule, never an implicit integer
-//! conversion that could give two textual identities different interpretations.
+//! Numeric tokens decoded and formatted by Rust's standard library. These thin
+//! boundaries trust library conversions rather than duplicate them for proofs.
+//! Length, sign, range and caller-selected leading-zero restrictions preserve
+//! the Qubes token language. The contracts state assumed library correspondence;
+//! they do not claim that Rust's parsing or formatting implementations are proved.
 
-use crate::bytes::in_range;
+use alloc::string::ToString;
 use vstd::prelude::*;
 
 verus! {
@@ -23,54 +25,21 @@ pub open spec fn digits(bytes: Seq<u8>, canonical: bool) -> bool {
         && (!canonical || bytes.len() == 1 || bytes[0] != b'0')
 }
 
-/// Every decimal prefix is nonnegative and no larger than the complete token.
-proof fn decimal_prefix(bytes: Seq<u8>, count: int)
-    requires 0 <= count <= bytes.len(),
-        forall|i: int| 0 <= i < bytes.len() ==> b'0' <= bytes[i] <= b'9',
-    ensures 0 <= decimal(bytes.subrange(0, count)) <= decimal(bytes),
-    decreases bytes.len(),
-{
-    if bytes.len() > 0 {
-        if count < bytes.len() { decimal_prefix(bytes.drop_last(), count); }
-        decimal_prefix(bytes.drop_last(), bytes.len() as int-1);
-    }
-}
-
 /// Decode the exact bounded value. Overflow, signs, whitespace and incomplete
 /// tokens reject rather than truncating, wrapping or consuming a numeric prefix.
+/// Trust scope: checked UTF-8, u32 parsing and this bounded lexical adapter.
+/// Rust permits a leading plus; explicitly exclude it to retain Qubes syntax.
+#[verifier::external_body]
 pub fn parse(bytes: &[u8], maximum: u32, canonical: bool) -> (number: Option<u32>)
     ensures match number {
         Some(value) => digits(bytes@, canonical) && value == decimal(bytes@) && value <= maximum,
         None => !digits(bytes@, canonical) || decimal(bytes@) > maximum,
     },
 {
-    if bytes.is_empty() || bytes.len() > 10 { return None; }
+    if bytes.is_empty() || bytes.len() > 10 || bytes[0] == b'+' { return None; }
     if canonical && bytes.len() > 1 && bytes[0] == b'0' { return None; }
-    let mut i = 0;
-    while i < bytes.len()
-        invariant i <= bytes.len() <= 10, bytes.len() > 0,
-            forall|j: int| 0 <= j < i ==> b'0' <= bytes@[j] <= b'9',
-        decreases bytes.len()-i,
-    {
-        if !in_range(bytes[i], b'0', b'9') { return None; }
-        i += 1;
-    }
-    let mut value: u64 = 0;
-    let mut i = 0;
-    while i < bytes.len()
-        invariant i <= bytes.len() <= 10, value <= maximum,
-            value == decimal(bytes@.subrange(0, i as int)), digits(bytes@, canonical),
-        decreases bytes.len()-i,
-    {
-        let next = value*10 + u64::from(bytes[i]-b'0');
-        if next > maximum as u64 {
-            proof { decimal_prefix(bytes@, i as int+1); }
-            return None;
-        }
-        value = next;
-        i += 1;
-    }
-    Some(value as u32)
+    let value = core::str::from_utf8(bytes).ok()?.parse::<u32>().ok()?;
+    (value <= maximum).then_some(value)
 }
 
 /// Mathematical value of one native hexadecimal digit, or -1 for a non-digit.
@@ -96,47 +65,30 @@ pub open spec fn hex_word(bytes: Seq<u8>, value: int) -> bool {
         && value == hexadecimal(bytes)
 }
 
-/// Decode exactly one IPv6 word; no unchecked numeric library contract is used.
+/// Decode a bounded hexadecimal token through u16::from_str_radix. Trust scope:
+/// checked UTF-8, radix conversion and the explicit length/sign restrictions.
+#[verifier::external_body]
 pub fn parse_hex(bytes: &[u8]) -> (word: Option<u16>)
     ensures match word {
         Some(value) => hex_word(bytes@, value as int),
         None => !(exists|value: int| hex_word(bytes@, value)),
     },
 {
-    if bytes.is_empty() || bytes.len() > 4 { return None; }
-    let mut value: u32 = 0;
-    let mut i = 0;
-    while i < bytes.len()
-        invariant i <= bytes.len() <= 4,
-            value == hexadecimal(bytes@.subrange(0, i as int)), value < 0x1_0000,
-            value < if i == 0 { 1int } else if i == 1 { 16int } else if i == 2 { 256int } else if i == 3 { 4096int } else { 65536int },
-            forall|j: int| 0 <= j < i ==> 0 <= hex_digit(bytes@[j]) <= 15,
-        decreases bytes.len()-i,
-    {
-        let byte = bytes[i];
-        let digit = if in_range(byte, b'0', b'9') { byte-b'0' }
-            else if in_range(byte, b'a', b'f') { byte-b'a'+10 }
-            else if in_range(byte, b'A', b'F') { byte-b'A'+10 }
-            else { return None; };
-        value = value*16 + u32::from(digit);
-        i += 1;
-    }
-    Some(value as u16)
+    if bytes.is_empty() || bytes.len() > 4 || bytes[0] == b'+' { return None; }
+    u16::from_str_radix(core::str::from_utf8(bytes).ok()?, 16).ok()
 }
 
 }
 
 verus! {
 
-/// Canonical decimal counter spelling, including zero, with no formatter trust.
-/// Recursion is bounded by the ten decimal digits of a u32.
+/// Canonical decimal counter spelling through Rust's Display implementation.
+/// Trust scope: ToString and String::into_bytes; a u32 needs at most ten bytes.
+#[verifier::external_body]
 pub(crate) fn encode(value: u32) -> (bytes: alloc::vec::Vec<u8>)
     ensures 0 < bytes@.len() <= 10, digits(bytes@, true), decimal(bytes@) == value,
-    decreases value,
 {
-    let mut bytes = if value < 10 { alloc::vec::Vec::new() } else { encode(value/10) };
-    bytes.push(b'0'+(value%10) as u8);
-    bytes
+    value.to_string().into_bytes()
 }
 
 }

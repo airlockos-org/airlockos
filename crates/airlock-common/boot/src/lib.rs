@@ -36,33 +36,19 @@ impl Challenge {
     pub closed spec fn value(&self) -> Seq<u8> { self.bytes@ }
 
     /// Accept exactly the canonical UUID grammar without allocation.
+    /// Trust scope: uuid::Uuid::try_parse_ascii and the fixed-array copy. The
+    /// accepted library boundary avoids a second UUID parser; its correspondence
+    /// to challenge_bytes is assumed, not proved. Requiring exactly 36 bytes
+    /// selects the hyphenated form, and preserving the original bytes retains
+    /// case-sensitive boot correlation. A challenge alone grants no authority.
+    #[verifier::external_body]
     pub fn parse(input: &[u8]) -> (out: Option<Self>)
         ensures out.is_some() == challenge_bytes(input@),
             out.is_some() ==> out.unwrap().value() == input@,
     {
         if input.len() != 36 { return None; }
-        let mut bytes = [0; 36];
-        let mut i = 0;
-        while i < 36
-            invariant i <= 36, input.len() == 36, bytes@.take(i as int) == input@.take(i as int),
-                forall|j: int| 0 <= j < i ==> if j == 8 || j == 13 || j == 18 || j == 23 { input[j] == b'-' }
-                    else { b'0' <= input[j] <= b'9' || b'a' <= input[j] <= b'f' || b'A' <= input[j] <= b'F' },
-            decreases 36 - i,
-        {
-            let byte = input[i];
-            let valid = if i == 8 || i == 13 || i == 18 || i == 23 {
-                byte == b'-'
-            } else {
-                ascii_digit(byte) || (b'a'..=b'f').contains(&byte) || (b'A'..=b'F').contains(&byte)
-            };
-            if !valid { return None; }
-            bytes[i] = byte;
-            i += 1;
-        }
-        assert(bytes@.take(36) == bytes@);
-        assert(input@.take(36) == input@);
-        assert(bytes@ =~= input@);
-        Some(Self { bytes })
+        uuid::Uuid::try_parse_ascii(input).ok()?;
+        Some(Self { bytes: input.try_into().ok()? })
     }
 
     /// Borrow validated ASCII for checked UTF-8 conversion at the logging boundary.

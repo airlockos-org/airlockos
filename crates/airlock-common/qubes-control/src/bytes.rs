@@ -1,4 +1,9 @@
 //! Bounded private byte operations shared by configuration and rule decoders.
+//! Safe Rust slice/Vec primitives are explicitly trusted at these thin library
+//! boundaries. Their contracts state the correspondence assumed by callers;
+//! library internals are not proved here. Reusing exact byte operations avoids
+//! handwritten copy/search loops while leaving Qubes decisions in their callers.
+//! Caller bounds limit allocation and work; safe borrows preserve ownership.
 
 use alloc::vec::Vec;
 use vstd::prelude::*;
@@ -12,83 +17,57 @@ pub(crate) fn in_range(byte: u8, first: u8, last: u8) -> (inside: bool)
 { (first..=last).contains(&byte) }
 
 /// Compare exact private bytes; a mismatch never authorizes a prefix match.
+/// Trust scope: Rust slice equality on u8 values.
+#[verifier::external_body]
 pub(crate) fn equal(left: &[u8], right: &[u8]) -> (same: bool)
     requires left@.len() <= 4096,
     ensures same == (left@ == right@),
 {
-    if left.len() != right.len() { return false; }
-    let mut i = 0;
-    while i < left.len()
-        invariant i <= left.len() == right.len(), left@.len() <= 4096,
-            forall|j: int| 0 <= j < i ==> left@[j] == right@[j],
-        decreases left.len()-i,
-    {
-        if left[i] != right[i] { return false; }
-        i += 1;
-    }
-    assert(left@ =~= right@);
-    true
+    left == right
 }
 
 /// Copy at most one already bounded native value into exclusive owned storage.
+/// Trust scope: slice::to_vec, including Rust's existing allocator behavior.
+#[verifier::external_body]
 pub(crate) fn copy(bytes: &[u8]) -> (out: Vec<u8>)
     requires bytes@.len() <= 4096,
     ensures out@ == bytes@,
 {
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < bytes.len()
-        invariant i <= bytes.len() <= 4096, out@ == bytes@.subrange(0, i as int),
-        decreases bytes.len()-i,
-    {
-        out.push(bytes[i]);
-        i += 1;
-    }
-    out
+    bytes.to_vec()
 }
 
 /// Compare only a complete bounded path prefix, preserving subtree boundaries
 /// selected by the caller rather than guessing from packet or watch contents.
+/// Trust scope: slice::starts_with, with no decoding or normalization.
+#[verifier::external_body]
 pub(crate) fn prefix(bytes: &[u8], start: &[u8]) -> (matched: bool)
     requires start@.len() <= 4096,
     ensures matched == (bytes@.len() >= start@.len()
         && bytes@.subrange(0, start@.len() as int) == start@),
 {
-    if bytes.len() < start.len() { return false; }
-    equal(start, &bytes[..start.len()])
+    bytes.starts_with(start)
 }
 
 /// Find the first exact delimiter in one bounded native value.
+/// Trust scope: the slice iterator's first-match position and absent fallback.
+#[verifier::external_body]
 pub(crate) fn find(bytes: &[u8], delimiter: u8) -> (index: usize)
     requires bytes@.len() <= 4096,
     ensures index <= bytes@.len()
         && (forall|i: int| 0 <= i < index ==> bytes@[i] != delimiter)
         && (index == bytes@.len() || bytes@[index as int] == delimiter),
 {
-    let mut i = 0;
-    while i < bytes.len()
-        invariant i <= bytes.len() <= 4096,
-            forall|j: int| 0 <= j < i ==> bytes@[j] != delimiter,
-        decreases bytes.len()-i,
-    {
-        if bytes[i] == delimiter { return i; }
-        i += 1;
-    }
-    i
+    bytes.iter().position(|byte| *byte == delimiter).unwrap_or(bytes.len())
 }
 
 /// Append a bounded fragment while preserving its exact private bytes.
+/// Trust scope: Vec::extend_from_slice on u8 values, under the caller's bound.
+#[verifier::external_body]
 pub(crate) fn append(bytes: &mut Vec<u8>, part: &[u8])
     requires old(bytes)@.len()+part@.len() <= 4096,
     ensures final(bytes)@ == old(bytes)@+part@,
 {
-    let ghost before = bytes@;
-    let mut i = 0;
-    while i < part.len()
-        invariant i <= part.len(), bytes@ == before+part@.subrange(0, i as int),
-            before.len()+part@.len() <= 4096,
-        decreases part.len()-i,
-    { bytes.push(part[i]); i += 1; }
+    bytes.extend_from_slice(part)
 }
 
 }

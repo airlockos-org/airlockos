@@ -5,9 +5,10 @@ edition = "2024"
 rust-version = "1.89"
 publish = false
 license = "MIT"
-description = "Verified startup challenges shared by Hermit services"
+description = "Validated startup challenges shared by Hermit services"
 
 [dependencies]
+uuid = { version = "1.28", default-features = false }
 vstd = { version = "=0.0.0-2026-10-18-0147", default-features = false, features = ["alloc"] }
 
 [package.metadata.verus]
