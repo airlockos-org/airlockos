@@ -116,8 +116,7 @@ impl Header {
                 && shape(bytes@[0], bytes@.subrange(1, 1+length), native_length(bytes@))),
         },
     {
-        let count = bytes[68] as u32 + bytes[69] as u32*256
-            + bytes[70] as u32*65536 + bytes[71] as u32*16777216;
+        let count = vstd::bytes::u32_from_le_bytes(&bytes[68..72]);
         if count > MAX_VALUE as u32 { return None; }
         let mut path = Vec::new();
         let mut i = 0;
@@ -177,17 +176,7 @@ impl Header {
     {
         let mut bytes = [0; HEADER];
         bytes[0] = OK;
-        let mut i = 0;
-        while i < self.path.len()
-            invariant i <= self.path@.len() < 64,
-                bytes@[0] == OK && native_length(bytes@) == 0,
-                bytes@.subrange(1, 1+i as int) == self.path@.subrange(0, i as int),
-                forall|j: int| 1+i <= j < HEADER ==> bytes@[j] == 0,
-            decreases self.path.len()-i,
-        {
-            bytes[1+i] = self.path[i];
-            i += 1;
-        }
+        bytes[1..1+self.path.len()].copy_from_slice(self.path.as_slice());
         bytes
     }
 }
@@ -250,21 +239,12 @@ pub(crate) fn guest_write(path: &[u8], value: &[u8]) -> (bytes: Vec<u8>)
         bytes@.subrange(1, 1+path@.len() as int) == path@, bytes@[1+path@.len() as int] == 0,
         native_length(bytes@) == value@.len(), bytes@.subrange(HEADER as int, bytes@.len() as int) == value@,
 {
-    let mut bytes = Vec::new();
-    let mut i = 0;
-    while i < HEADER
-        invariant i <= HEADER, bytes@.len() == i,
-            forall|j: int| 0 <= j < i ==> bytes@[j] == if j == 0 { WRITE }
-                else if 1 <= j <= path@.len() { path@[j-1] }
-                else if j == 68 { value@.len() as u8 }
-                else if j == 69 { (value@.len()/256) as u8 } else { 0u8 },
-        decreases HEADER-i,
-    {
-        bytes.push(if i == 0 { WRITE } else if 1 <= i && i <= path.len() { path[i-1] }
-            else if i == 68 { value.len() as u8 }
-            else if i == 69 { (value.len()/256) as u8 } else { 0 });
-        i += 1;
-    }
+    let mut header = [0; HEADER];
+    header[0] = WRITE;
+    header[1..1+path.len()].copy_from_slice(path);
+    header[68..72].copy_from_slice(&(value.len() as u32).to_le_bytes());
+
+    let mut bytes = vstd::slice::slice_to_vec(&header);
     bytes.extend_from_slice(value);
     bytes
 }
@@ -363,15 +343,7 @@ fn snapshot(bytes: &[u8]) -> (header: Option<[u8; HEADER]>)
 {
     if bytes.len() < HEADER { return None; }
     let mut header = [0; HEADER];
-    let mut i = 0;
-    while i < HEADER
-        invariant i <= HEADER <= bytes.len(),
-            header@.subrange(0, i as int) == bytes@.subrange(0, i as int),
-        decreases HEADER-i,
-    {
-        header[i] = bytes[i];
-        i += 1;
-    }
+    header.copy_from_slice(&bytes[..HEADER]);
     Some(header)
 }
 

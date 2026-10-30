@@ -110,23 +110,10 @@ fn mask_prefix(mask: &Ip) -> (prefix: Option<u8>)
         None => !(exists|value: int| 0 <= value <= 32 && (forall|i: int| 0 <= i < 32 ==> mask_bit(*mask, i) == (i < value))),
     },
 {
-    let mut i = 0;
-    let mut prefix: u8 = 0;
-    let mut zero = false;
-    while i < 32
-        invariant i <= 32, prefix <= i, zero == (prefix < i),
-            forall|j: int| 0 <= j < i ==> mask_bit(*mask, j) == (j < prefix),
-        decreases 32-i,
-    {
-        let word = mask.word(i/16)?;
-        let set = word & (0x8000u16 >> (i%16)) != 0;
-        if set {
-            if zero { return None; }
-            prefix += 1;
-        } else { zero = true; }
-        i += 1;
-    }
-    Some(prefix)
+    let bits = u32::from(mask.word(0)?) << 16 | u32::from(mask.word(1)?);
+    let prefix = bits.leading_ones();
+    if bits.count_ones() != prefix { return None; }
+    Some(prefix as u8)
 }
 
 /// A native netmask's contiguous leading-one count at its exact key.

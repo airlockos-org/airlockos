@@ -19,8 +19,6 @@ use vstd::slice::slice_to_vec;
 use crate::address;
 use crate::address::Ip;
 use crate::cache::Cache;
-#[cfg(verus_keep_ghost)]
-use crate::cache::MAX_ENTRIES;
 use crate::config::Config;
 #[cfg(verus_keep_ghost)]
 use crate::config::observed;
@@ -135,19 +133,13 @@ pub fn mapping_supported(cache: &Cache, source: &Ip, config: &Config) -> (suppor
                 || (cache.entries()[i].key().subrange(end+1, cache.entries()[i].key().len() as int) == b"visible-gateway"@
                     && config.provider_address().describes(cache.entries()[i].value())))),
 {
-    let entries = cache.all();
-    let mut i = 0;
-    while i < entries.len()
-        invariant cache.valid(), source.valid(), config.valid(), i <= entries.len() <= MAX_ENTRIES,
-        decreases entries.len()-i,
-    {
-        let key = entries[i].name();
+    for (key, value) in cache.all() {
         if key.starts_with(b"/mapped-ip/") {
             let end = 11+key[11..].iter().position(|byte| *byte == b'/').unwrap_or(key.len()-11);
             if let Some(ip) = Ip::parse(&key[11..end])
                 && ip.same(source) {
                     if end == key.len() { return false; }
-                    let observed = match Ip::parse(entries[i].bytes()) { Some(value) => value, None => return false };
+                    let observed = match Ip::parse(value.as_slice()) { Some(value) => value, None => return false };
                     let child = &key[end+1..];
                     if child == b"visible-ip" {
                         if !observed.same(source) { return false; }
@@ -156,7 +148,6 @@ pub fn mapping_supported(cache: &Cache, source: &Ip, config: &Config) -> (suppor
                     } else { return false; }
                 }
         }
-        i += 1;
     }
     true
 }
@@ -286,28 +277,16 @@ impl Snapshot {
         let mut default = None;
         let mut rules: Vec<Ordered> = Vec::new();
         let mut unresolved = false;
-        let entries = cache.all();
-        let mut i = 0;
-        while i < entries.len()
-            invariant i <= entries.len() <= MAX_ENTRIES, cache.valid(),
-                root@.len() < 64, source_path(root@, path.source(), root@.len() as int),
-                rules@.len() <= MAX_RULES,
-                forall|j: int| 0 <= j < rules@.len() ==> rules@[j].rule().valid()
-                    && rules@[j].rule().family == path.source().family() && rules@[j].id() <= 9999,
-                forall|j: int, k: int| 0 <= j < k < rules@.len() ==> rules@[j].id() < rules@[k].id(),
-                unresolved == (exists|j: int| 0 <= j < rules@.len() && rules@[j].rule().has_hostname()),
-            decreases entries.len()-i,
-        {
-            let key = entries[i].name();
+        for (key, value) in cache.all() {
             if let Some(other) = Path::parse(key)
                 && other.ip().same(path.ip()) && other.root(key) != root { return Err(Rejection::Alias); }
             if key.len() > root.len() && key.starts_with(root) && key[root.len()] == b'/' {
                 let child = &key[root.len()+1..];
                 if child == b"policy" {
-                    default = match rule::action(entries[i].bytes()) { Some(value) => Some(value), None => return Err(Rejection::Default) };
+                    default = match rule::action(value.as_slice()) { Some(value) => Some(value), None => return Err(Rejection::Default) };
                 } else {
                     let id = match ordinal(child) { Some(value) => value, None => return Err(Rejection::Rule) };
-                    let rule = match Rule::parse(entries[i].bytes(), path.ip().version()) { Some(value) => value, None => return Err(Rejection::Rule) };
+                    let rule = match Rule::parse(value.as_slice(), path.ip().version()) { Some(value) => value, None => return Err(Rejection::Rule) };
                     if rules.len() == MAX_RULES { return Err(Rejection::Capacity); }
                     if rule.host().is_some() { unresolved = true; }
                     let mut at = 0;
@@ -320,7 +299,6 @@ impl Snapshot {
                     rules.insert(at, Ordered { id, rule });
                 }
             }
-            i += 1;
         }
         let default = match default { Some(value) => value, None => return Err(Rejection::Default) };
         Ok(Self { source: path.ip, root: slice_to_vec(root), default, rules, unresolved })

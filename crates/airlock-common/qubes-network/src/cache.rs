@@ -1,114 +1,76 @@
-//! Network consumer's retained QubesDB values. Whole-cache and per-source quotas
-//! belong here because interpreting firewall paths requires network semantics.
-//! Over-quota sources retain bounded rejection state while unrelated clients
-//! keep their complete records. Native framing and sequencing live in qubesdb.
+//! Network consumer's retained QubesDB values. BTreeMap owns unique-key storage;
+//! this layer owns payload accounting, source quotas and bounded rejection state.
+//! A rejected source is discarded as a whole while unrelated records survive.
 
+use alloc::collections::{BTreeMap, btree_map};
 use alloc::vec::Vec;
 use vstd::prelude::*;
 
 use crate::address::Ip;
 use crate::policy::Path;
-#[cfg(verus_keep_ghost)]
-use crate::wire;
+use airlock_qubesdb::wire::MAX_VALUE;
 
 verus! {
 
-/// All database keys count, including unrelated and currently unconsumed keys.
+/// All retained keys count, including unrelated configuration records.
 pub const MAX_ENTRIES: usize = 4096;
 
-/// Aggregate retained key/value bytes, independently of native per-value limits.
+/// Aggregate retained key/value payload, excluding container metadata.
 pub const MAX_BYTES: usize = 524_288;
 
-/// Root marker, required default and at most 256 ordered rule records.
+/// Root, required default and at most 256 native rule records per source.
 pub const MAX_SOURCE_ENTRIES: usize = 258;
 
-/// One source's encoded keys/values may retain at most 32 KiB. Oversize sources
-/// are explicitly blocked, with their data discarded to protect other clients.
+/// Maximum retained native key/value payload for one normalized source.
 pub const MAX_SOURCE_BYTES: usize = 32_768;
 
-/// At most four clients in both families may retain over-quota rejection state.
+/// Four clients in both families may retain over-quota rejection state.
 pub const MAX_REJECTIONS: usize = 8;
 
-/// One owned native key/value observation, not authenticated interface authority.
+/// Logical record used only in contracts; production stores each key once.
+#[cfg(verus_keep_ghost)]
 pub struct Entry {
-    /// Exact nonempty native key preceding its NUL terminator.
-    key: Vec<u8>,
-    /// Exact complete non-NUL body retained after native frame validation.
-    value: Vec<u8>,
+    /// Exact native key preceding its NUL terminator.
+    key: Seq<u8>,
+    /// Complete native body bytes.
+    value: Seq<u8>,
 }
 
+#[cfg(verus_keep_ghost)]
 impl Entry {
-    /// Exact private key used for replacement, deletion and local watch matching.
-    pub closed spec fn key(&self) -> Seq<u8> { self.key@ }
+    /// Exact key, independent of map iteration order.
+    pub closed spec fn key(&self) -> Seq<u8> { self.key }
 
-    /// Exact native value, with no trimming, decoding or silent truncation.
-    pub closed spec fn value(&self) -> Seq<u8> { self.value@ }
+    /// Exact retained body.
+    pub closed spec fn value(&self) -> Seq<u8> { self.value }
 
-    /// Allocation payload charged by this record, excluding bounded Vec metadata.
-    pub closed spec fn weight(&self) -> int { self.key@.len() + self.value@.len() }
+    /// Payload charged once for this key/value record.
+    pub closed spec fn weight(&self) -> int { self.key.len()+self.value.len() }
 
-    /// Every entry fits the native path/value grammar supplied by the decoder.
-    pub closed spec fn valid(&self) -> bool {
-        0 < self.key@.len() < 64 && self.value@.len() <= wire::MAX_VALUE
-    }
-
-    /// Borrow exact private key bytes without exposing mutable representation.
-    pub fn name(&self) -> (key: &[u8])
-        ensures key@ == self.key(),
-    { self.key.as_slice() }
-
-    /// Borrow the current complete private value; this is an observation only.
-    pub fn bytes(&self) -> (value: &[u8])
-        ensures value@ == self.value(),
-    { self.value.as_slice() }
+    /// Native key/value bounds.
+    pub closed spec fn valid(&self) -> bool { 0 < self.key.len() < 64 && self.value.len() <= MAX_VALUE }
 }
 
-/// Logical byte accounting independently sums each retained record.
+/// Independent sum of retained native payload charges.
 pub open spec fn weight(entries: Seq<Entry>, count: int) -> int
     decreases count,
 {
-    if count <= 0 { 0 } else { weight(entries, count-1) + entries[count-1].weight() }
+    if count <= 0 { 0 } else { weight(entries, count-1)+entries[count-1].weight() }
 }
 
-/// Replacing one entry changes only that record's exact byte charge.
-proof fn replaced_weight(entries: Seq<Entry>, index: int, entry: Entry, count: int)
-    requires 0 <= index < entries.len(), 0 <= count <= entries.len(),
-    ensures weight(entries.update(index, entry), count) == weight(entries, count)
-        + if index < count { entry.weight() - entries[index].weight() } else { 0 },
-    decreases count,
-{
-    if count > 0 { replaced_weight(entries, index, entry, count-1); }
-}
-
-/// Removing a record returns exactly its charge while preserving other bytes.
-proof fn removed_weight(entries: Seq<Entry>, index: int)
-    requires 0 <= index < entries.len(),
-    ensures weight(entries.remove(index), entries.len() as int-1)
-        == weight(entries, entries.len() as int) - entries[index].weight(),
-    decreases entries.len(),
-{
-    if index < entries.len()-1 {
-        removed_weight(entries.drop_last(), index);
-        assert(entries.remove(index).drop_last() =~= entries.drop_last().remove(index));
-        assert(entries.remove(index).last() == entries.last());
-    } else {
-        assert(entries.remove(index) =~= entries.drop_last());
-    }
-}
-
-/// Exact native removal semantics: only a trailing slash selects a subtree.
+/// Native removal semantics: only a trailing slash selects a subtree.
 pub open spec fn erased(existing: Seq<u8>, key: Seq<u8>) -> bool {
     if key.len() > 0 && key.last() == b'/' {
         existing.len() >= key.len() && existing.subrange(0, key.len() as int) == key
     } else { existing == key }
 }
 
-/// A native root or child belongs to this normalized source, including aliases.
+/// A root or child belongs to this normalized source, including address aliases.
 pub open spec fn belongs(key: Seq<u8>, source: Ip) -> bool {
     exists|end: int| crate::policy::source_path(key, source, end)
 }
 
-/// Exact normalized-source record count, independently of enumeration order.
+/// Exact normalized-source record count.
 pub open spec fn source_count(entries: Seq<Entry>, source: Ip, count: int) -> int
     decreases count,
 {
@@ -116,7 +78,7 @@ pub open spec fn source_count(entries: Seq<Entry>, source: Ip, count: int) -> in
         + if belongs(entries[count-1].key(), source) { 1 } else { 0 } }
 }
 
-/// Exact normalized-source payload charge, including native key bytes.
+/// Exact normalized-source payload charge.
 pub open spec fn source_bytes(entries: Seq<Entry>, source: Ip, count: int) -> int
     decreases count,
 {
@@ -124,69 +86,50 @@ pub open spec fn source_bytes(entries: Seq<Entry>, source: Ip, count: int) -> in
         + if belongs(entries[count-1].key(), source) { entries[count-1].weight() } else { 0 } }
 }
 
-/// Exact bounded key/value ownership. Replacement/deletion never leave a charge
-/// detached from retained storage; unsuccessful admission preserves all entries.
+/// Unique-key storage with explicit global and per-source admission limits.
 pub struct Cache {
-    /// Current complete native observations; no public mutable slice escapes.
-    entries: Vec<Entry>,
-    /// Exact payload charge, maintained before accepting another native mutation.
+    /// One owned key and body per record; standard map operations manage storage.
+    records: BTreeMap<Vec<u8>, Vec<u8>>,
+    /// Exact current key/value payload charge.
     used: usize,
-    /// At most eight over-quota normalized sources; all their records are
-    /// discarded until a real subtree removal begins a fresh replacement.
+    /// Rejected normalized sources until an authoritative subtree removal.
     suppressed: Vec<Ip>,
 }
 
 impl Cache {
-    /// Exact retained observations, independent of their internal ordering.
-    pub closed spec fn entries(&self) -> Seq<Entry> { self.entries@ }
+    /// All retained records as a logical sequence; consumers never rely on order.
+    pub closed spec fn entries(&self) -> Seq<Entry> {
+        let records = self.records.deep_view();
+        let keys = records.dom().to_seq();
+        Seq::new(keys.len(), |i: int| Entry { key: keys[i], value: records[keys[i]] })
+    }
 
-    /// Current live payload charge, rather than a monotonic lifetime allocation count.
+    /// Current payload charge, including keys and values exactly once.
     pub closed spec fn used(&self) -> usize { self.used }
 
-    /// Bounded storage, unique native keys and truthful byte accounting.
+    /// Bounded storage, truthful accounting and no retained rejected-source data.
     pub closed spec fn valid(&self) -> bool {
-        self.entries@.len() <= MAX_ENTRIES && self.used <= MAX_BYTES
+        self.entries().len() <= MAX_ENTRIES && self.used <= MAX_BYTES
+            && self.used == weight(self.entries(), self.entries().len() as int)
             && self.suppressed@.len() <= MAX_REJECTIONS
             && (forall|i: int| 0 <= i < self.suppressed@.len() ==> self.suppressed@[i].valid())
             && (forall|i: int, j: int| 0 <= i < j < self.suppressed@.len() ==> self.suppressed@[i] != self.suppressed@[j])
-            && (forall|i: int, j: int| 0 <= i < self.entries@.len() && 0 <= j < self.suppressed@.len()
-                ==> !belongs(self.entries@[i].key(), self.suppressed@[j]))
-            && self.used == weight(self.entries@, self.entries@.len() as int)
-            && (forall|i: int| 0 <= i < self.entries@.len() ==> self.entries@[i].valid())
-            && (forall|i: int, j: int| 0 <= i < j < self.entries@.len()
-                ==> self.entries@[i].key() != self.entries@[j].key())
+            && (forall|i: int| 0 <= i < self.entries().len() ==> self.entries()[i].valid())
+            && (forall|i: int, j: int| 0 <= i < j < self.entries().len() ==> self.entries()[i].key() != self.entries()[j].key())
+            && (forall|i: int, j: int| 0 <= i < self.entries().len() && 0 <= j < self.suppressed@.len()
+                ==> !belongs(self.entries()[i].key(), self.suppressed@[j]))
     }
 
-    /// Start a wholly empty private replica before receiving a synchronization dump.
+    /// Start without retained records or quota rejections.
     pub fn empty() -> (cache: Self)
-        ensures cache.valid() && cache.used() == 0 && cache.entries().len() == 0,
-    { Self { entries: Vec::new(), used: 0, suppressed: Vec::new() } }
+        ensures cache.valid(), cache.used() == 0, cache.entries().len() == 0,
+    { Self { records: BTreeMap::new(), used: 0, suppressed: Vec::new() } }
 
-    /// Resolve one exact native key. Prefix matching is used only for an explicit
-    /// trailing-slash deletion and never for an ordinary lookup or replacement.
-    fn index(&self, key: &[u8]) -> (index: Option<usize>)
-        requires self.valid(), key@.len() < 64,
-        ensures match index {
-            Some(value) => value < self.entries().len() && self.entries()[value as int].key() == key@,
-            None => forall|i: int| 0 <= i < self.entries().len() ==> self.entries()[i].key() != key@,
-        },
-    {
-        let mut i = 0;
-        while i < self.entries.len()
-            invariant self.valid(), i <= self.entries@.len(), key@.len() < 64,
-                forall|j: int| 0 <= j < i ==> self.entries@[j].key() != key@,
-            decreases self.entries.len()-i,
-        {
-            if self.entries[i].name() == key { return Some(i); }
-            i += 1;
-        }
-        None
-    }
-
-    /// Atomically replace/insert a complete record after both count and byte
-    /// admission. Failed admission retains the previous exact cache and charge.
+    /// Admit a whole record before inserting/replacing it. Failed admission
+    /// preserves prior storage and accounting. Over-quota sources are discarded
+    /// together and blocked; their records are never partially installed.
     pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>, replacing: bool) -> (accepted: bool)
-        requires old(self).valid(), 0 < key@.len() < 64, value@.len() <= wire::MAX_VALUE,
+        requires old(self).valid(), 0 < key@.len() < 64, value@.len() <= MAX_VALUE,
         ensures final(self).valid(),
             !accepted ==> final(self).entries() == old(self).entries() && final(self).used() == old(self).used(),
             accepted ==> (exists|i: int| 0 <= i < final(self).entries().len()
@@ -196,10 +139,13 @@ impl Cache {
                 && !final(self).suppressed_key(old(self).entries()[i].key())
                 ==> final(self).entries().contains(old(self).entries()[i]),
     {
-        let old = self.index(key.as_slice());
+        if key.is_empty() || key.len() >= 64 || value.len() > MAX_VALUE { return false; }
+
+        let old = self.records.get(key.as_slice());
         if old.is_some() && !replacing { return false; }
-        let previous = match old { Some(index) => self.entries[index].key.len()+self.entries[index].value.len(), None => 0 };
+        let previous = old.map_or(0, |value| key.len()+value.len());
         let cost = key.len()+value.len();
+
         if let Some(source) = Path::parse(key.as_slice()) {
             if self.source_suppressed(source.ip()) { return true; }
             let (count, charge) = self.source_charge(source.ip());
@@ -207,26 +153,15 @@ impl Cache {
                 return self.suppress(source.ip());
             }
         }
-        if cost > MAX_BYTES - (self.used-previous) { return false; }
-        if old.is_none() && self.entries.len() >= MAX_ENTRIES { return false; }
-        let entry = Entry { key, value };
-        let ghost before = self.entries@;
-        let ghost after = entry;
-        match old {
-            Some(index) => {
-                proof { replaced_weight(before, index as int, after, before.len() as int); }
-                self.entries.set(index, entry);
-            }
-            None => { self.entries.push(entry); }
-        }
+
+        if cost > MAX_BYTES-(self.used-previous) || old.is_none() && self.records.len() == MAX_ENTRIES { return false; }
+
+        let _ = self.records.insert(key, value);
         self.used = self.used-previous+cost;
         true
     }
 
-    /// Determine whether a native successful removal may refer to staged data
-    /// intentionally discarded for a rejected source. Whole database/firewall
-    /// subtree deletion also covers those records; it must not desynchronize
-    /// the replica merely because this bounded consumer already reclaimed them.
+    /// Whether a successful native removal may name intentionally discarded data.
     pub fn discarded_remove(&self, key: &[u8]) -> (discarded: bool)
         requires self.valid(), 0 < key@.len() < 64,
         ensures discarded == (self.suppressed@.len() > 0
@@ -237,10 +172,8 @@ impl Cache {
         match Path::parse(key) { Some(path) => self.source_suppressed(path.ip()), None => false }
     }
 
-    /// Remove exactly a key or all descendants of an explicit trailing-slash
-    /// prefix. A zero result is an observation; the network control owner treats it
-    /// as desynchronization because upstream mirrors only successful removals.
-    /// The entire operation is finite and leaves unrelated entries unchanged.
+    /// Remove exactly one key or an explicit trailing-slash subtree, returning
+    /// the removed count and payload charge. Unrelated records remain unchanged.
     pub fn remove(&mut self, key: &[u8]) -> (removed: usize)
         requires old(self).valid(), 0 < key@.len() < 64,
         ensures final(self).valid(), removed <= old(self).entries().len(),
@@ -249,145 +182,102 @@ impl Cache {
                 final(self).entries().contains(old(self).entries()[i]) == !erased(old(self).entries()[i].key(), key@),
             forall|i: int| 0 <= i < final(self).entries().len() ==> old(self).entries().contains(final(self).entries()[i]),
     {
-        if key == b"/" || key == b"/qubes-firewall/" {
-            self.suppressed.clear();
-        }
+        if key == b"/" || key == b"/qubes-firewall/" { self.suppressed.clear(); }
         if let Some(path) = Path::parse(key)
             && key.len() == path.boundary()+1 && key[key.len()-1] == b'/' {
-                let mut i = 0;
-                while i < self.suppressed.len()
-                    invariant self.valid(), i <= self.suppressed.len() <= MAX_REJECTIONS,
-                    decreases self.suppressed.len()-i,
-                {
-                    if self.suppressed[i].same(path.ip()) { self.suppressed.remove(i); break; }
-                    i += 1;
-                }
-            }
-        let tree = key[key.len()-1] == b'/';
-        let mut i = self.entries.len();
-        let mut removed = 0;
-        while i > 0
-            invariant self.valid(), i <= self.entries.len(),
-                removed + self.entries.len() == old(self).entries().len(),
-                0 < key@.len() < 64,
-            decreases i,
-        {
-            i -= 1;
-            let matches = if tree { self.entries[i].name().starts_with(key) } else { self.entries[i].name() == key };
-            if matches {
-                let cost = self.entries[i].key.len()+self.entries[i].value.len();
-                proof { removed_weight(self.entries@, i as int); }
-                self.entries.remove(i);
-                self.used -= cost;
-                removed += 1;
-            }
+            self.suppressed.retain(|source| !source.same(path.ip()));
         }
-        removed
+
+        if !key.ends_with(b"/") {
+            return match self.records.remove_entry(key) {
+                Some((name, value)) => { self.used -= name.len()+value.len(); 1 }
+                None => 0,
+            };
+        }
+
+        let before = self.records.len();
+        let mut reclaimed = 0;
+        self.records.retain(|name, value| {
+            if name.starts_with(key) { reclaimed += name.len()+value.len(); false } else { true }
+        });
+        self.used -= reclaimed;
+        before-self.records.len()
     }
 
     /// Logical over-quota rejection for one normalized source.
     pub closed spec fn is_suppressed(&self, source: Ip) -> bool { self.suppressed@.contains(source) }
 
-    /// A native key belongs to a source whose full staged data was discarded.
+    /// A native key belongs to a source whose entire staged data was discarded.
     pub closed spec fn suppressed_key(&self, key: Seq<u8>) -> bool {
         exists|i: int| 0 <= i < self.suppressed@.len() && belongs(key, self.suppressed@[i])
     }
 
-    /// Observe the exact bounded per-source rejection, separate from absence.
+    /// Observe source rejection separately from a missing key.
     pub fn source_suppressed(&self, source: &Ip) -> (suppressed: bool)
         requires self.valid(), source.valid(),
         ensures suppressed == self.is_suppressed(*source),
-    {
-        let mut i = 0;
-        while i < self.suppressed.len()
-            invariant self.valid(), source.valid(), i <= self.suppressed.len() <= MAX_REJECTIONS,
-                forall|j: int| 0 <= j < i ==> self.suppressed@[j] != *source,
-            decreases self.suppressed.len()-i,
-        {
-            if self.suppressed[i].same(source) { return true; }
-            i += 1;
-        }
-        false
-    }
+    { self.suppressed.iter().any(|candidate| candidate.same(source)) }
 
-    /// Exact retained count/byte charge of one normalized source's roots/children.
+    /// Count and charge every record of one normalized source, including aliases.
     fn source_charge(&self, source: &Ip) -> (charge: (usize, usize))
         requires self.valid(), source.valid(),
-        ensures charge.0 <= self.entries().len(), charge.1 <= self.used(),
-            charge.0 == source_count(self.entries(), *source, self.entries().len() as int),
+        ensures charge.0 == source_count(self.entries(), *source, self.entries().len() as int),
             charge.1 == source_bytes(self.entries(), *source, self.entries().len() as int),
+            charge.0 <= self.entries().len(), charge.1 <= self.used(),
     {
         let mut count = 0;
         let mut charge = 0;
-        let mut i = 0;
-        while i < self.entries.len()
-            invariant self.valid(), source.valid(), i <= self.entries.len() <= MAX_ENTRIES,
-                count == source_count(self.entries@, *source, i as int),
-                charge == source_bytes(self.entries@, *source, i as int),
-                charge <= self.used,
-            decreases self.entries.len()-i,
-        {
-            if let Some(path) = Path::parse(self.entries[i].name())
-                && path.ip().same(source) {
-                    count += 1;
-                    charge += self.entries[i].key.len()+self.entries[i].value.len();
-                }
-            i += 1;
+
+        for (key, value) in &self.records {
+            if let Some(path) = Path::parse(key.as_slice())
+                && path.ip().same(source) { count += 1; charge += key.len()+value.len(); }
         }
+
         (count, charge)
     }
 
-    /// Reject the whole over-quota source and return its retained record charge.
-    /// Unrelated entries are preserved exactly; no silently truncated prefix can
-    /// become an installable policy. Failed tombstone admission changes nothing.
+    /// Reject the whole source after admitting its bounded tombstone. Standard
+    /// map retention removes its records; accounting follows the exact removals.
     fn suppress(&mut self, source: &Ip) -> (accepted: bool)
         requires old(self).valid(), source.valid(), !old(self).is_suppressed(*source),
-        ensures final(self).valid(),
-            accepted ==> final(self).is_suppressed(*source),
+        ensures final(self).valid(), accepted ==> final(self).is_suppressed(*source),
             !accepted ==> final(self).entries() == old(self).entries() && final(self).used() == old(self).used(),
             forall|i: int| 0 <= i < old(self).entries().len() && !belongs(old(self).entries()[i].key(), *source)
                 ==> final(self).entries().contains(old(self).entries()[i]),
     {
         if self.suppressed.len() == MAX_REJECTIONS { return false; }
-        let mut i = self.entries.len();
-        while i > 0
-            invariant self.valid(), source.valid(), i <= self.entries.len(),
-                self.suppressed@.len() < MAX_REJECTIONS,
-                forall|j: int| i <= j < self.entries@.len() ==> !belongs(self.entries@[j].key(), *source),
-            decreases i,
-        {
-            i -= 1;
-            if let Some(path) = Path::parse(self.entries[i].name())
-                && path.ip().same(source) {
-                    let cost = self.entries[i].key.len()+self.entries[i].value.len();
-                    proof { removed_weight(self.entries@, i as int); }
-                    self.entries.remove(i);
-                    self.used -= cost;
-                }
-        }
+
+        let mut reclaimed = 0;
+        self.records.retain(|key, value| {
+            let remove = Path::parse(key.as_slice()).is_some_and(|path| path.ip().same(source));
+            if remove { reclaimed += key.len()+value.len(); }
+            !remove
+        });
+        self.used -= reclaimed;
         self.suppressed.push(*source);
         true
     }
 
-    /// Borrow one complete value without permitting a caller to mutate storage.
+    /// Borrow one exact complete value through the map's borrowed-key lookup.
     pub fn read(&self, key: &[u8]) -> (value: Option<&[u8]>)
         requires self.valid(), key@.len() < 64,
         ensures match value {
-            Some(bytes) => bytes@.len() <= wire::MAX_VALUE && (exists|i: int| 0 <= i < self.entries().len()
+            Some(bytes) => bytes@.len() <= MAX_VALUE && (exists|i: int| 0 <= i < self.entries().len()
                 && self.entries()[i].key() == key@ && self.entries()[i].value() == bytes@),
             None => forall|i: int| 0 <= i < self.entries().len() ==> self.entries()[i].key() != key@,
         },
-    {
-        match self.index(key) { Some(index) => Some(self.entries[index].bytes()), None => None }
-    }
+    { self.records.get(key).map(Vec::as_slice) }
 
-    /// Inspect immutable observations while building a complete configuration
-    /// projection. These records alone do not authenticate a network interface.
-    pub fn all(&self) -> (entries: &[Entry])
+    /// Iterate borrowed keys and bodies without allocating another collection.
+    /// Map order is storage detail; policy rules retain their native numeric order.
+    pub fn all(&self) -> (entries: btree_map::Iter<'_, Vec<u8>, Vec<u8>>)
         requires self.valid(),
-        ensures entries@ == self.entries(), entries@.len() <= MAX_ENTRIES,
-            forall|i: int| 0 <= i < entries@.len() ==> entries@[i].valid(),
-    { self.entries.as_slice() }
+        ensures vstd::std_specs::btree::into_iter(entries).len() == self.entries().len(),
+            forall|key: Vec<u8>, value: Vec<u8>|
+                vstd::std_specs::btree::into_iter(entries).contains((key, value))
+                    == (exists|i: int| 0 <= i < self.entries().len()
+                        && self.entries()[i].key() == key@ && self.entries()[i].value() == value@),
+    { self.records.iter() }
 }
 
 }

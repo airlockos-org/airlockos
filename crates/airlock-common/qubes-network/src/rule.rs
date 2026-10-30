@@ -12,6 +12,8 @@
 //! in the pinned worker. Hostname values remain unresolved obligations: failure
 //! to resolve every hostname blocks the source, including unresolved drop rules.
 
+mod options;
+
 use alloc::vec::Vec;
 use vstd::prelude::*;
 use vstd::slice::slice_to_vec;
@@ -20,6 +22,7 @@ use vstd::slice::slice_to_vec;
 use crate::address;
 use crate::address::Ip;
 use crate::number;
+use options::Options;
 
 verus! {
 
@@ -259,411 +262,195 @@ impl Network {
     { self.prefix }
 }
 
-/// Private typed options. Only the decoder constructs these; the rule owns the
-/// complete unique set and validates relationships before exposing any getters.
-enum Field {
-    /// Exact matching disposition.
-    Action(/// Parsed action token.
-        Action),
-    /// Explicit protocol condition.
-    Protocol(/// Parsed explicit protocol, never Any.
-        Protocol),
-    /// Destination prefix of the source's exact address family.
-    Network(/// Parsed CIDR/address condition.
-        Network),
-    /// Unresolved DNS hostname obligation.
-    Host(/// Parsed bounded hostname.
-        Hostname),
-    /// Destination ports, ordered and within packet bounds.
-    Ports(/// Parsed inclusive range.
-        Ports),
-    /// ICMP/ICMPv6 type, requiring the explicit ICMP protocol.
-    Icmp(/// Native type value from 0 through 255.
-        u8),
-    /// Dynamic configured-DNS-address condition, not arbitrary port-53 traffic.
-    Dns,
-}
-
-impl Field {
-    /// Distinct option identity; both destination families occupy the same slot
-    /// so competing same/different-family addresses cannot silently override.
-    closed spec fn tag(&self) -> u8 {
-        match self {
-            Self::Action(_) => 0, Self::Protocol(_) => 1, Self::Network(_) => 2,
-            Self::Host(_) => 3, Self::Ports(_) => 4, Self::Icmp(_) => 5, Self::Dns => 6,
-        }
-    }
-
-    /// Every field has a meaningful same-family typed interpretation.
-    closed spec fn valid(&self, family: u8) -> bool {
-        match self {
-            Self::Network(value) => value.valid() && value.address().family() == family,
-            Self::Host(value) => hostname(value.bytes()),
-            Self::Ports(value) => value.low() <= value.high(),
-            Self::Protocol(value) => value != Protocol::Any,
-            _ => true,
-        }
-    }
-
-    /// Independent meaning of one exact option spelling and its typed value.
-    closed spec fn meaning(&self, key: Seq<u8>, bytes: Seq<u8>, family: u8) -> bool {
-        self.valid(family) && match self {
-            Self::Action(value) => key == b"action"@ && action_token(bytes, *value),
-            Self::Protocol(value) => key == b"proto"@ && protocol_token(bytes, *value),
-            Self::Network(value) => key == (if family == 4 { b"dst4"@ } else { b"dst6"@ })
-                && network_token(bytes, value.address(), value.prefix() as int, family),
-            Self::Host(value) => key == b"dsthost"@ && hostname(bytes) && value.bytes() == bytes,
-            Self::Ports(value) => key == b"dstports"@ && ports_token(bytes, value.low() as int, value.high() as int),
-            Self::Icmp(value) => key == b"icmptype"@ && number::digits(bytes, true) && number::decimal(bytes) == *value,
-            Self::Dns => key == b"specialtarget"@ && bytes == b"dns"@,
-        }
-    }
-
-    /// Read the option identity for finite duplicate/conflict checking.
-    fn ordinal(&self) -> (tag: u8)
-        ensures tag == self.tag(), tag <= 6,
-    {
-        match self {
-            Self::Action(_) => 0, Self::Protocol(_) => 1, Self::Network(_) => 2,
-            Self::Host(_) => 3, Self::Ports(_) => 4, Self::Icmp(_) => 5, Self::Dns => 6,
-        }
-    }
-
-    /// Decode a single exact option; unknown names and malformed known values
-    /// are equally incapable of creating a partially interpreted allow rule.
-    fn parse(key: &[u8], bytes: &[u8], family: u8) -> (field: Option<Self>)
-        requires key@.len() <= 4096, bytes@.len() <= 4096, family == 4 || family == 6,
-        ensures match field {
-            Some(value) => value.meaning(key@, bytes@, family),
-            None => !(exists|value: Field| value.meaning(key@, bytes@, family)),
-        },
-    {
-        if key == b"action" { return action(bytes).map(Self::Action); }
-        if key == b"proto" { return protocol(bytes).map(Self::Protocol); }
-        if key == b"dst4" || key == b"dst6" {
-            let expected = if key == b"dst4" { 4 } else { 6 };
-            if expected != family { return None; }
-            return Network::parse(bytes, family).map(Self::Network);
-        }
-        if key == b"dsthost" { return Hostname::parse(bytes).map(Self::Host); }
-        if key == b"dstports" { return Ports::parse(bytes).map(Self::Ports); }
-        if key == b"icmptype" {
-            return number::parse(bytes, 255, true).map(|value| Self::Icmp(value as u8));
-        }
-        if key == b"specialtarget" && bytes == b"dns" { return Some(Self::Dns); }
-        None
-    }
-}
-
-/// Normative ordered token language with exact first-space/equals boundaries.
-/// Payload conditions are typed meanings, never a collection of ignored strings.
-closed spec fn field_stream(bytes: Seq<u8>, fields: Seq<Field>, family: u8) -> bool
-    decreases fields.len(),
-{
-    fields.len() > 0 && exists|end: int, equals: int|
-        address::cut(bytes, end, b' ') && end > 0
-            && address::cut(bytes.subrange(0, end), equals, b'=') && 0 < equals < end-1
-            && fields[0].meaning(bytes.subrange(0, equals), bytes.subrange(equals+1, end), family)
-            && if fields.len() == 1 { end == bytes.len() }
-                else { end < bytes.len() && field_stream(bytes.subrange(end+1, bytes.len() as int), fields.drop_first(), family) }
-}
-
-/// Decode at most eight options. Empty, leading/trailing whitespace, extra '='
-/// and overlong option lists cannot be partially consumed as a valid prefix.
-fn fields(bytes: &[u8], family: u8, remaining: usize) -> (fields: Option<Vec<Field>>)
-    requires bytes@.len() <= 3071, family == 4 || family == 6, remaining <= 8,
-    ensures match fields {
-        Some(value) => 0 < value@.len() <= remaining && field_stream(bytes@, value@, family)
-            && forall|i: int| 0 <= i < value@.len() ==> value@[i].valid(family),
-        None => !(exists|value: Seq<Field>| 0 < value.len() <= remaining && field_stream(bytes@, value, family)),
-    },
-    decreases remaining,
-{
-    if remaining == 0 || bytes.is_empty() { return None; }
-    let end = bytes.iter().position(|byte| *byte == b' ').unwrap_or(bytes.len());
-    let token = &bytes[..end];
-    let equals = token.iter().position(|byte| *byte == b'=').unwrap_or(token.len());
-    if equals == 0 || equals == token.len() || equals+1 == token.len() { return None; }
-    let field = Field::parse(&token[..equals], &token[equals+1..], family)?;
-    if end == bytes.len() {
-        return Some(alloc::vec![field]);
-    }
-    let mut tail = fields(&bytes[end+1..], family, remaining-1)?;
-    tail.insert(0, field);
-    Some(tail)
-}
-
-/// Exact last-present protocol; uniqueness makes it also the first-present one.
-closed spec fn protocol_of(fields: Seq<Field>) -> Protocol
-    decreases fields.len(),
-{
-    if fields.len() == 0 { Protocol::Any }
-    else { match fields.last() { Field::Protocol(value) => value, _ => protocol_of(fields.drop_last()) } }
-}
-
-/// Exact matching disposition; a valid rule always contains exactly one action.
-closed spec fn action_of(fields: Seq<Field>) -> Action
-    decreases fields.len(),
-{
-    if fields.len() == 0 { Action::Drop }
-    else { match fields.last() { Field::Action(value) => value, _ => action_of(fields.drop_last()) } }
-}
-
-/// Supported unique options and their meaningful cross-condition constraints.
-closed spec fn coherent(fields: Seq<Field>, family: u8) -> bool {
-    (family == 4 || family == 6) && 0 < fields.len() <= 8
-        && (forall|i: int| 0 <= i < fields.len() ==> fields[i].valid(family))
-        && (forall|i: int, j: int| 0 <= i < j < fields.len() ==> fields[i].tag() != fields[j].tag())
-        && (exists|i: int| 0 <= i < fields.len() && fields[i].tag() == 0)
-        && !((exists|i: int| 0 <= i < fields.len() && fields[i].tag() == 2)
-            && (exists|i: int| 0 <= i < fields.len() && fields[i].tag() == 3))
-        && ((exists|i: int| 0 <= i < fields.len() && fields[i].tag() == 5) ==> protocol_of(fields) == Protocol::Icmp)
-        && (protocol_of(fields) == Protocol::Icmp ==>
-            forall|i: int| 0 <= i < fields.len() ==> fields[i].tag() != 4 && fields[i].tag() != 6)
-}
-
-/// Useful accepted rule language, independent of executable parser control flow.
-pub closed spec fn well_formed(bytes: Seq<u8>, family: u8) -> bool {
-    bytes.len() <= 3071 && exists|fields: Seq<Field>| field_stream(bytes, fields, family) && coherent(fields, family)
-}
-
-/// A complete typed rule. No public constructor, field mutation or unchecked
-/// conversion can bypass duplicate, option or cross-condition validation.
+/// A complete rule with directly stored, validated conditions. The Serde schema
+/// handles option names; construction enforces network meaning and combinations.
 pub struct Rule {
-    /// Exact bounded complete options in their source order.
-    fields: Vec<Field>,
-    /// Address family whose source snapshot owns this rule.
+    /// Required disposition from the single action option.
+    action: Action,
+    /// Explicit protocol or the meaningful absent-option Any value.
+    protocol: Protocol,
+    /// Optional same-family destination prefix.
+    network: Option<Network>,
+    /// Optional unresolved hostname obligation.
+    host: Option<Hostname>,
+    /// Optional ordered destination port range.
+    ports: Option<Ports>,
+    /// Optional ICMP type, valid only with the ICMP protocol.
+    icmp: Option<u8>,
+    /// Whether configured DNS destinations and port 53 must also match.
+    dns: bool,
+    /// Address family of the source snapshot owning this rule.
     pub(crate) family: u8,
 }
 
+/// Exact useful rule language, rather than successful tokenization alone.
+pub closed spec fn well_formed(bytes: Seq<u8>, family: u8) -> bool {
+    exists|rule: Rule| rule.family == family && rule.describes(bytes)
+}
+
 impl Rule {
-    /// Every option is supported, unique and consistent with its companions.
-    pub closed spec fn valid(&self) -> bool { coherent(self.fields@, self.family) }
+    /// Every condition is valid and meaningful together with the others.
+    pub closed spec fn valid(&self) -> bool {
+        (self.family == 4 || self.family == 6)
+            && (self.network.is_some() ==> self.network.unwrap().valid()
+                && self.network.unwrap().address().family() == self.family)
+            && (self.host.is_some() ==> hostname(self.host.unwrap().bytes()))
+            && (self.ports.is_some() ==> self.ports.unwrap().low() <= self.ports.unwrap().high())
+            && !(self.network.is_some() && self.host.is_some())
+            && (self.icmp.is_some() ==> self.protocol == Protocol::Icmp)
+            && (self.protocol == Protocol::Icmp ==> self.ports.is_none() && !self.dns)
+    }
 
-    /// Exact option meanings of this complete source token sequence.
+    /// Semantic meaning of every decoded field, including exact absence.
+    closed spec fn interprets(&self, options: Options) -> bool {
+        action_token(options.action@, self.action)
+            && match options.proto {
+                None => self.protocol == Protocol::Any,
+                Some(bytes) => protocol_token(bytes@, self.protocol),
+            }
+            && match (options.dst4, options.dst6, self.network) {
+                (None, None, None) => true,
+                (Some(bytes), None, Some(network)) => self.family == 4
+                    && network_token(bytes@, network.address(), network.prefix() as int, 4),
+                (None, Some(bytes), Some(network)) => self.family == 6
+                    && network_token(bytes@, network.address(), network.prefix() as int, 6),
+                _ => false,
+            }
+            && match (options.dsthost, self.host) {
+                (None, None) => true,
+                (Some(bytes), Some(host)) => bytes@ == host.bytes(),
+                _ => false,
+            }
+            && match (options.dstports, self.ports) {
+                (None, None) => true,
+                (Some(bytes), Some(ports)) => ports_token(bytes@, ports.low() as int, ports.high() as int),
+                _ => false,
+            }
+            && match (options.icmptype, self.icmp) {
+                (None, None) => true,
+                (Some(bytes), Some(value)) => number::digits(bytes@, true) && number::decimal(bytes@) == value,
+                _ => false,
+            }
+            && match options.specialtarget {
+                None => !self.dns,
+                Some(bytes) => self.dns && bytes@ == b"dns"@,
+            }
+    }
+
+    /// Complete native option meaning, independent of option order.
     pub closed spec fn describes(&self, bytes: Seq<u8>) -> bool {
-        field_stream(bytes, self.fields@, self.family)
+        self.valid() && exists|options: Options| options.describes(bytes) && self.interprets(options)
     }
 
-    /// Observed matching disposition from the one complete action option.
-    pub closed spec fn action(&self) -> Action { action_of(self.fields@) }
+    /// Exact disposition selected by the required action option.
+    pub closed spec fn action(&self) -> Action { self.action }
 
-    /// Exact protocol restriction, including an absent option's Any value.
-    pub closed spec fn protocol(&self) -> Protocol { protocol_of(self.fields@) }
+    /// Exact protocol, including the absent-option Any value.
+    pub closed spec fn protocol(&self) -> Protocol { self.protocol }
 
-    /// Whether the complete native options contain a hostname obligation.
-    pub closed spec fn has_hostname(&self) -> bool {
-        exists|i: int| 0 <= i < self.fields@.len() && self.fields@[i].tag() == 3
-    }
+    /// Whether this rule carries an unresolved hostname obligation.
+    pub closed spec fn has_hostname(&self) -> bool { self.host.is_some() }
 
-    /// Reject an entire malformed/unsupported rule. The caller rejects that
-    /// source's whole snapshot; it must never skip just the rejected condition.
+    /// Decode the whole option schema, then reject every unsupported value or
+    /// incompatible combination before constructing a usable rule.
     pub fn parse(bytes: &[u8], family: u8) -> (rule: Option<Self>)
         ensures match rule {
             Some(value) => value.valid() && value.describes(bytes@) && value.family == family,
             None => !well_formed(bytes@, family),
         },
     {
-        if bytes.len() > 3071 || (family != 4 && family != 6) { return None; }
-        let parsed = fields(bytes, family, 8)?;
-        let mut i = 0;
-        let mut has_action = false;
-        let mut has_network = false;
-        let mut has_host = false;
-        let mut has_ports = false;
-        let mut has_icmp = false;
-        let mut has_dns = false;
-        let mut protocol = Protocol::Any;
-        while i < parsed.len()
-            invariant i <= parsed.len() <= 8, parsed.len() > 0, family == 4 || family == 6,
-                forall|k: int| 0 <= k < parsed@.len() ==> parsed@[k].valid(family),
-                forall|j: int, k: int| 0 <= j < k < i ==> parsed@[j].tag() != parsed@[k].tag(),
-                has_action == (exists|j: int| 0 <= j < i && parsed@[j].tag() == 0),
-                has_network == (exists|j: int| 0 <= j < i && parsed@[j].tag() == 2),
-                has_host == (exists|j: int| 0 <= j < i && parsed@[j].tag() == 3),
-                has_ports == (exists|j: int| 0 <= j < i && parsed@[j].tag() == 4),
-                has_icmp == (exists|j: int| 0 <= j < i && parsed@[j].tag() == 5),
-                has_dns == (exists|j: int| 0 <= j < i && parsed@[j].tag() == 6),
-                protocol == protocol_of(parsed@.subrange(0, i as int)),
-            decreases parsed.len()-i,
-        {
-            let tag = parsed[i].ordinal();
-            let mut j = 0;
-            while j < i
-                invariant j <= i < parsed.len(),
-                    forall|k: int| 0 <= k < j ==> parsed@[k].tag() != parsed@[i as int].tag(),
-                decreases i-j,
-            {
-                if parsed[j].ordinal() == tag { return None; }
-                j += 1;
-            }
-            match &parsed[i] {
-                Field::Action(_) => has_action = true,
-                Field::Protocol(value) => protocol = *value,
-                Field::Network(_) => has_network = true,
-                Field::Host(_) => has_host = true,
-                Field::Ports(_) => has_ports = true,
-                Field::Icmp(_) => has_icmp = true,
-                Field::Dns => has_dns = true,
-            }
-            i += 1;
-        }
-        if !has_action || (has_network && has_host)
-            || (has_icmp && protocol != Protocol::Icmp)
-            || (protocol == Protocol::Icmp && (has_ports || has_dns)) { return None; }
-        Some(Self { fields: parsed, family })
+        if family != 4 && family != 6 { return None; }
+
+        let options = Options::parse(bytes)?;
+        let action = action(options.action.as_slice())?;
+        let protocol = match options.proto { Some(bytes) => protocol(bytes.as_slice())?, None => Protocol::Any };
+        let network = match (options.dst4, options.dst6) {
+            (None, None) => None,
+            (Some(bytes), None) if family == 4 => Some(Network::parse(bytes.as_slice(), 4)?),
+            (None, Some(bytes)) if family == 6 => Some(Network::parse(bytes.as_slice(), 6)?),
+            _ => return None,
+        };
+        let host = match options.dsthost { Some(bytes) => Some(Hostname::parse(bytes.as_slice())?), None => None };
+        let ports = match options.dstports { Some(bytes) => Some(Ports::parse(bytes.as_slice())?), None => None };
+        let icmp = match options.icmptype {
+            Some(bytes) => Some(number::parse(bytes.as_slice(), 255, true)? as u8),
+            None => None,
+        };
+        let dns = match options.specialtarget {
+            None => false,
+            Some(bytes) if bytes.as_slice() == b"dns" => true,
+            _ => return None,
+        };
+
+        if network.is_some() && host.is_some() || icmp.is_some() && protocol != Protocol::Icmp
+            || protocol == Protocol::Icmp && (ports.is_some() || dns) { return None; }
+
+        Some(Self { action, protocol, network, host, ports, icmp, dns, family })
     }
 
-    /// Read the exact completed rule action; missing-action input never reaches
-    /// this representation and cannot acquire the Drop fallback as a valid parse.
+    /// Read the required disposition without searching option records.
     pub fn disposition(&self) -> (action: Action)
         requires self.valid(), ensures action == self.action(),
-    {
-        let mut action = Action::Drop;
-        let mut i = 0;
-        while i < self.fields.len()
-            invariant i <= self.fields@.len(), action == action_of(self.fields@.subrange(0, i as int)),
-            decreases self.fields.len()-i,
-        {
-            if let Field::Action(value) = &self.fields[i] { action = *value; }
-            i += 1;
-        }
-        action
-    }
+    { self.action }
 
-    /// Read the explicit protocol or the meaningful absent-option Any value.
+    /// Read the explicit protocol or the absent-option Any value.
     pub fn transport(&self) -> (protocol: Protocol)
         requires self.valid(), ensures protocol == self.protocol(),
-    {
-        let mut protocol = Protocol::Any;
-        let mut i = 0;
-        while i < self.fields.len()
-            invariant i <= self.fields@.len(), protocol == protocol_of(self.fields@.subrange(0, i as int)),
-            decreases self.fields.len()-i,
-        {
-            if let Field::Protocol(value) = &self.fields[i] { protocol = *value; }
-            i += 1;
-        }
-        protocol
-    }
+    { self.protocol }
 
-    /// Borrow any unresolved hostname obligation. A consumer cannot activate a
-    /// policy by ignoring it, regardless of whether that rule accepts or drops.
+    /// Borrow the unresolved hostname, which must be resolved before activation.
     pub fn host(&self) -> (host: Option<&Hostname>)
         requires self.valid(),
         ensures match host {
-            Some(value) => hostname(value.bytes()) && (exists|i: int| 0 <= i < self.fields@.len() && self.fields@[i] == Field::Host(*value)),
-            None => forall|i: int| 0 <= i < self.fields@.len() ==> self.fields@[i].tag() != 3,
+            Some(value) => self.host == Some(*value) && hostname(value.bytes()),
+            None => self.host.is_none(),
         },
-    {
-        let mut i = 0;
-        while i < self.fields.len()
-            invariant i <= self.fields.len(),
-                forall|j: int| 0 <= j < i ==> self.fields@[j].tag() != 3,
-            decreases self.fields.len()-i,
-        {
-            if let Field::Host(host) = &self.fields[i] { return Some(host); }
-            i += 1;
-        }
-        None
-    }
-    /// Borrow the exact native destination-prefix restriction.
-    pub fn network(&self) -> (restriction: Option<&Network>)
-        requires self.valid(),
-        ensures match restriction {
-            Some(value) => value.valid() && value.address().family() == self.family && (exists|i: int| 0 <= i < self.fields@.len() && self.fields@[i] == Field::Network(*value)),
-            None => forall|i: int| 0 <= i < self.fields@.len() ==> self.fields@[i].tag() != 2,
-        },
-    {
-        let mut i = 0;
-        while i < self.fields.len()
-            invariant self.valid(), i <= self.fields.len(),
-                forall|j: int| 0 <= j < i ==> self.fields@[j].tag() != 2,
-            decreases self.fields.len()-i,
-        {
-            if let Field::Network(value) = &self.fields[i] { return Some(value); }
-            i += 1;
-        }
-        None
-    }
+    { self.host.as_ref() }
 
-    /// Borrow the exact inclusive destination-port restriction.
-    pub fn ports(&self) -> (restriction: Option<&Ports>)
+    /// Borrow the validated same-family destination restriction.
+    pub fn network(&self) -> (network: Option<&Network>)
         requires self.valid(),
-        ensures match restriction {
-            Some(value) => value.low() <= value.high() && (exists|i: int| 0 <= i < self.fields@.len() && self.fields@[i] == Field::Ports(*value)),
-            None => forall|i: int| 0 <= i < self.fields@.len() ==> self.fields@[i].tag() != 4,
+        ensures match network {
+            Some(value) => self.network == Some(*value) && value.valid() && value.address().family() == self.family,
+            None => self.network.is_none(),
         },
-    {
-        let mut i = 0;
-        while i < self.fields.len()
-            invariant self.valid(), i <= self.fields.len(),
-                forall|j: int| 0 <= j < i ==> self.fields@[j].tag() != 4,
-            decreases self.fields.len()-i,
-        {
-            if let Field::Ports(value) = &self.fields[i] { return Some(value); }
-            i += 1;
-        }
-        None
-    }
+    { self.network.as_ref() }
 
-    /// Exact native ICMP type restriction; absent permits any type of the
-    /// already validated protocol. IPv6 consumers use ICMPv6 for this value.
-    pub fn icmp_type(&self) -> (restriction: Option<u8>)
+    /// Borrow the validated inclusive destination-port range.
+    pub fn ports(&self) -> (ports: Option<&Ports>)
         requires self.valid(),
-        ensures match restriction {
-            Some(value) => self.protocol() == Protocol::Icmp && (exists|i: int| 0 <= i < self.fields@.len() && self.fields@[i] == Field::Icmp(value)),
-            None => forall|i: int| 0 <= i < self.fields@.len() ==> self.fields@[i].tag() != 5,
+        ensures match ports {
+            Some(value) => self.ports == Some(*value) && value.low() <= value.high(),
+            None => self.ports.is_none(),
         },
-    {
-        let mut i = 0;
-        while i < self.fields.len()
-            invariant self.valid(), i <= self.fields.len(),
-                forall|j: int| 0 <= j < i ==> self.fields@[j].tag() != 5,
-            decreases self.fields.len()-i,
-        {
-            if let Field::Icmp(value) = &self.fields[i] { return Some(*value); }
-            i += 1;
-        }
-        None
-    }
+    { self.ports.as_ref() }
 
-    /// Whether the rule also requires a configured DNS destination and port 53.
-    /// The consumer must intersect this with every other supplied condition.
+    /// Read the native ICMP type restriction; IPv6 consumers use ICMPv6.
+    pub fn icmp_type(&self) -> (icmp: Option<u8>)
+        requires self.valid(), ensures icmp == self.icmp,
+            icmp.is_some() ==> self.protocol() == Protocol::Icmp,
+    { self.icmp }
+
+    /// Whether configured DNS destinations and port 53 must also match.
     pub fn dns_target(&self) -> (dns: bool)
-        requires self.valid(),
-        ensures dns == (exists|i: int| 0 <= i < self.fields@.len() && self.fields@[i].tag() == 6),
-    {
-        let mut i = 0;
-        while i < self.fields.len()
-            invariant self.valid(), i <= self.fields.len(),
-                forall|j: int| 0 <= j < i ==> self.fields@[j].tag() != 6,
-            decreases self.fields.len()-i,
-        {
-            if self.fields[i].ordinal() == 6 { return true; }
-            i += 1;
-        }
-        false
-    }
+        requires self.valid(), ensures dns == self.dns,
+    { self.dns }
 
-    /// Preserve the pinned worker's skip behavior for a DNS special-target rule
-    /// with an explicit port range other than exactly 53. Such a rule is valid
-    /// but matches no packets; broadening that range would change upstream policy.
+    /// Preserve the pinned worker's matches-none behavior when an explicit DNS
+    /// special-target port range is anything other than exactly port 53.
     pub fn matches_none(&self) -> (never: bool)
         requires self.valid(),
-        ensures never == ((exists|i: int| 0 <= i < self.fields@.len() && self.fields@[i].tag() == 6)
-            && (exists|i: int, ports: Ports| 0 <= i < self.fields@.len()
-                && self.fields@[i] == Field::Ports(ports) && (ports.low() != 53 || ports.high() != 53))),
+        ensures never == (self.dns && self.ports.is_some()
+            && (self.ports.unwrap().low() != 53 || self.ports.unwrap().high() != 53)),
     {
-        if !self.dns_target() { return false; }
-        match self.ports() { Some(value) => { let (low, high) = value.bounds(); low != 53 || high != 53 }, None => false }
+        if !self.dns { return false; }
+        match &self.ports { Some(value) => { let (low, high) = value.bounds(); low != 53 || high != 53 }, None => false }
     }
 
-    /// Address family of the source snapshot that owns this complete rule.
+    /// Address family of the source snapshot that owns this rule.
     pub fn family(&self) -> (family: u8)
         requires self.valid(), ensures family == self.family, family == 4 || family == 6,
     { self.family }
-
 }
 
 }

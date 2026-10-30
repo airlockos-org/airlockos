@@ -10,6 +10,7 @@ description = "Qubes network configuration, client identity and firewall policy"
 [dependencies]
 airlock-boot-core = { path = "../boot" }
 airlock-qubesdb = { path = "../qubesdb" }
+serde = { version = "1.0", default-features = false, features = ["alloc", "derive"] }
 vstd = { version = "=0.0.0-2026-10-18-0147", default-features = false, features = ["alloc"] }
 
 [package.metadata.verus]
