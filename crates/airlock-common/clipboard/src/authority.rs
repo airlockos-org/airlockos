@@ -11,12 +11,25 @@ use vstd::prelude::*;
 verus! {
 
 /// Observed principal and connection lifetime; constructing metadata grants no access.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq)]
 pub struct Participant {
     /// Stable, nonzero identity assigned by the machine's GUI membership policy.
     principal: u64,
     /// Nonzero incarnation assigned by trusted provisioning, never by data requests.
     epoch: u64,
+}
+
+#[cfg(verus_keep_ghost)]
+impl vstd::std_specs::cmp::PartialEqSpecImpl for Participant {
+    open spec fn obeys_eq_spec() -> bool { true }
+
+    open spec fn eq_spec(&self, other: &Self) -> bool { *self == *other }
+}
+
+impl PartialEq for Participant {
+    fn eq(&self, other: &Self) -> (equal: bool)
+        ensures equal == (*self == *other),
+    { self.principal == other.principal && self.epoch == other.epoch }
 }
 
 impl Participant {
@@ -161,65 +174,105 @@ impl Registry {
     }
 }
 
+/// Live allocation identity retained by Rust's reference-counted ownership.
+/// Only the two narrow library-effect helpers below can construct or retain it.
+struct Scope {
+    /// Keeps the allocation alive so its address cannot be reused by another scope.
+    keepalive: Arc<()>,
+    /// Actual allocation address, not an identity supplied by a request.
+    address: usize,
 }
+
+/// Requirement: object identity and lifetime correspondence. Scope: allocation of
+/// one Arc marker and extraction of its address. Pinned vstd models Arc's value,
+/// not allocation identity, so this primitive relies on Rust/Arc/allocator identity
+/// and liveness guarantees. It contains no admission or authorization decision.
+#[verifier::external_body]
+fn new_scope() -> (scope: Scope)
+    ensures scope.address > 0,
+{
+    let keepalive = Arc::new(());
+    let address = Arc::as_ptr(&keepalive) as usize;
+    Scope { keepalive, address }
+}
+
+/// Retain the same live allocation. This library-effect boundary assumes Arc's
+/// clone retains its source allocation until the last owner is dropped; copying
+/// the private address alone is never exposed as a capability constructor.
+#[verifier::external_body]
+fn retain_scope(scope: &Scope) -> (retained: Scope)
+    ensures retained.address == scope.address,
+{ Scope { keepalive: scope.keepalive.clone(), address: scope.address } }
 
 /// Sole capability authorizing GUI-authenticated admissions for one clipboard.
 /// The constructor returns this independently from the service so data connections
 /// never receive it. It cannot be serialized, cloned or built from an identity.
 pub struct Provisioner {
     /// Unique object identity shared only with this clipboard's admission scope.
-    scope: Arc<()>,
+    scope: Scope,
 }
 
 /// Owned permission for one admitted connection; every use rechecks revocation.
 /// Observed participant metadata is deliberately insufficient to construct this type.
 ///
 /// ```compile_fail
-/// use airlock_clipboard_core::shared::{Clipboard, Participant};
+/// use airlock_clipboard_core::shared::{Clipboard, Participant, Time};
 /// let (mut clipboard, _provisioner) = Clipboard::new(1024);
 /// let identity = Participant::from_binding(1, 1).unwrap();
-/// clipboard.reserve(0, &identity);
+/// clipboard.reserve(Time::observe(0), &identity);
 /// ```
 pub struct Caller {
     /// Object identity prevents a ticket from another clipboard being replayed.
-    scope: Arc<()>,
+    scope: Scope,
     /// Checked registry admission, retained unchanged through the effect adapter.
     ticket: Ticket,
 }
 
 impl Caller {
     /// Inspect descriptive identity without yielding provisioning authority.
-    pub fn identity(&self) -> Participant {
-        self.ticket.identity()
-    }
+    /// Logical identity carried by this opaque capability.
+    pub closed spec fn subject(&self) -> Participant { self.ticket.identity }
+
+    /// Observe descriptive identity without transferring authority.
+    pub fn identity(&self) -> (identity: Participant)
+        ensures identity == self.subject(),
+    { self.ticket.identity() }
 }
 
 /// Clipboard-owned admission state; only the associated provisioner can mint callers.
 pub(crate) struct Admissions {
     /// Stable object identity, independent of movement of the containing clipboard.
-    scope: Arc<()>,
+    scope: Scope,
     /// Verified revocable memberships, bounded independently of transport quarantine.
     registry: Registry,
 }
 
 impl Admissions {
+    /// All registry transitions preserve finite, non-reusable membership incarnations.
+    pub(crate) closed spec fn valid(&self) -> bool { self.registry.valid() }
+
+    /// Authority requires both the same retained object and an exact live ticket.
+    pub(crate) closed spec fn permits(&self, caller: &Caller) -> bool {
+        self.scope.address == caller.scope.address && self.registry.permits(&caller.ticket)
+    }
+
+    /// The provisioner belongs to this exact retained allocation.
+    pub(crate) closed spec fn bound_to(&self, provisioner: &Provisioner) -> bool {
+        self.scope.address == provisioner.scope.address
+    }
+
+    /// Object authority, freshness, uniqueness and capacity are all required for admission.
+    pub(crate) closed spec fn eligible(&self, provisioner: &Provisioner, identity: Participant) -> bool {
+        self.bound_to(provisioner) && self.registry.eligible(identity)
+    }
+
     /// Create an isolated authority scope during service initialization.
-    pub(crate) fn new() -> (Self, Provisioner) {
-        // Boundary: alloc::sync::Arc identity/lifetime operations are trusted Rust
-        // library effects, not Verus-verified. Pointer equality checks object identity,
-        // not an attacker-controlled numeric label. Construction OOM is an explicitly
-        // fatal startup condition; subsequent clones of this Arc do not allocate.
-        let scope = Arc::new(());
-        let provisioner = Provisioner {
-            scope: scope.clone(),
-        };
-        (
-            Self {
-                scope,
-                registry: Registry::new(),
-            },
-            provisioner,
-        )
+    pub(crate) fn new() -> (out: (Self, Provisioner))
+        ensures out.0.valid(), out.0.bound_to(&out.1),
+    {
+        let scope = new_scope();
+        let provisioner = Provisioner { scope: retain_scope(&scope) };
+        (Self { scope, registry: Registry::new() }, provisioner)
     }
 
     /// Mint a caller only with the exact object capability and a fresh admission.
@@ -227,26 +280,36 @@ impl Admissions {
         &mut self,
         provisioner: &Provisioner,
         identity: Participant,
-    ) -> Option<Caller> {
-        if !Arc::ptr_eq(&self.scope, &provisioner.scope) {
+    ) -> (out: Option<Caller>)
+        requires old(self).valid(),
+        ensures final(self).valid(), out.is_some() == old(self).eligible(provisioner, identity),
+            out.is_some() ==> final(self).permits(&out.unwrap()) && out.unwrap().subject() == identity,
+            out.is_none() ==> *final(self) == *old(self),
+    {
+        if self.scope.address != provisioner.scope.address {
             return None;
         }
         let ticket = self.registry.admit(identity)?;
         Some(Caller {
-            scope: self.scope.clone(),
+            scope: retain_scope(&self.scope),
             ticket,
         })
     }
 
     /// Require both object ownership and a still-live registry incarnation.
-    pub(crate) fn allows(&self, caller: &Caller) -> bool {
-        Arc::ptr_eq(&self.scope, &caller.scope) && self.registry.allows(&caller.ticket)
-    }
+    pub(crate) fn allows(&self, caller: &Caller) -> (allowed: bool)
+        ensures allowed == self.permits(caller),
+    { self.scope.address == caller.scope.address && self.registry.allows(&caller.ticket) }
 
     /// Retire authorization before fallible asynchronous transport cleanup starts.
-    pub(crate) fn revoke(&mut self, caller: &Caller) {
-        if Arc::ptr_eq(&self.scope, &caller.scope) {
+    pub(crate) fn revoke(&mut self, caller: &Caller)
+        requires old(self).valid(),
+        ensures final(self).valid(), !final(self).permits(caller),
+    {
+        if self.scope.address == caller.scope.address {
             self.registry.revoke(&caller.ticket);
         }
     }
+}
+
 }

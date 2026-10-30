@@ -8,10 +8,23 @@ use vstd::prelude::*;
 verus! {
 
 /// Replacement identity within one service lifetime; zero denotes no issued offer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq)]
 pub struct Generation {
     /// Ordered protocol value, kept distinct from principal, epoch and request IDs.
     value: u64,
+}
+
+#[cfg(verus_keep_ghost)]
+impl vstd::std_specs::cmp::PartialEqSpecImpl for Generation {
+    open spec fn obeys_eq_spec() -> bool { true }
+
+    open spec fn eq_spec(&self, other: &Self) -> bool { *self == *other }
+}
+
+impl PartialEq for Generation {
+    fn eq(&self, other: &Self) -> (equal: bool)
+        ensures equal == (*self == *other),
+    { self.value == other.value }
 }
 
 impl Generation {
@@ -48,10 +61,23 @@ impl Generation {
 }
 
 /// Nanoseconds observed from the injected service clock, never from a VM request.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq)]
 pub struct Time {
     /// Raw observation; monotonic ordering is checked rather than assumed.
     nanos: u64,
+}
+
+#[cfg(verus_keep_ghost)]
+impl vstd::std_specs::cmp::PartialEqSpecImpl for Time {
+    open spec fn obeys_eq_spec() -> bool { true }
+
+    open spec fn eq_spec(&self, other: &Self) -> bool { *self == *other }
+}
+
+impl PartialEq for Time {
+    fn eq(&self, other: &Self) -> (equal: bool)
+        ensures equal == (*self == *other),
+    { self.nanos == other.nanos }
 }
 
 impl Time {
@@ -79,10 +105,23 @@ impl Time {
 }
 
 /// Fixed completion boundary, created only by checked timestamp arithmetic.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq)]
 pub struct Deadline {
     /// First clock observation at which the unfinished operation is expired.
     nanos: u64,
+}
+
+#[cfg(verus_keep_ghost)]
+impl vstd::std_specs::cmp::PartialEqSpecImpl for Deadline {
+    open spec fn obeys_eq_spec() -> bool { true }
+
+    open spec fn eq_spec(&self, other: &Self) -> bool { *self == *other }
+}
+
+impl PartialEq for Deadline {
+    fn eq(&self, other: &Self) -> (equal: bool)
+        ensures equal == (*self == *other),
+    { self.nanos == other.nanos }
 }
 
 impl Deadline {

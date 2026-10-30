@@ -38,6 +38,7 @@ impl Budget {
     pub fn reserve(&mut self, bytes: usize) -> (accepted: bool)
         requires old(self).valid(),
         ensures final(self).valid(), final(self).limit_bytes() == old(self).limit_bytes(),
+            accepted == (bytes <= old(self).limit_bytes() - old(self).used_bytes()),
             accepted ==> final(self).used_bytes() == old(self).used_bytes() + bytes,
             !accepted ==> final(self).used_bytes() == old(self).used_bytes(),
     {
@@ -51,6 +52,7 @@ impl Budget {
     pub fn release(&mut self, bytes: usize) -> (released: bool)
         requires old(self).valid(),
         ensures final(self).valid(), final(self).limit_bytes() == old(self).limit_bytes(),
+            released == (bytes <= old(self).used_bytes()),
             released ==> final(self).used_bytes() + bytes == old(self).used_bytes(),
             !released ==> final(self).used_bytes() == old(self).used_bytes(),
     {
@@ -103,6 +105,7 @@ impl Slots {
     pub fn admit(&mut self) -> (accepted: bool)
         requires old(self).valid(),
         ensures final(self).valid(), final(self).retiring_count() == old(self).retiring_count(),
+            accepted == (old(self).live_count() < LIVE_LIMIT && old(self).live_count() + old(self).retiring_count() < SLOT_LIMIT),
             accepted ==> final(self).live_count() == old(self).live_count() + 1,
             !accepted ==> final(self).live_count() == old(self).live_count(),
     {
@@ -114,7 +117,7 @@ impl Slots {
     /// Move a live reservation to quarantine without making its capacity reusable.
     pub fn retire(&mut self) -> (changed: bool)
         requires old(self).valid(),
-        ensures final(self).valid(),
+        ensures final(self).valid(), changed == (old(self).live_count() > 0),
             changed ==> final(self).live_count() + 1 == old(self).live_count() && final(self).retiring_count() == old(self).retiring_count() + 1,
             !changed ==> final(self).live_count() == old(self).live_count() && final(self).retiring_count() == old(self).retiring_count(),
     {
@@ -128,6 +131,7 @@ impl Slots {
     pub fn release_live(&mut self) -> (changed: bool)
         requires old(self).valid(),
         ensures final(self).valid(), final(self).retiring_count() == old(self).retiring_count(),
+            changed == (old(self).live_count() > 0),
             changed ==> final(self).live_count() + 1 == old(self).live_count(),
             !changed ==> final(self).live_count() == old(self).live_count(),
     {
@@ -140,6 +144,7 @@ impl Slots {
     pub fn release_retired(&mut self, count: usize) -> (changed: bool)
         requires old(self).valid(),
         ensures final(self).valid(), final(self).live_count() == old(self).live_count(),
+            changed == (count <= old(self).retiring_count()),
             changed ==> final(self).retiring_count() + count == old(self).retiring_count(),
             !changed ==> final(self).retiring_count() == old(self).retiring_count(),
     {
