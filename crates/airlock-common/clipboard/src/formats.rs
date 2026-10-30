@@ -86,7 +86,7 @@ pub open spec fn payload_bytes(formats: Seq<Format>) -> int
 }
 
 /// Payload sizes are nonnegative, so a rejected prefix cannot fit a larger offer.
-proof fn prefix_bound(formats: Seq<Format>, prefix: int)
+pub proof fn prefix_bound(formats: Seq<Format>, prefix: int)
     requires 0 <= prefix <= formats.len(),
     ensures 0 <= payload_bytes(formats),
         payload_bytes(formats.take(prefix)) <= payload_bytes(formats),
