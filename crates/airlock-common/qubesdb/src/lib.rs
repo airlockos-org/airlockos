@@ -14,6 +14,7 @@
 
 extern crate alloc;
 
-pub mod bytes;
+mod library;
+
 pub mod client;
 pub mod wire;

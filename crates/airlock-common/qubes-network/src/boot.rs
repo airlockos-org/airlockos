@@ -8,8 +8,6 @@ use airlock_boot_core::Challenge;
 use airlock_boot_core::challenge_bytes;
 use vstd::prelude::*;
 
-use crate::bytes::prefix;
-
 verus! {
 
 /// Partial startup state with terminal failure; related flags cannot disagree.
@@ -54,12 +52,12 @@ impl Parser {
     {
         if matches!(self.stage, Stage::Failed) { return false; }
         if argument.len() > 4096 { self.stage = Stage::Failed; return false; }
-        if prefix(argument, b"airlock.boot=") {
+        if argument.starts_with(b"airlock.boot=") {
             if !matches!(self.stage, Stage::Pending) { self.stage = Stage::Failed; return false; }
             let challenge = match Challenge::parse(&argument[13..]) { Some(value) => value, None => { self.stage = Stage::Failed; return false; } };
             self.stage = Stage::Chosen(challenge);
             true
-        } else if prefix(argument, b"airlock.") {
+        } else if argument.starts_with(b"airlock.") {
             self.stage = Stage::Failed;
             false
         } else { true }

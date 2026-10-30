@@ -28,7 +28,6 @@ pub mod backend;
 pub mod binding;
 pub mod boot;
 
-pub(crate) use airlock_qubesdb::bytes;
 #[cfg(verus_keep_ghost)]
 pub(crate) use airlock_qubesdb::wire;
 

@@ -51,7 +51,7 @@ impl Assigned {
         },
     {
         if bytes.is_empty() || bytes.len() > 91 { return None; }
-        let split = crate::bytes::find(bytes, b' ');
+        let split = bytes.iter().position(|byte| *byte == b' ').unwrap_or(bytes.len());
         let first = Ip::parse(&bytes[..split])?;
         let mut addresses = Vec::new();
         addresses.push(first);
@@ -174,7 +174,7 @@ impl Request {
         if !assigned.eligible(control.projection()) { return None; }
         let source = &assigned.all()[0];
         let snapshot = control.projection().policy(source)?;
-        let root = crate::bytes::copy(snapshot.root());
+        let root = vstd::slice::slice_to_vec(snapshot.root());
         let serial = control.barrier(root.as_slice())?;
         Some(Self { connection, lease, peer, serial, assigned })
     }

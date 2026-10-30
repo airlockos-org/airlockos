@@ -5,7 +5,6 @@
 //! and a little-endian u32 at offset 68. Padding and bytes after the first path
 //! NUL are ignored because upstream reuses headers, including for end markers.
 
-use crate::bytes::in_range;
 use alloc::vec::Vec;
 use vstd::prelude::*;
 
@@ -140,8 +139,7 @@ impl Header {
                 if !accepted { return None; }
                 return Some(Self { kind, path, count: count as u16 });
             }
-            let accepted = in_range(byte, b'a', b'z')
-                || in_range(byte, b'A', b'Z') || in_range(byte, b'0', b'9')
+            let accepted = byte.is_ascii_alphanumeric()
                 || (byte == b'-' && i > 0) || byte == b'_' || byte == b'/'
                 || byte == b'.' || byte == b':' || byte == b'@';
             if !accepted { return None; }
@@ -227,8 +225,7 @@ pub(crate) fn writeable(path: &[u8], value: &[u8]) -> (accepted: bool)
         decreases path.len()-i,
     {
         let byte = path[i];
-        if !(in_range(byte, b'a', b'z') || in_range(byte, b'A', b'Z')
-            || in_range(byte, b'0', b'9') || (byte == b'-' && i > 0)
+        if !(byte.is_ascii_alphanumeric() || (byte == b'-' && i > 0)
             || byte == b'_' || byte == b'/' || byte == b'.' || byte == b':' || byte == b'@') { return false; }
         i += 1;
     }
@@ -268,7 +265,7 @@ pub(crate) fn guest_write(path: &[u8], value: &[u8]) -> (bytes: Vec<u8>)
             else if i == 69 { (value.len()/256) as u8 } else { 0 });
         i += 1;
     }
-    crate::bytes::append(&mut bytes, value);
+    bytes.extend_from_slice(value);
     bytes
 }
 

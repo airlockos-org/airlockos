@@ -7,7 +7,6 @@ use alloc::vec::Vec;
 use vstd::prelude::*;
 
 use crate::address::Ip;
-use crate::bytes::{equal, prefix};
 use crate::policy::Path;
 #[cfg(verus_keep_ghost)]
 use crate::wire;
@@ -178,7 +177,7 @@ impl Cache {
                 forall|j: int| 0 <= j < i ==> self.entries@[j].key() != key@,
             decreases self.entries.len()-i,
         {
-            if equal(self.entries[i].name(), key) { return Some(i); }
+            if self.entries[i].name() == key { return Some(i); }
             i += 1;
         }
         None
@@ -234,7 +233,7 @@ impl Cache {
             && (key@ == b"/"@ || key@ == b"/qubes-firewall/"@ || self.suppressed_key(key@))),
     {
         if self.suppressed.is_empty() { return false; }
-        if equal(key, b"/") || equal(key, b"/qubes-firewall/") { return true; }
+        if key == b"/" || key == b"/qubes-firewall/" { return true; }
         match Path::parse(key) { Some(path) => self.source_suppressed(path.ip()), None => false }
     }
 
@@ -250,7 +249,7 @@ impl Cache {
                 final(self).entries().contains(old(self).entries()[i]) == !erased(old(self).entries()[i].key(), key@),
             forall|i: int| 0 <= i < final(self).entries().len() ==> old(self).entries().contains(final(self).entries()[i]),
     {
-        if equal(key, b"/") || equal(key, b"/qubes-firewall/") {
+        if key == b"/" || key == b"/qubes-firewall/" {
             self.suppressed.clear();
         }
         if let Some(path) = Path::parse(key)
@@ -274,7 +273,7 @@ impl Cache {
             decreases i,
         {
             i -= 1;
-            let matches = if tree { prefix(self.entries[i].name(), key) } else { equal(self.entries[i].name(), key) };
+            let matches = if tree { self.entries[i].name().starts_with(key) } else { self.entries[i].name() == key };
             if matches {
                 let cost = self.entries[i].key.len()+self.entries[i].value.len();
                 proof { removed_weight(self.entries@, i as int); }

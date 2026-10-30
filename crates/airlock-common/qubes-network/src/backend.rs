@@ -42,7 +42,7 @@ pub fn peers(bytes: &[u8]) -> (peers: Option<Vec<u16>>)
         decreases bytes.len()-cursor,
     {
         if peers.len() == 4 { return None; }
-        let end = cursor+crate::bytes::find(&bytes[cursor..], 0);
+        let end = cursor+bytes[cursor..].iter().position(|byte| *byte == 0).unwrap_or(bytes.len()-cursor);
         if end == bytes.len() { return None; }
         let peer = match number::parse(&bytes[cursor..end], 0x7fef, true) {
             Some(value) if value > 0 => value as u16,

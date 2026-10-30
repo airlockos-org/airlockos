@@ -11,8 +11,8 @@ use airlock_qubesdb::client::Phase;
 use airlock_qubesdb::client::{Client, Step as DatabaseStep};
 use alloc::vec::Vec;
 use vstd::prelude::*;
+use vstd::slice::slice_to_vec;
 
-use crate::bytes::{append, copy};
 use crate::cache::Cache;
 use crate::number;
 use crate::policy::Path;
@@ -199,7 +199,7 @@ impl Control {
                 if removed {
                     let discarded = self.cache.discarded_remove(key.as_slice());
                     if self.cache.remove(key.as_slice()) == 0 && !discarded { self.disconnect(); return Step::Failed; }
-                } else if !self.cache.put(copy(key.as_slice()), value, true) { self.disconnect(); return Step::Failed; }
+                } else if !self.cache.put(slice_to_vec(key.as_slice()), value, true) { self.disconnect(); return Step::Failed; }
                 if !self.view.changed(&self.cache, key.as_slice(), removed) { self.disconnect(); return Step::Failed; }
                 Step::Changed { key }
             }
@@ -245,9 +245,9 @@ impl Control {
         if !matches!(self.startup, Startup::Ready) || !self.native.between_records() || !self.native.available() { return None; }
         let source = Path::parse(root)?;
         if !source.is_root(root) { return None; }
-        let mut path = copy(b"/qubes-firewall-handled/");
+        let mut path = slice_to_vec(b"/qubes-firewall-handled/");
         if path.len()+root.len()-16 >= 64 { return None; }
-        append(&mut path, &root[16..]);
+        path.extend_from_slice(&root[16..]);
         let previous = match self.cache.read(path.as_slice()) {
             None => 0,
             Some(bytes) => match number::parse(bytes, u32::MAX, true) {

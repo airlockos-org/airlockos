@@ -10,7 +10,6 @@ use vstd::prelude::*;
 #[cfg(verus_keep_ghost)]
 use crate::address;
 use crate::address::Ip;
-use crate::bytes::find;
 use crate::cache::Cache;
 use crate::number;
 
@@ -182,7 +181,7 @@ pub(crate) fn connected(bytes: &[u8], family: u8, remaining: usize) -> (ips: Opt
 {
     if bytes.is_empty() { return Some(Vec::new()); }
     if remaining == 0 { return None; }
-    let end = find(bytes, b' ');
+    let end = bytes.iter().position(|byte| *byte == b' ').unwrap_or(bytes.len());
     let ip = Ip::parse(&bytes[..end])?;
     if ip.version() != family { return None; }
     let mut tail = if end == bytes.len() { Vec::new() } else {
@@ -328,7 +327,7 @@ impl Config {
         ensures same == self.same_network_as(*other),
     {
         if !self.address.same(&other.address) || !self.gateway.same(&other.gateway)
-            || self.prefix != other.prefix || !crate::bytes::equal(self.mac.bytes(), other.mac.bytes())
+            || self.prefix != other.prefix || self.mac.bytes() != other.mac.bytes()
             || !self.provided_gateway.same(&other.provided_gateway) || self.provided_prefix != other.provided_prefix
         { return false; }
         let mut i = 0;

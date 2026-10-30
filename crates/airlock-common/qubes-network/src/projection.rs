@@ -15,7 +15,6 @@ use alloc::vec::Vec;
 use vstd::prelude::*;
 
 use crate::address::Ip;
-use crate::bytes::{equal, prefix};
 use crate::cache::Cache;
 use crate::config::Config;
 #[cfg(verus_keep_ghost)]
@@ -239,8 +238,8 @@ impl View {
     {
         if self.phase != Phase::Synchronized { self.disconnect(); return false; }
         if !self.advance() { return false; }
-        if configuration_key(key) || (removed && equal(key, b"/")) { self.configuration(cache); }
-        if removed && (equal(key, b"/") || equal(key, b"/qubes-firewall/")) {
+        if configuration_key(key) || (removed && key == b"/") { self.configuration(cache); }
+        if removed && (key == b"/" || key == b"/qubes-firewall/") {
             let mut i = 0;
             while i < self.slots.len()
                 invariant self.valid(), i <= self.slots.len() <= 2*MAX_CLIENTS,
@@ -250,7 +249,7 @@ impl View {
                 i += 1;
             }
         }
-        if prefix(key, b"/mapped-ip/") {
+        if key.starts_with(b"/mapped-ip/") {
             // Native map changes occur before upstream completion on attachment.
             // Do not retain an old translation decision across those writes.
             let mut i = 0;
@@ -383,12 +382,12 @@ fn configuration_key(key: &[u8]) -> (network: bool)
     requires key@.len() < 64,
     ensures network == network_key(key@),
 {
-    equal(key, b"/qubes-mac") || equal(key, b"/qubes-ip") || equal(key, b"/qubes-netmask")
-        || equal(key, b"/qubes-gateway") || equal(key, b"/qubes-primary-dns") || equal(key, b"/qubes-secondary-dns")
-        || equal(key, b"/qubes-ip6") || equal(key, b"/qubes-gateway6") || equal(key, b"/qubes-netvm-network")
-        || equal(key, b"/qubes-netvm-gateway") || equal(key, b"/qubes-netvm-netmask")
-        || equal(key, b"/qubes-netvm-primary-dns") || equal(key, b"/qubes-netvm-secondary-dns")
-        || equal(key, b"/qubes-netvm-gateway6") || equal(key, b"/connected-ips") || equal(key, b"/connected-ips6")
+    key == b"/qubes-mac" || key == b"/qubes-ip" || key == b"/qubes-netmask"
+        || key == b"/qubes-gateway" || key == b"/qubes-primary-dns" || key == b"/qubes-secondary-dns"
+        || key == b"/qubes-ip6" || key == b"/qubes-gateway6" || key == b"/qubes-netvm-network"
+        || key == b"/qubes-netvm-gateway" || key == b"/qubes-netvm-netmask"
+        || key == b"/qubes-netvm-primary-dns" || key == b"/qubes-netvm-secondary-dns"
+        || key == b"/qubes-netvm-gateway6" || key == b"/connected-ips" || key == b"/connected-ips6"
 }
 
 }

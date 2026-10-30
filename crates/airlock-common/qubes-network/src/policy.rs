@@ -13,11 +13,11 @@
 
 use alloc::vec::Vec;
 use vstd::prelude::*;
+use vstd::slice::slice_to_vec;
 
 #[cfg(verus_keep_ghost)]
 use crate::address;
 use crate::address::Ip;
-use crate::bytes::{copy, equal, find, prefix};
 use crate::cache::Cache;
 #[cfg(verus_keep_ghost)]
 use crate::cache::MAX_ENTRIES;
@@ -66,8 +66,8 @@ impl Path {
             None => !(exists|ip: Ip, end: int| source_path(key@, ip, end)),
         },
     {
-        if !prefix(key, FIREWALL) { return None; }
-        let end = 16+find(&key[16..], b'/');
+        if !key.starts_with(FIREWALL) { return None; }
+        let end = 16+key[16..].iter().position(|byte| *byte == b'/').unwrap_or(key.len()-16);
         let ip = Ip::parse(&key[16..end])?;
         Some(Self { ip, end })
     }
@@ -142,16 +142,16 @@ pub fn mapping_supported(cache: &Cache, source: &Ip, config: &Config) -> (suppor
         decreases entries.len()-i,
     {
         let key = entries[i].name();
-        if prefix(key, b"/mapped-ip/") {
-            let end = 11+find(&key[11..], b'/');
+        if key.starts_with(b"/mapped-ip/") {
+            let end = 11+key[11..].iter().position(|byte| *byte == b'/').unwrap_or(key.len()-11);
             if let Some(ip) = Ip::parse(&key[11..end])
                 && ip.same(source) {
                     if end == key.len() { return false; }
                     let observed = match Ip::parse(entries[i].bytes()) { Some(value) => value, None => return false };
                     let child = &key[end+1..];
-                    if equal(child, b"visible-ip") {
+                    if child == b"visible-ip" {
                         if !observed.same(source) { return false; }
-                    } else if equal(child, b"visible-gateway") {
+                    } else if child == b"visible-gateway" {
                         if !observed.same(config.provided_gateway()) { return false; }
                     } else { return false; }
                 }
@@ -300,10 +300,10 @@ impl Snapshot {
         {
             let key = entries[i].name();
             if let Some(other) = Path::parse(key)
-                && other.ip().same(path.ip()) && !equal(other.root(key), root) { return Err(Rejection::Alias); }
-            if key.len() > root.len() && prefix(key, root) && key[root.len()] == b'/' {
+                && other.ip().same(path.ip()) && other.root(key) != root { return Err(Rejection::Alias); }
+            if key.len() > root.len() && key.starts_with(root) && key[root.len()] == b'/' {
                 let child = &key[root.len()+1..];
-                if equal(child, b"policy") {
+                if child == b"policy" {
                     default = match rule::action(entries[i].bytes()) { Some(value) => Some(value), None => return Err(Rejection::Default) };
                 } else {
                     let id = match ordinal(child) { Some(value) => value, None => return Err(Rejection::Rule) };
@@ -323,7 +323,7 @@ impl Snapshot {
             i += 1;
         }
         let default = match default { Some(value) => value, None => return Err(Rejection::Default) };
-        Ok(Self { source: path.ip, root: copy(root), default, rules, unresolved })
+        Ok(Self { source: path.ip, root: slice_to_vec(root), default, rules, unresolved })
     }
 
     /// Exact normalized source of this complete snapshot.

@@ -5,8 +5,8 @@
 
 use alloc::vec::Vec;
 use vstd::prelude::*;
+use vstd::slice::slice_to_vec;
 
-use crate::bytes::{copy, equal};
 use crate::wire::{self, Decoder};
 
 verus! {
@@ -166,7 +166,7 @@ impl Client {
             client.output@ == wire::synchronization(), client.sent == 0,
     {
         Self { decoder: Decoder::fresh(), phase: Phase::Synchronizing,
-            incoming: Vec::new(), cursor: 0, output: copy(&wire::synchronize()), sent: 0,
+            incoming: Vec::new(), cursor: 0, output: slice_to_vec(&wire::synchronize()), sent: 0,
             started: now, clock: now, record_since: None, output_since: now,
             serial: 0, completed: 0, pending: None }
     }
@@ -216,7 +216,7 @@ impl Client {
     {
         if self.phase == Phase::Failed || self.cursor != self.incoming.len()
             || bytes.is_empty() || bytes.len() > 1024 { self.disconnect(); return false; }
-        self.incoming = copy(bytes);
+        self.incoming = slice_to_vec(bytes);
         self.cursor = 0;
         true
     }
@@ -274,18 +274,18 @@ impl Client {
         let key = header.key();
         if operation == wire::ENTRY && self.phase == Phase::Synchronizing {
             if key.is_empty() { self.phase = Phase::Ready; return Step::Synchronized; }
-            return Step::Entry { key: copy(key), value };
+            return Step::Entry { key: slice_to_vec(key), value };
         }
         if self.phase == Phase::Ready && (operation == wire::WRITE || operation == wire::REMOVE) {
-            self.output = copy(&header.acknowledge());
+            self.output = slice_to_vec(&header.acknowledge());
             self.sent = 0;
             self.output_since = self.clock;
-            return Step::Changed { key: copy(key), value, removed: operation == wire::REMOVE };
+            return Step::Changed { key: slice_to_vec(key), value, removed: operation == wire::REMOVE };
         }
         if self.phase == Phase::Ready && operation == wire::OK {
             let pending = self.pending.take();
             if let Some(write) = pending
-                && equal(key, write.key.as_slice()) {
+                && key == write.key.as_slice() {
                 self.completed = self.serial;
                 return Step::Written { serial: self.serial, key: write.key, value: write.value };
             }
@@ -313,7 +313,7 @@ impl Client {
         self.sent = 0;
         self.output_since = self.clock;
         self.serial += 1;
-        self.pending = Some(Write { key: copy(key), value: copy(value), started: self.clock });
+        self.pending = Some(Write { key: slice_to_vec(key), value: slice_to_vec(value), started: self.clock });
         Some(self.serial)
     }
 

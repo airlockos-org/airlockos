@@ -14,11 +14,11 @@
 
 use alloc::vec::Vec;
 use vstd::prelude::*;
+use vstd::slice::slice_to_vec;
 
 #[cfg(verus_keep_ghost)]
 use crate::address;
 use crate::address::Ip;
-use crate::bytes::{copy, equal, find, in_range};
 use crate::number;
 
 verus! {
@@ -48,8 +48,8 @@ pub fn action(bytes: &[u8]) -> (action: Option<Action>)
         None => !(exists|value: Action| action_token(bytes@, value)),
     },
 {
-    if equal(bytes, b"accept") { Some(Action::Accept) }
-    else if equal(bytes, b"drop") { Some(Action::Drop) }
+    if bytes == b"accept" { Some(Action::Accept) }
+    else if bytes == b"drop" { Some(Action::Drop) }
     else { None }
 }
 
@@ -84,9 +84,9 @@ fn protocol(bytes: &[u8]) -> (protocol: Option<Protocol>)
         None => !(exists|value: Protocol| protocol_token(bytes@, value)),
     },
 {
-    if equal(bytes, b"tcp") { Some(Protocol::Tcp) }
-    else if equal(bytes, b"udp") { Some(Protocol::Udp) }
-    else if equal(bytes, b"icmp") { Some(Protocol::Icmp) }
+    if bytes == b"tcp" { Some(Protocol::Tcp) }
+    else if bytes == b"udp" { Some(Protocol::Udp) }
+    else if bytes == b"icmp" { Some(Protocol::Icmp) }
     else { None }
 }
 
@@ -125,11 +125,11 @@ impl Hostname {
             decreases bytes.len()-i,
         {
             let byte = bytes[i];
-            if !(in_range(byte, b'a', b'z') || in_range(byte, b'0', b'9')
+            if !(byte.is_ascii_lowercase() || byte.is_ascii_digit()
                 || byte == b'-' || byte == b'.' || byte == b'_') { return None; }
             i += 1;
         }
-        Some(Self { bytes: copy(bytes) })
+        Some(Self { bytes: slice_to_vec(bytes) })
     }
 
     /// Borrow the exact bounded name for the consumer's pinned DNS resolver.
@@ -174,7 +174,7 @@ impl Ports {
             None => !(exists|low: int, high: int| ports_token(bytes@, low, high)),
         },
     {
-        let index = find(bytes, b'-');
+        let index = bytes.iter().position(|byte| *byte == b'-').unwrap_or(bytes.len());
         let low = {
             let value = number::parse(&bytes[..index], 65535, true)?;
             value as u16
@@ -237,7 +237,7 @@ impl Network {
             None => !(exists|address: Ip, prefix: int| network_token(bytes@, address, prefix, family)),
         },
     {
-        let index = find(bytes, b'/');
+        let index = bytes.iter().position(|byte| *byte == b'/').unwrap_or(bytes.len());
         let address = Ip::parse(&bytes[..index])?;
         if address.version() != family { return None; }
         let width = if family == 4 { 32 } else { 128 };
@@ -338,19 +338,19 @@ impl Field {
             None => !(exists|value: Field| value.meaning(key@, bytes@, family)),
         },
     {
-        if equal(key, b"action") { return action(bytes).map(Self::Action); }
-        if equal(key, b"proto") { return protocol(bytes).map(Self::Protocol); }
-        if equal(key, b"dst4") || equal(key, b"dst6") {
-            let expected = if equal(key, b"dst4") { 4 } else { 6 };
+        if key == b"action" { return action(bytes).map(Self::Action); }
+        if key == b"proto" { return protocol(bytes).map(Self::Protocol); }
+        if key == b"dst4" || key == b"dst6" {
+            let expected = if key == b"dst4" { 4 } else { 6 };
             if expected != family { return None; }
             return Network::parse(bytes, family).map(Self::Network);
         }
-        if equal(key, b"dsthost") { return Hostname::parse(bytes).map(Self::Host); }
-        if equal(key, b"dstports") { return Ports::parse(bytes).map(Self::Ports); }
-        if equal(key, b"icmptype") {
+        if key == b"dsthost" { return Hostname::parse(bytes).map(Self::Host); }
+        if key == b"dstports" { return Ports::parse(bytes).map(Self::Ports); }
+        if key == b"icmptype" {
             return number::parse(bytes, 255, true).map(|value| Self::Icmp(value as u8));
         }
-        if equal(key, b"specialtarget") && equal(bytes, b"dns") { return Some(Self::Dns); }
+        if key == b"specialtarget" && bytes == b"dns" { return Some(Self::Dns); }
         None
     }
 }
@@ -380,9 +380,9 @@ fn fields(bytes: &[u8], family: u8, remaining: usize) -> (fields: Option<Vec<Fie
     decreases remaining,
 {
     if remaining == 0 || bytes.is_empty() { return None; }
-    let end = find(bytes, b' ');
+    let end = bytes.iter().position(|byte| *byte == b' ').unwrap_or(bytes.len());
     let token = &bytes[..end];
-    let equals = find(token, b'=');
+    let equals = token.iter().position(|byte| *byte == b'=').unwrap_or(token.len());
     if equals == 0 || equals == token.len() || equals+1 == token.len() { return None; }
     let field = Field::parse(&token[..equals], &token[equals+1..], family)?;
     if end == bytes.len() {
