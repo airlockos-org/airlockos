@@ -3,9 +3,17 @@
 version = 4
 
 [[package]]
+name = "airlock-boot-core"
+version = "0.1.0"
+dependencies = [
+ "vstd",
+]
+
+[[package]]
 name = "airlock-clipboard-core"
 version = "0.1.0"
 dependencies = [
+ "airlock-boot-core",
  "vstd",
 ]
 

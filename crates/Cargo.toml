@@ -1,8 +1,11 @@
 [workspace]
 exclude = ["tooling/airlock-store-packer"]
 members = [
+    "airlock-common/boot",
     "airlock-common/clipboard",
+    "airlock-common/qubes-control",
     "runtime/airlock-sys-clipboard",
+    "runtime/airlock-hermit-control",
     "airlock-config",
     "airlock-tests",
     "airlock-common/nix",

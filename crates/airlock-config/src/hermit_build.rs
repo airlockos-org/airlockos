@@ -72,7 +72,8 @@ fn source(pkgs: &NixValue, workspace: &Workspace, integration: &NixValue) -> Nix
         .call("clipboard-Cargo.toml")
         .call(patched);
     pkgs.clone().select("runCommand").call("airlock-hermit-application-source").call(nix_record! {}).call(nix_text!(r#"
-        mkdir -p "$out/crates/airlock-common/clipboard" "$out/crates/runtime/airlock-sys-clipboard" "$out/.hermit-xen/crates"
+        mkdir -p "$out/crates/airlock-common/boot" "$out/crates/airlock-common/clipboard" "$out/crates/runtime/airlock-sys-clipboard" "$out/.hermit-xen/crates"
+        cp -r {boot}/src {boot}/Cargo.toml "$out/crates/airlock-common/boot/"
         cp -r {core}/src {core}/Cargo.toml "$out/crates/airlock-common/clipboard/"
         cp -r {service}/src "$out/crates/runtime/airlock-sys-clipboard/"
         cp {manifest} "$out/crates/runtime/airlock-sys-clipboard/Cargo.toml"
@@ -81,14 +82,15 @@ fn source(pkgs: &NixValue, workspace: &Workspace, integration: &NixValue) -> Nix
         cat > "$out/Cargo.toml" <<'TOML'
         [workspace]
         resolver = "3"
-        members = ["crates/airlock-common/clipboard", "crates/runtime/airlock-sys-clipboard"]
+        members = ["crates/airlock-common/boot", "crates/airlock-common/clipboard", "crates/runtime/airlock-sys-clipboard"]
         exclude = [".hermit-xen/crates/xen-transport"]
 
         [profile.release]
         debug = 2
         strip = false
         TOML
-    "#, core = crate_source("airlock-common/clipboard", "airlock-clipboard-core"),
+    "#, boot = crate_source("airlock-common/boot", "airlock-boot-core"),
+        core = crate_source("airlock-common/clipboard", "airlock-clipboard-core"),
         service = crate_source("runtime/airlock-sys-clipboard", "airlock-sys-clipboard"),
         manifest = manifest, integration = integration.clone()))
 }
