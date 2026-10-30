@@ -25,3 +25,6 @@ pub mod packet;
 pub mod framing;
 
 mod library;
+
+/// Opaque replacement identities and checked time/deadline arithmetic.
+pub mod values;

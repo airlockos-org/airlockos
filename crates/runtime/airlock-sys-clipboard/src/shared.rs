@@ -4,6 +4,7 @@
 use airlock_clipboard_core::shared::{
     Caller, Clipboard, Error, Format, MAX_FORMAT_NAME, MAX_FORMATS, Offer, Participant,
 };
+pub use airlock_clipboard_core::values::{Generation, Time};
 use xen_transport::{Backend, Channel, Error as TransportError, Kind, MAX_PAYLOAD, Message};
 
 /// Largest complete control packet, including all offered format names.
@@ -21,14 +22,14 @@ pub enum Request {
     /// Declare the representations of this reserved generation.
     Declare {
         /// Reservation returned to this connection.
-        generation: u64,
+        generation: Generation,
         /// Bounded desktop representations, with exact byte lengths.
         formats: Vec<Format>,
     },
     /// Append one ordered private chunk.
     Write {
         /// Reserved generation owned by this connection.
-        generation: u64,
+        generation: Generation,
         /// Representation index within the original offer.
         format: usize,
         /// Contiguous byte offset.
@@ -39,12 +40,12 @@ pub enum Request {
     /// Publish a completely received offer.
     Complete {
         /// Generation to publish atomically.
-        generation: u64,
+        generation: Generation,
     },
     /// Read a range without consuming published content.
     Read {
         /// Exact published generation; replacements invalidate reads.
-        generation: u64,
+        generation: Generation,
         /// Representation selected by the destination application.
         format: usize,
         /// First requested byte.
@@ -66,12 +67,12 @@ pub enum Reply {
     /// Reservation assigned to this connection.
     Generation(
         /// Issued replacement identity within this service boot.
-        u64,
+        Generation,
     ),
     /// Current generation, including clears, and any published offer.
     Offer(
         /// Latest replacement identity, including pending and cleared content.
-        u64,
+        Generation,
         /// Complete metadata, absent while pending or empty.
         Option<Offer>,
     ),
@@ -99,7 +100,7 @@ pub enum Reply {
 /// Execute only data-plane requests; control operations never acquire authority here.
 pub fn execute<S: airlock_clipboard_core::shared::storage::Storage>(
     clipboard: &mut Clipboard<S>,
-    now: u64,
+    now: Time,
     caller: &Caller,
     request: Request,
 ) -> Reply {
@@ -109,10 +110,10 @@ pub fn execute<S: airlock_clipboard_core::shared::storage::Storage>(
 /// Execute with a fresh time observation after synchronous storage completion.
 pub fn execute_with_clock<S: airlock_clipboard_core::shared::storage::Storage>(
     clipboard: &mut Clipboard<S>,
-    now: u64,
+    now: Time,
     caller: &Caller,
     request: Request,
-    finished_at: impl FnOnce() -> u64,
+    finished_at: impl FnOnce() -> Time,
 ) -> Reply {
     let result = match request {
         Request::Offer => clipboard
@@ -239,7 +240,7 @@ impl Request {
                 formats: offered,
             } => {
                 bytes.push(2);
-                number(&mut bytes, *generation);
+                number(&mut bytes, generation.get());
                 formats(&mut bytes, offered);
             }
             Self::Write {
@@ -249,14 +250,14 @@ impl Request {
                 bytes: data,
             } => {
                 bytes.push(3);
-                number(&mut bytes, *generation);
+                number(&mut bytes, generation.get());
                 number(&mut bytes, *format as u64);
                 number(&mut bytes, *offset as u64);
                 bytes.extend_from_slice(data);
             }
             Self::Complete { generation } => {
                 bytes.push(4);
-                number(&mut bytes, *generation);
+                number(&mut bytes, generation.get());
             }
             Self::Read {
                 generation,
@@ -264,7 +265,7 @@ impl Request {
                 offset,
             } => {
                 bytes.push(5);
-                number(&mut bytes, *generation);
+                number(&mut bytes, generation.get());
                 number(&mut bytes, *format as u64);
                 number(&mut bytes, *offset as u64);
             }
@@ -290,11 +291,11 @@ impl Request {
             0 => Self::Offer,
             1 => Self::Reserve,
             2 => Self::Declare {
-                generation: reader.number()?,
+                generation: Generation::from_wire(reader.number()?),
                 formats: reader.formats()?,
             },
             3 => {
-                let generation = reader.number()?;
+                let generation = Generation::from_wire(reader.number()?);
                 let format = reader.size(MAX_FORMATS - 1)?;
                 let offset = reader.size(airlock_clipboard_core::shared::DEFAULT_CAPACITY)?;
                 if reader.cursor.remaining() > DATA_CHUNK {
@@ -313,10 +314,10 @@ impl Request {
                 }
             }
             4 => Self::Complete {
-                generation: reader.number()?,
+                generation: Generation::from_wire(reader.number()?),
             },
             5 => Self::Read {
-                generation: reader.number()?,
+                generation: Generation::from_wire(reader.number()?),
                 format: reader.size(MAX_FORMATS - 1)?,
                 offset: reader.size(airlock_clipboard_core::shared::DEFAULT_CAPACITY)?,
             },
@@ -362,11 +363,11 @@ impl Reply {
             Self::Ok => bytes.push(0),
             Self::Generation(generation) => {
                 bytes.push(1);
-                number(&mut bytes, *generation);
+                number(&mut bytes, generation.get());
             }
             Self::Offer(generation, offer) => {
                 bytes.push(2);
-                number(&mut bytes, *generation);
+                number(&mut bytes, generation.get());
                 bytes.push(u8::from(offer.is_some()));
                 if let Some(offer) = offer {
                     number(&mut bytes, offer.source.principal());
@@ -412,9 +413,9 @@ impl Reply {
         }
         let reply = match reader.byte()? {
             0 => Self::Ok,
-            1 => Self::Generation(reader.number()?),
+            1 => Self::Generation(Generation::from_wire(reader.number()?)),
             2 => {
-                let generation = reader.number()?;
+                let generation = Generation::from_wire(reader.number()?);
                 let offer = match reader.byte()? {
                     0 => None,
                     1 => Some(Offer {
@@ -551,7 +552,7 @@ mod tests {
     #[test]
     fn fragmented_binary_packets_roundtrip_and_reject_gaps_and_trailing_bytes() {
         let request = Request::Write {
-            generation: 9,
+            generation: Generation::from_wire(9),
             format: 1,
             offset: 2048,
             bytes: vec![255; DATA_CHUNK],
@@ -568,7 +569,7 @@ mod tests {
         assert_eq!(completed.unwrap(), encoded);
         assert!(matches!(
             Request::decode(&encoded),
-            Ok(Request::Write { generation: 9, .. })
+            Ok(Request::Write { generation, .. }) if generation == Generation::from_wire(9)
         ));
         assert!(Incoming::default().push(&frames[1]).is_err());
         let mut invalid = Request::Offer.encode();
@@ -615,7 +616,7 @@ mod tests {
         assert!(matches!(
             execute(
                 &mut clipboard,
-                0,
+                Time::observe(0),
                 &caller,
                 Request::Connect {
                     principal: 2,

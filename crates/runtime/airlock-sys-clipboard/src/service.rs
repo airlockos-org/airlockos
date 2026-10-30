@@ -4,7 +4,7 @@
 
 use crate::shared::{self, Incoming, Reply, Request};
 use airlock_clipboard_core::shared::{
-    Caller, Clipboard, DEFAULT_CAPACITY, Error, Participant, Provisioner,
+    Caller, Clipboard, DEFAULT_CAPACITY, Error, Participant, Provisioner, Time,
 };
 use std::collections::VecDeque;
 use xen_transport::hermit::endpoint::{self, Endpoint, Pending};
@@ -249,7 +249,7 @@ pub fn run(authority: u16, nonce: &str, scratch_bytes: u64) -> Result<(), Transp
     loop {
         let observed = endpoint::generation();
         let now = endpoint::now_ns();
-        clipboard.tick(now);
+        clipboard.tick(Time::observe(now));
         if let Some(request) = control.poll()? {
             let reply = match request {
                 Request::Offer => Reply::Ok,
@@ -310,10 +310,10 @@ pub fn run(authority: u16, nonce: &str, scratch_bytes: u64) -> Result<(), Transp
                     Role::Data(caller) => {
                         let reply = shared::execute_with_clock(
                             &mut clipboard,
-                            endpoint::now_ns(),
+                            Time::observe(endpoint::now_ns()),
                             caller,
                             request,
-                            endpoint::now_ns,
+                            || Time::observe(endpoint::now_ns()),
                         );
                         peer.reply(reply)
                     }
@@ -332,7 +332,7 @@ pub fn run(authority: u16, nonce: &str, scratch_bytes: u64) -> Result<(), Transp
             }
         }
         let now = endpoint::now_ns();
-        clipboard.tick(now);
+        clipboard.tick(Time::observe(now));
         let current = clipboard.storage().usage();
         if current != usage {
             println!(

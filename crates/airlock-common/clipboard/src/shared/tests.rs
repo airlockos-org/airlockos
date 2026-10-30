@@ -31,7 +31,7 @@ fn multiple_formats_publish_together_and_survive_repeated_paste_and_idle() {
     let (mut clipboard, _provisioner, source, target) = fixture(Clipboard::new(1024));
     let generation = clipboard
         .begin(
-            0,
+            Time::observe(0),
             &source,
             vec![
                 format("text/plain", 3),
@@ -41,14 +41,16 @@ fn multiple_formats_publish_together_and_survive_repeated_paste_and_idle() {
         )
         .unwrap();
     clipboard
-        .write(1, &source, generation, 0, 0, b"abc")
+        .write(Time::observe(1), &source, generation, 0, 0, b"abc")
         .unwrap();
     assert!(clipboard.offer(&target).unwrap().1.is_none());
     clipboard
-        .write(2, &source, generation, 1, 0, &[0, 255, 3, 0])
+        .write(Time::observe(2), &source, generation, 1, 0, &[0, 255, 3, 0])
         .unwrap();
-    clipboard.complete(3, &source, generation).unwrap();
-    clipboard.tick(u64::MAX);
+    clipboard
+        .complete(Time::observe(3), &source, generation)
+        .unwrap();
+    clipboard.tick(Time::observe(u64::MAX));
     clipboard.disconnect(&source);
     for _ in 0..3 {
         assert_eq!(
@@ -67,23 +69,30 @@ fn multiple_formats_publish_together_and_survive_repeated_paste_and_idle() {
 #[test]
 fn replacements_invalidate_reads_and_late_source_chunks() {
     let (mut clipboard, _provisioner, source, target) = fixture(Clipboard::new(1024));
-    let old = clipboard.reserve(0, &source).unwrap();
+    let old = clipboard.reserve(Time::observe(0), &source).unwrap();
     let new = clipboard
-        .begin(1, &target, vec![format("text/plain", 1)])
+        .begin(Time::observe(1), &target, vec![format("text/plain", 1)])
         .unwrap();
     assert_eq!(
-        clipboard.declare(2, &source, old, vec![format("text/plain", 1)]),
+        clipboard.declare(
+            Time::observe(2),
+            &source,
+            old,
+            vec![format("text/plain", 1)]
+        ),
         Err(Error::Stale)
     );
     assert_eq!(
-        clipboard.write(2, &source, old, 0, 0, b"a"),
+        clipboard.write(Time::observe(2), &source, old, 0, 0, b"a"),
         Err(Error::Stale)
     );
-    clipboard.write(3, &target, new, 0, 0, b"b").unwrap();
-    clipboard.complete(4, &target, new).unwrap();
+    clipboard
+        .write(Time::observe(3), &target, new, 0, 0, b"b")
+        .unwrap();
+    clipboard.complete(Time::observe(4), &target, new).unwrap();
     assert_eq!(clipboard.read(&source, old, 0, 0, 1), Err(Error::Stale));
     assert_eq!(clipboard.read(&source, new, 0, 0, 1), Ok(b"b".to_vec()));
-    let cleared = clipboard.begin(5, &source, vec![]).unwrap();
+    let cleared = clipboard.begin(Time::observe(5), &source, vec![]).unwrap();
     assert_eq!(clipboard.offer(&target), Ok((cleared, None)));
     assert_eq!(clipboard.read(&target, new, 0, 0, 1), Err(Error::Stale));
 }
@@ -92,32 +101,39 @@ fn replacements_invalidate_reads_and_late_source_chunks() {
 fn incomplete_or_expired_writes_never_publish_and_reconnect_cannot_finish_them() {
     let (mut clipboard, provisioner, mut source, target) = fixture(Clipboard::new(1024));
     let generation = clipboard
-        .begin(0, &source, vec![format("text/plain", 2)])
+        .begin(Time::observe(0), &source, vec![format("text/plain", 2)])
         .unwrap();
     clipboard.disconnect(&source);
     assert_eq!(
-        clipboard.write(1, &source, generation, 0, 0, b"ab"),
+        clipboard.write(Time::observe(1), &source, generation, 0, 0, b"ab"),
         Err(Error::Unauthorized)
     );
     source = clipboard
         .admit(&provisioner, Participant::from_binding(1, 21).unwrap())
         .unwrap();
     assert_eq!(
-        clipboard.write(1, &source, generation, 0, 0, b"ab"),
+        clipboard.write(Time::observe(1), &source, generation, 0, 0, b"ab"),
         Err(Error::Stale)
     );
     let generation = clipboard
-        .begin(1, &source, vec![format("text/plain", 2)])
+        .begin(Time::observe(1), &source, vec![format("text/plain", 2)])
         .unwrap();
     assert_eq!(
-        clipboard.complete(2, &source, generation),
+        clipboard.complete(Time::observe(2), &source, generation),
         Err(Error::Order)
     );
     let generation = clipboard
-        .begin(3, &source, vec![format("text/plain", 2)])
+        .begin(Time::observe(3), &source, vec![format("text/plain", 2)])
         .unwrap();
     assert_eq!(
-        clipboard.write(WRITE_TIMEOUT + 3, &source, generation, 0, 0, b"ab"),
+        clipboard.write(
+            Time::observe(WRITE_TIMEOUT + 3),
+            &source,
+            generation,
+            0,
+            0,
+            b"ab"
+        ),
         Err(Error::Stale)
     );
     assert!(clipboard.offer(&target).unwrap().1.is_none());
@@ -129,12 +145,12 @@ fn rejects_unauthenticated_callers_file_formats_and_resource_exhaustion() {
     assert!(Participant::from_binding(0, 1).is_none());
     assert!(Participant::from_binding(1, 0).is_none());
     assert_eq!(
-        clipboard.begin(0, &source, vec![format("text/uri-list", 1)]),
+        clipboard.begin(Time::observe(0), &source, vec![format("text/uri-list", 1)]),
         Err(Error::Unsupported)
     );
     assert_eq!(
         clipboard.begin(
-            0,
+            Time::observe(0),
             &source,
             vec![format("text/plain", 3), format("text/html", 2)]
         ),
@@ -142,14 +158,18 @@ fn rejects_unauthenticated_callers_file_formats_and_resource_exhaustion() {
     );
     assert_eq!(
         clipboard.begin(
-            0,
+            Time::observe(0),
             &source,
             vec![format("text/plain", 0), format("text/plain", 0)]
         ),
         Err(Error::Order)
     );
     assert_eq!(
-        clipboard.begin(0, &source, vec![format("text/plain", 0); MAX_FORMATS + 1]),
+        clipboard.begin(
+            Time::observe(0),
+            &source,
+            vec![format("text/plain", 0); MAX_FORMATS + 1]
+        ),
         Err(Error::Bounds)
     );
 }
@@ -176,13 +196,15 @@ fn admission_capabilities_bind_object_identity_capacity_and_connection_lifetime(
     assert!(callers.iter().all(|caller| clipboard.offer(caller).is_ok()));
 
     let generation = clipboard
-        .begin(0, &callers[0], vec![format("text/plain", 1)])
+        .begin(Time::observe(0), &callers[0], vec![format("text/plain", 1)])
         .unwrap();
     clipboard
-        .write(1, &callers[0], generation, 0, 0, b"x")
+        .write(Time::observe(1), &callers[0], generation, 0, 0, b"x")
         .unwrap();
     clipboard.disconnect(&foreign_caller);
-    clipboard.complete(2, &callers[0], generation).unwrap();
+    clipboard
+        .complete(Time::observe(2), &callers[0], generation)
+        .unwrap();
     assert_eq!(
         clipboard.read(&callers[1], generation, 0, 0, 1).unwrap(),
         b"x"

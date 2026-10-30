@@ -3,7 +3,7 @@
 //! the existing GUI authority permits one live connection per principal. This
 //! peer uses ordinary Qubes provisioning and never supplies its own identity.
 
-use airlock_clipboard_core::shared::{DEFAULT_CAPACITY, Error, Format};
+use airlock_clipboard_core::shared::{DEFAULT_CAPACITY, Error, Format, Generation};
 use airlock_machine_core::services::{ClipboardConnection, ClipboardEndpoint};
 use airlock_sys_clipboard::shared::{self, DATA_CHUNK, Reply, Request};
 use anyhow::{Context, Result, bail, ensure};
@@ -110,7 +110,7 @@ impl Client {
     }
 
     /// Obtain replacement order before declaring or transferring any bytes.
-    fn reserve(&mut self) -> Result<u64> {
+    fn reserve(&mut self) -> Result<Generation> {
         match self.request(Request::Reserve)? {
             Reply::Generation(generation) => Ok(generation),
             _ => bail!("reservation failed"),
@@ -118,7 +118,7 @@ impl Client {
     }
 
     /// Stream synthetic data into two representations without allocating the full offer.
-    fn copy(&mut self, size: usize, cancel: bool) -> Result<u64> {
+    fn copy(&mut self, size: usize, cancel: bool) -> Result<Generation> {
         let generation = self.reserve()?;
         let formats = formats(size);
         self.mutate(Request::Declare {
@@ -146,7 +146,7 @@ impl Client {
     }
 
     /// Verify every promised byte twice, including unaligned representation boundaries.
-    fn read(&mut self, size: usize) -> Result<u64> {
+    fn read(&mut self, size: usize) -> Result<Generation> {
         let Reply::Offer(generation, Some(offer)) = self.request(Request::Offer)? else {
             bail!("no complete offer");
         };

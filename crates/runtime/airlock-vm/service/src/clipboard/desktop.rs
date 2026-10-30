@@ -3,7 +3,9 @@
 //! republishes it. INCR transfers preserve large binary formats without file paths.
 
 use super::{Client, Reply, Request};
-use airlock_clipboard_core::shared::{self, DEFAULT_CAPACITY, Format, MAX_FORMATS, Offer};
+use airlock_clipboard_core::shared::{
+    self, DEFAULT_CAPACITY, Format, Generation, MAX_FORMATS, Offer,
+};
 use anyhow::{Context, Result, bail, ensure};
 use std::{
     collections::VecDeque,
@@ -29,7 +31,7 @@ struct Sending {
     /// Receiving application window and property carrying the transfer.
     request: SelectionRequestEvent,
     /// Exact immutable source generation, invalidated on replacement.
-    generation: u64,
+    generation: Generation,
     /// Index of the selected representation.
     format: usize,
     /// Next unread byte in that representation.
@@ -61,9 +63,9 @@ struct Desktop {
     /// Remote offer represented by our own selection, absent for a cleared clipboard.
     remote: Option<Offer>,
     /// Last generation and publication state observed, including pending replacements.
-    observed: Option<(u64, bool)>,
+    observed: Option<(Generation, bool)>,
     /// Reservation currently belonging to the local application's clipboard owner.
-    local_generation: Option<u64>,
+    local_generation: Option<Generation>,
     /// Selection acquisition timestamp returned to ordinary X clients.
     acquired: u32,
     /// Events deferred during bounded source format conversion.

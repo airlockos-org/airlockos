@@ -4,7 +4,8 @@
 use airlock_clipboard_core::{
     resources::SLOT_LIMIT,
     shared::{
-        Clipboard, Error, Format, MAX_FORMAT_NAME, MAX_FORMATS, Participant, storage::RAM_LIMIT,
+        Clipboard, Error, Format, MAX_FORMAT_NAME, MAX_FORMATS, Participant, Time,
+        storage::RAM_LIMIT,
     },
 };
 use airlock_sys_clipboard::{
@@ -35,10 +36,10 @@ fn maximum_connection_framing_payload_and_exhaustion_recover() {
     let caller = clipboard
         .admit(&provisioner, Participant::from_binding(1, 1).unwrap())
         .unwrap();
-    let generation = clipboard.reserve(1, &caller).unwrap();
+    let generation = clipboard.reserve(Time::observe(1), &caller).unwrap();
     clipboard
         .declare(
-            1,
+            Time::observe(1),
             &caller,
             generation,
             (0..MAX_FORMATS)
@@ -56,12 +57,26 @@ fn maximum_connection_framing_payload_and_exhaustion_recover() {
     for format in 0..MAX_FORMATS {
         for offset in (0..RAM_LIMIT / MAX_FORMATS).step_by(chunk.len()) {
             clipboard
-                .write(2, &caller, generation, format, offset, &chunk)
+                .write(
+                    Time::observe(2),
+                    &caller,
+                    generation,
+                    format,
+                    offset,
+                    &chunk,
+                )
                 .unwrap();
         }
     }
-    clipboard.complete(2, &caller, generation).unwrap();
-    let reply = shared::execute(&mut clipboard, 2, &caller, shared::Request::Offer);
+    clipboard
+        .complete(Time::observe(2), &caller, generation)
+        .unwrap();
+    let reply = shared::execute(
+        &mut clipboard,
+        Time::observe(2),
+        &caller,
+        shared::Request::Offer,
+    );
     let encoded = reply.encode();
     let output = shared::frames(Kind::Response, 2, &encoded).unwrap();
     assert!(!output.is_empty());
@@ -93,16 +108,16 @@ fn maximum_connection_framing_payload_and_exhaustion_recover() {
     assert!(matches!(clipboard.offer(&caller), Err(Error::Capacity)));
     drop(pressure);
     assert!(clipboard.offer(&caller).is_ok());
-    clipboard.reserve(2, &caller).unwrap();
+    clipboard.reserve(Time::observe(2), &caller).unwrap();
     drop(connections);
     drop(responses);
     assert!(HEAP.usage().0 < live - RAM_LIMIT);
 
     // Previously pressured storage can again reserve its maximum bounded RAM offer.
-    let generation = clipboard.reserve(3, &caller).unwrap();
+    let generation = clipboard.reserve(Time::observe(3), &caller).unwrap();
     clipboard
         .declare(
-            3,
+            Time::observe(3),
             &caller,
             generation,
             vec![Format {
@@ -111,6 +126,6 @@ fn maximum_connection_framing_payload_and_exhaustion_recover() {
             }],
         )
         .unwrap();
-    clipboard.reserve(4, &caller).unwrap();
+    clipboard.reserve(Time::observe(4), &caller).unwrap();
     println!("APP_HEAP_STRESS cap={APP_HEAP_BYTES} live={live} peak={peak}");
 }

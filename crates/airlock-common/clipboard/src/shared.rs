@@ -19,6 +19,8 @@ pub const WRITE_TIMEOUT: u64 = 120_000_000_000;
 
 use crate::authority::Admissions;
 pub use crate::authority::{Caller, Participant, Provisioner};
+use crate::values::Deadline;
+pub use crate::values::{Generation, Time};
 
 use crate::formats::CheckedOffer;
 pub use crate::formats::{
@@ -29,7 +31,7 @@ pub use crate::formats::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Offer {
     /// Monotonically increasing replacement identity within this service boot.
-    pub generation: u64,
+    pub generation: Generation,
     /// Authenticated source of the content, retained independently of its connection.
     pub source: Participant,
     /// Available representations in their original preference order.
@@ -49,7 +51,7 @@ struct Representation {
 /// Private offer state before or after publication.
 struct Content {
     /// Globally ordered identity issued before reading any source bytes.
-    generation: u64,
+    generation: Generation,
     /// Authenticated owner of this replacement.
     source: Participant,
     /// Representation buffers bounded by the service's total capacity.
@@ -63,18 +65,18 @@ enum State {
     /// A replacement owns ordering but has not declared any representations.
     Reserved {
         /// Latest issued replacement identity, retained across failures.
-        generation: u64,
+        generation: Generation,
         /// Exact admitted incarnation allowed to declare this reservation.
         source: Participant,
         /// Fixed monotonic completion deadline, including format conversion time.
-        deadline: u64,
+        deadline: Deadline,
     },
     /// Declared representations are being filled into their single private extent.
     Receiving {
         /// Exact metadata and contiguous progress for this unfinished offer.
         content: Content,
         /// Original reservation deadline, never extended by incoming chunks.
-        deadline: u64,
+        deadline: Deadline,
     },
     /// Every byte arrived and flush completed before the transfer deadline.
     Published(
@@ -95,11 +97,11 @@ pub struct Clipboard<S = Spool<NoDisk>> {
     /// Maximum combined length of the representations in an offer.
     capacity: usize,
     /// Latest issued identity; preserved even when a replacement fails.
-    generation: u64,
+    generation: Generation,
     /// Exclusive lifecycle stage; callers cannot mutate related fields independently.
     state: State,
     /// Last monotonic observation; regressions invalidate unfinished transfers.
-    last_time: u64,
+    last_time: Time,
 }
 
 impl Clipboard {
@@ -118,9 +120,9 @@ impl<S: Storage> Clipboard<S> {
                 admissions,
                 storage,
                 capacity,
-                generation: 0,
+                generation: Generation::from_wire(0),
                 state: State::Empty,
-                last_time: 0,
+                last_time: Time::observe(0),
             },
             provisioner,
         )
@@ -158,10 +160,10 @@ impl<S: Storage> Clipboard<S> {
     }
 
     /// Forget an expired unfinished write; published content never expires.
-    pub fn tick(&mut self, now: u64) {
+    pub fn tick(&mut self, now: Time) {
         let expired = match &self.state {
             State::Reserved { deadline, .. } | State::Receiving { deadline, .. } => {
-                now < self.last_time || now >= *deadline
+                now.before(self.last_time) || deadline.expired_at(now)
             }
             State::Empty | State::Published(_) => false,
         };
@@ -174,7 +176,12 @@ impl<S: Storage> Clipboard<S> {
     /// Begin replacing the clipboard, invalidating every older offer immediately.
     /// An empty format list clears shared availability, including when a source
     /// copies local files that must remain usable only inside its own VM.
-    pub fn begin(&mut self, now: u64, caller: &Caller, formats: Vec<Format>) -> Result<u64, Error> {
+    pub fn begin(
+        &mut self,
+        now: Time,
+        caller: &Caller,
+        formats: Vec<Format>,
+    ) -> Result<Generation, Error> {
         self.access(caller)?;
         self.tick(now);
         validate_formats(&formats, self.capacity)?;
@@ -185,11 +192,11 @@ impl<S: Storage> Clipboard<S> {
 
     /// Reserve replacement order as soon as the local clipboard owner changes.
     /// Slow format conversion cannot later replace a newer copy from another VM.
-    pub fn reserve(&mut self, now: u64, caller: &Caller) -> Result<u64, Error> {
+    pub fn reserve(&mut self, now: Time, caller: &Caller) -> Result<Generation, Error> {
         self.access(caller)?;
         self.tick(now);
-        let generation = self.generation.checked_add(1).ok_or(Error::Bounds)?;
-        let deadline = now.checked_add(WRITE_TIMEOUT).ok_or(Error::Bounds)?;
+        let generation = self.generation.next().ok_or(Error::Bounds)?;
+        let deadline = now.deadline_after(WRITE_TIMEOUT).ok_or(Error::Bounds)?;
         self.generation = generation;
         self.abort();
         self.state = State::Reserved {
@@ -204,9 +211,9 @@ impl<S: Storage> Clipboard<S> {
     /// Empty offers clear shared availability while leaving source-local file offers alone.
     pub fn declare(
         &mut self,
-        now: u64,
+        now: Time,
         caller: &Caller,
-        generation: u64,
+        generation: Generation,
         formats: Vec<Format>,
     ) -> Result<(), Error> {
         self.access(caller)?;
@@ -254,9 +261,9 @@ impl<S: Storage> Clipboard<S> {
     /// Append one contiguous chunk to an unfinished representation.
     pub fn write(
         &mut self,
-        now: u64,
+        now: Time,
         caller: &Caller,
-        generation: u64,
+        generation: Generation,
         format: usize,
         offset: usize,
         bytes: &[u8],
@@ -286,7 +293,12 @@ impl<S: Storage> Clipboard<S> {
     }
 
     /// Publish all representations together after every promised byte arrived.
-    pub fn complete(&mut self, now: u64, caller: &Caller, generation: u64) -> Result<(), Error> {
+    pub fn complete(
+        &mut self,
+        now: Time,
+        caller: &Caller,
+        generation: Generation,
+    ) -> Result<(), Error> {
         self.complete_with_clock(now, caller, generation, || now)
     }
 
@@ -294,10 +306,10 @@ impl<S: Storage> Clipboard<S> {
     /// Blocking storage must not publish a transfer whose deadline passed during I/O.
     pub fn complete_with_clock(
         &mut self,
-        now: u64,
+        now: Time,
         caller: &Caller,
-        generation: u64,
-        finished_at: impl FnOnce() -> u64,
+        generation: Generation,
+        finished_at: impl FnOnce() -> Time,
     ) -> Result<(), Error> {
         self.access(caller)?;
         self.tick(now);
@@ -336,7 +348,7 @@ impl<S: Storage> Clipboard<S> {
 
     /// Return the latest issued generation and any completely published offer.
     /// The generation also changes on clear, allowing endpoints to discard stale data.
-    pub fn offer(&self, caller: &Caller) -> Result<(u64, Option<Offer>), Error> {
+    pub fn offer(&self, caller: &Caller) -> Result<(Generation, Option<Offer>), Error> {
         self.access(caller)?;
         let offer = if let State::Published(content) = &self.state {
             let mut formats = Vec::new();
@@ -368,7 +380,7 @@ impl<S: Storage> Clipboard<S> {
     pub fn read(
         &mut self,
         caller: &Caller,
-        generation: u64,
+        generation: Generation,
         format: usize,
         offset: usize,
         maximum: usize,
@@ -393,7 +405,7 @@ impl<S: Storage> Clipboard<S> {
             self.state = State::Empty;
             self.storage.clear();
             // Exhaustion cannot wrap a stale generation back into validity.
-            self.generation = self.generation.saturating_add(1);
+            self.generation = self.generation.invalidated();
             return Err(error);
         }
         Ok(bytes)
