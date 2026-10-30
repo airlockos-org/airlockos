@@ -1,5 +1,13 @@
 //! Normal clipboard protocol shared by Hermit and its authenticated Linux endpoints.
 //! Packets are bounded before allocation and fragmented across existing Xen frames.
+//!
+//! Verification exception: foreign Channel/Message methods are not modeled by
+//! pinned vstd. This adapter relies on Message owning an immutable copied payload,
+//! the channel retaining its constructor's authenticated peer, and send/receive
+//! preserving kind, ID and bytes. It passes those exact owned bytes to the verified
+//! codec/assembler and wraps the verified sender's exact payload without rebuilding
+//! offsets. The compile-time payload-limit assertion protects the ABI bound;
+//! direction and response-ID checks stay beside the foreign message operations.
 
 pub use airlock_clipboard_core::values::{Generation, Time};
 use xen_transport::{Backend, Channel, Error as TransportError, Kind, MAX_PAYLOAD, Message};

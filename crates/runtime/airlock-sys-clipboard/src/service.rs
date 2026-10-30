@@ -1,6 +1,18 @@
 //! Hermit service with an authenticated authority and independent data connections.
 //! Only the boot-provisioned GUI authority can attach peers. Clipboard bytes flow
 //! directly between each Linux participant and Hermit, never through dom0.
+//!
+//! Verification exception: this module owns the foreign Pending/Endpoint/VBD
+//! effects and their event-loop scheduling. Pinned vstd has no model of these
+//! kernel handles, asynchronous revocation or event waits. Their identity, owned
+//! snapshot and completion contracts are trusted here; this is not a proof of
+//! runtime I/O correspondence. Policy, codec, storage transformations and owned
+//! connection accounting remain in verified production core bodies. Private Role
+//! and Transport variants carry capabilities/handles by Rust moves; data messages
+//! cannot construct provisioners. Constructor uncertainty terminates the service,
+//! failed close retains ownership, and bounded per-peer polls prevent one input
+//! queue from consuming a whole pass. Progress still requires truthful driver
+//! outcomes, kernel scheduling and returning I/O/waits.
 
 use crate::shared::{self, Incoming, Reply, Request};
 use airlock_clipboard_core::boot::{Challenge, Domain};
