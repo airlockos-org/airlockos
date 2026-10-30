@@ -3,6 +3,22 @@
 //! connection ledgers, not allocator internals or Rust/compiler allocation behavior.
 //! Exhaustion returns null to fallible allocation APIs; infallible Rust allocations
 //! retain Rust's abort-on-exhaustion behavior. There is no system-heap fallback.
+//!
+//! Verification exception: the GlobalAlloc/Talc ABI, raw-pointer provenance and
+//! AtomicBool/UnsafeCell synchronization remain an explicitly trusted effect boundary.
+//! The pinned verifier library has no TalcCell or GlobalAlloc ownership model; it
+//! cannot connect foreign allocation handles to Rust layout provenance. The only
+//! first-party byte arithmetic is delegated to the verified Budget transitions.
+//! Assumptions: Talc returns disjoint correctly aligned blocks inside the single
+//! Manual arena; GlobalAlloc clients free a live pointer once with its original
+//! layout; the static arena never moves. Every successful alloc/free is checked
+//! against Talc's independent live requested-byte counter under the same lock.
+//! Counter disagreement is an explicit fatal allocator-contract violation, never
+//! a capacity error that permits continued execution. This is a runtime
+//! correspondence guard, not a proof of Talc, provenance or the lock implementation.
+//! Progress assumes the lock owner is scheduled and Talc's bounded arena operation
+//! returns; allocating recursively or in an interrupt while owning this lock is
+//! forbidden. The service itself processes clipboard requests on one thread.
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
@@ -25,14 +41,25 @@ struct Arena<const N: usize> {
     bytes: [MaybeUninit<u8>; N],
 }
 
+/// One-time arena claim; failed construction cannot be retried ambiguously.
+enum ArenaState {
+    /// No foreign allocator effect has yet been attempted.
+    Unclaimed,
+    /// Talc owns the sole extent and every live byte is represented by this ledger.
+    Ready(
+        /// Exact requested-byte credits associated with this claimed arena.
+        airlock_clipboard_core::resources::Budget,
+    ),
+    /// Claim failed; all allocation attempts return null until this heap is destroyed.
+    Unavailable,
+}
+
 /// Mutable allocator metadata, exclusively protected by the enclosing spin lock.
 struct State {
     /// Allocator with a source that cannot request additional memory.
     allocator: TalcCell<Manual>,
-    /// Whether the sole backing extent has been claimed successfully.
-    initialized: bool,
-    /// Verus-checked byte ledger charged by every successful allocation.
-    budget: airlock_clipboard_core::resources::Budget,
+    /// Exclusive initialization outcome and its corresponding byte-credit owner.
+    arena: ArenaState,
 }
 
 /// One fixed arena; use as the Hermit executable's global allocator.
@@ -70,10 +97,7 @@ impl<const N: usize> FixedHeap<N> {
             locked: AtomicBool::new(false),
             state: UnsafeCell::new(State {
                 allocator: TalcCell::new(Manual),
-                initialized: false,
-                // Zero initialization keeps the large static arena in ELF .bss.
-                // Its real byte budget is installed when the sole extent is claimed.
-                budget: airlock_clipboard_core::resources::Budget::new(0),
+                arena: ArenaState::Unclaimed,
             }),
             arena: UnsafeCell::new(Arena {
                 bytes: [MaybeUninit::uninit(); N],
@@ -93,20 +117,24 @@ impl<const N: usize> FixedHeap<N> {
         let _guard = Guard { heap: self };
         // SAFETY: the acquired lock gives exclusive state and backing ownership.
         let state = unsafe { &mut *self.state.get() };
-        if !state.initialized {
+        if matches!(state.arena, ArenaState::Unclaimed) {
             let base = self.arena.get().cast::<u8>();
             // SAFETY: the stable, aligned N-byte arena is private and claimed once.
-            state.initialized = unsafe { state.allocator.claim(base, N) }.is_some();
-            if state.initialized {
-                state.budget = airlock_clipboard_core::resources::Budget::new(N);
-            }
+            state.arena = if unsafe { state.allocator.claim(base, N) }.is_some() {
+                ArenaState::Ready(airlock_clipboard_core::resources::Budget::new(N))
+            } else {
+                ArenaState::Unavailable
+            };
         }
         run(state)
     }
 
     /// Return live and peak requested heap bytes; excludes static metadata and stacks.
     pub fn usage(&self) -> (usize, usize) {
-        self.with(|state| state.budget.usage())
+        self.with(|state| match &state.arena {
+            ArenaState::Ready(budget) => budget.usage(),
+            ArenaState::Unclaimed | ArenaState::Unavailable => (0, 0),
+        })
     }
 }
 
@@ -122,12 +150,20 @@ impl<const N: usize> Default for FixedHeap<N> {
 unsafe impl<const N: usize> GlobalAlloc for FixedHeap<N> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         self.with(|state| {
+            let ArenaState::Ready(budget) = &mut state.arena else {
+                return core::ptr::null_mut();
+            };
             // SAFETY: exclusive allocator access; the caller supplies a valid layout.
             let pointer = unsafe { state.allocator.alloc(layout) };
-            if !pointer.is_null() && !state.budget.reserve(layout.size()) {
+            if !pointer.is_null() && !budget.reserve(layout.size()) {
                 // SAFETY: this allocation has not escaped and retains its exact layout.
                 unsafe { state.allocator.dealloc(pointer, layout) };
-                return core::ptr::null_mut();
+                // A nonnull Talc block inside the N-byte arena must fit the
+                // matching N-byte ledger. Rejection signals broken correspondence.
+                std::process::abort();
+            }
+            if state.allocator.counters().allocated_bytes != budget.usage().0 {
+                std::process::abort();
             }
             pointer
         })
@@ -135,9 +171,16 @@ unsafe impl<const N: usize> GlobalAlloc for FixedHeap<N> {
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
         self.with(|state| {
+            let ArenaState::Ready(budget) = &mut state.arena else {
+                std::process::abort();
+            };
             // SAFETY: caller supplies a live pointer and its original layout.
             unsafe { state.allocator.dealloc(pointer, layout) };
-            let _ = state.budget.release(layout.size());
+            if !budget.release(layout.size())
+                || state.allocator.counters().allocated_bytes != budget.usage().0
+            {
+                std::process::abort();
+            }
         });
     }
 }

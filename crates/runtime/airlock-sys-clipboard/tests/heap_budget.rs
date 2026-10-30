@@ -77,7 +77,7 @@ fn maximum_connection_framing_payload_and_exhaustion_recover() {
         &caller,
         shared::Request::Offer,
     );
-    let encoded = reply.encode();
+    let encoded = reply.try_encode().unwrap();
     let output = shared::frames(Kind::Response, 2, &encoded).unwrap();
     assert!(!output.is_empty());
     drop(output);

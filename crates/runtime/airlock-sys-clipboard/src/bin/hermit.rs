@@ -12,35 +12,45 @@ fn main() {
     println!("AIRLOCK_CLIPBOARD_BUILD source={source}");
     let (live, peak) = airlock_sys_clipboard::heap::APPLICATION_HEAP.usage();
     println!(
-        "AIRLOCK_CLIPBOARD_HEAP cap={} live={live} peak={peak}",
-        airlock_sys_clipboard::heap::APP_HEAP_BYTES
+        "AIRLOCK_CLIPBOARD_HEAP cap={cap} live={live} peak={peak}",
+        cap = airlock_sys_clipboard::heap::APP_HEAP_BYTES
     );
-    let nonce = std::env::args()
-        .find_map(|argument| argument.strip_prefix("airlock.boot=").map(str::to_owned))
-        .filter(|value| {
-            value.len() == 36
-                && value
-                    .bytes()
-                    .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
-        })
-        .expect("deployment must provide a boot challenge");
-    if let Some(authority) = std::env::args().find_map(|argument| {
-        argument
-            .strip_prefix("airlock.authority=")
-            .map(str::to_owned)
-    }) {
-        let authority = authority
-            .parse::<u16>()
-            .expect("invalid clipboard authority");
-        let scratch_bytes = std::env::args()
-            .find_map(|argument| {
-                argument
-                    .strip_prefix("airlock.scratch=")
-                    .and_then(|value| value.parse::<u64>().ok())
-            })
-            .expect("normal clipboard requires admitted ephemeral storage");
-        airlock_sys_clipboard::service::run(authority, &nonce, scratch_bytes)
-            .expect("clipboard service failed");
+    let mut parser = airlock_clipboard_core::boot::BootParser::new();
+    for argument in std::env::args() {
+        parser = match parser.push(argument.as_bytes()) {
+            Ok(next) => next,
+            Err(error) => {
+                println!("AIRLOCK_CLIPBOARD_BOOT_REJECT error={error:?}");
+                std::process::exit(1);
+            }
+        };
+    }
+    let config = match parser.finish() {
+        Ok(config) => config,
+        Err(error) => {
+            println!("AIRLOCK_CLIPBOARD_BOOT_REJECT error={error:?}");
+            std::process::exit(1);
+        }
+    };
+    let (challenge, mode) = config.into_parts();
+    let nonce = match core::str::from_utf8(challenge.as_bytes()) {
+        Ok(nonce) => nonce,
+        Err(_) => {
+            println!("AIRLOCK_CLIPBOARD_BOOT_REJECT error=ChallengeInvariant");
+            std::process::exit(1);
+        }
+    };
+    if let airlock_clipboard_core::boot::Mode::Connected {
+        authority,
+        scratch_bytes,
+    } = mode
+    {
+        if let Err(error) =
+            airlock_sys_clipboard::service::run(authority, &challenge, scratch_bytes)
+        {
+            println!("AIRLOCK_CLIPBOARD_STOP error={error:?} boot={nonce}");
+            std::process::exit(1);
+        }
         return;
     }
     println!("AIRLOCK_CLIPBOARD_EXECUTING authority=disconnected readiness=isolated boot={nonce}");
