@@ -4,6 +4,7 @@
 use crate::argument;
 use airlock_nix_core::hermit_artifact::{AuthorityMode, Descriptor, ScratchDisk};
 use airlock_qubes::descriptor;
+use airlock_qubes_control::{READY_PATH, config::MAX_CLIENTS};
 use pyo3::{
     prelude::*,
     types::{PyDict, PyTuple},
@@ -183,6 +184,73 @@ fn authority(vm: &Bound<'_, PyAny>, image: &Descriptor) -> PyResult<Option<u16>>
     Ok(Some(domain))
 }
 
+/// Complete the native control startup handoff on Qubes' own event loop.
+/// Guest readiness selects no clients or rules: the protected boot record and
+/// current upstream NetVM relationships determine the normal policy rewrites.
+/// Calls are synchronous, bounded by the supported client count and idempotent
+/// within a boot. A qubesd restart may safely repeat the upstream replacement.
+fn refresh_control_policies(vm: &Bound<'_, PyAny>) -> PyResult<()> {
+    let py = vm.py();
+    if !vm.getattr("provides_network")?.is_truthy()?
+        || !vm.call_method0("is_running")?.is_truthy()?
+    {
+        return Ok(());
+    }
+    let value = vm
+        .getattr("untrusted_qdb")?
+        .call_method1("read", (READY_PATH,))?
+        .extract::<Option<Vec<u8>>>()?;
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let Ok(challenge) = String::from_utf8(value) else {
+        return Ok(());
+    };
+    if challenge.len() != 36 {
+        return Ok(());
+    }
+    let xid = vm.getattr("xid")?.extract::<u32>()?;
+    if vm.hasattr("_airlock_hermit_control_refreshed")? {
+        let previous = vm.getattr("_airlock_hermit_control_refreshed")?;
+        if !previous.is_none() && previous.extract::<(u32, String)>()? == (xid, challenge.clone()) {
+            return Ok(());
+        }
+    }
+    let name = vm.getattr("name")?.extract::<String>()?;
+    let image = artifact(vm)?;
+    if !airlock_dom0_service::hermit::control_boot_matches(&name, &image, xid, challenge.as_bytes())
+        .map_err(|error| crate::exception(py, "QubesException", error))?
+    {
+        return Ok(());
+    }
+
+    // Bound collection before the first rewrite. Never select an arbitrary
+    // subset when the configured topology exceeds the guest's capacity.
+    let mut clients = Vec::new();
+    for client in vm.getattr("connected_vms")?.try_iter()? {
+        let client = client?;
+        if clients.len() == MAX_CLIENTS {
+            return Err(crate::exception(
+                py,
+                "QubesException",
+                "native Hermit firewall client capacity exceeded",
+            ));
+        }
+        clients.push(client);
+    }
+    for client in clients {
+        if client.getattr("netvm")?.is(vm) && client.call_method0("is_running")?.is_truthy()? {
+            vm.call_method1("reload_firewall_for_vm", (client,))?;
+        }
+    }
+    vm.setattr("_airlock_hermit_control_refreshed", (xid, challenge))?;
+    vm.getattr("log")?.call_method1(
+        "info",
+        ("airlock-hermit native-control=synchronized policies=refreshed",),
+    )?;
+    Ok(())
+}
+
 /// Implement only the guest ABI differences; upstream Qubes owns lifecycle execution.
 fn invoke(
     name: &str,
@@ -199,6 +267,9 @@ fn invoke(
                 .getattr("QubesVM")?
                 .getattr("__init__")?
                 .call(args, kwargs)?;
+            // Upstream installs/reinstalls this watch before resuming the guest.
+            // Registration also works when loading an already-running domain.
+            vm.call_method1("watch_qdb_path", (READY_PATH,))?;
         }
         "kernel_path" => {
             return Ok(artifact(&vm)?
@@ -212,6 +283,7 @@ fn invoke(
         "on_pre_start" => {
             // A failed preflight must not reuse a previous boot's cleanup authority.
             vm.setattr("_airlock_hermit_scratch", "")?;
+            vm.setattr("_airlock_hermit_control_refreshed", py.None())?;
             let image = artifact(&vm)?;
             let memory = vm.getattr("memory")?.extract::<u64>()?;
             let valid = vm.getattr("virt_mode")?.extract::<String>()? == "pvh"
@@ -330,7 +402,11 @@ fn invoke(
                 .map_err(|error| crate::exception(py, "QubesException", error))?;
             vm.getattr("log")?
                 .call_method1("info", ("airlock-hermit state=started xid=%s", xid))?;
+            // A fast guest can notify before domain-start records its xid. The
+            // read here closes that race without another guest request/replay.
+            refresh_control_policies(&vm)?;
         }
+        "on_control_ready" => refresh_control_policies(&vm)?,
         "on_stopped" | "on_start_failed" => {
             let vm_name = vm.getattr("name")?.extract::<String>()?;
             airlock_dom0_service::hermit::stopped(&vm_name)
@@ -384,11 +460,16 @@ pub(super) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     for name in ["kernel_path", "initramfs_path"] {
         namespace.set_item(name, descriptor::property(py, name, invoke)?)?;
     }
+    let ready_event = format!("domain-qdb-change:{READY_PATH}");
     for (name, events) in [
         ("on_pre_start", vec!["domain-pre-start"]),
         ("on_started", vec!["domain-start"]),
         ("on_stopped", vec!["domain-stopped"]),
         ("on_start_failed", vec!["domain-start-failed"]),
+        (
+            "on_control_ready",
+            vec![ready_event.as_str(), "domain-load"],
+        ),
     ] {
         let method = descriptor::method(py, name, invoke, false)?;
         if name == "on_start_failed" {

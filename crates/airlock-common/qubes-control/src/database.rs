@@ -419,21 +419,21 @@ pub enum Update {
     },
     /// Initial entry or harmless acknowledgement produced no application event.
     None,
-    /// The one guest handled-counter WRITE received its matching native ACK.
+    /// The one guest boot-notice/handled-counter WRITE received its matching ACK.
     Barrier,
 }
 
-/// Exactly one guest-originated handled-counter write may await its native
-/// positive response. It acts as a FIFO barrier, never an alternative policy
-/// channel. Replica owns the pending bytes until a matching reply or terminal loss.
+/// Exactly one guest-originated boot notice or handled-counter write may await
+/// its native positive response. Neither transports policy. Replica owns the
+/// pending bytes until a matching reply or terminal loss.
 enum Barrier {
     /// No guest write is awaiting acknowledgement.
     Idle,
     /// One request was selected; publication completion is owned by Control.
     Pending {
-        /// Exact internally constructed handled path echoed by the native ACK.
+        /// Exact internally constructed notice/handled path echoed by the ACK.
         path: Vec<u8>,
-        /// Exact bounded counter text committed locally only after the ACK.
+        /// Exact bounded notice/counter text committed locally only after the ACK.
         value: Vec<u8>,
     },
 }
@@ -455,7 +455,7 @@ impl Replica {
     pub closed spec fn valid(&self) -> bool {
         self.cache.valid() && match &self.barrier {
             Barrier::Idle => true,
-            Barrier::Pending { path, value } => 0 < path@.len() < 64 && 0 < value@.len() <= 10
+            Barrier::Pending { path, value } => 0 < path@.len() < 64 && 0 < value@.len() <= 36
                 && (self.phase == Phase::Ready || self.phase == Phase::Failed),
         }
     }
@@ -488,10 +488,10 @@ impl Replica {
     /// Observe whether a guest write is awaiting its one native ACK.
     pub closed spec fn pending(&self) -> bool { self.barrier is Pending }
 
-    /// Register the internally selected handled write before any publication.
+    /// Register the internally selected notice/handled write before publication.
     /// Only a fresh idle live replica may own another such request.
     pub(crate) fn barrier(&mut self, path: Vec<u8>, value: Vec<u8>) -> (accepted: bool)
-        requires old(self).valid(), 0 < path@.len() < 64, 0 < value@.len() <= 10,
+        requires old(self).valid(), 0 < path@.len() < 64, 0 < value@.len() <= 36,
         ensures final(self).valid(), accepted ==> final(self).pending(),
             accepted == (old(self).phase() == Phase::Ready && !old(self).pending()),
     {

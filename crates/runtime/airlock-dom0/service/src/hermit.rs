@@ -161,6 +161,30 @@ pub fn stopped(name: &str) -> Result<()> {
     }
 }
 
+/// Match a native control-sync notice against the protected execution record.
+/// A QubesDB value alone is untrusted: the selected artifact, host boot and live
+/// Xen incarnation must also match. Missing preparation is never readiness.
+pub fn control_boot_matches(
+    name: &str,
+    artifact: &Descriptor,
+    xid: u32,
+    challenge: &[u8],
+) -> Result<bool> {
+    if xid == 0 || challenge.len() != 36 {
+        return Ok(false);
+    }
+    let path = record(&name.parse()?);
+    if !path.try_exists()? {
+        return Ok(false);
+    }
+    crate::state::trusted(&path)?;
+    let execution: Execution = crate::state::read(&path)?;
+    Ok(execution.boot_id == crate::state::boot_id()?.to_string()
+        && execution.xid == Some(xid)
+        && execution.artifact == *artifact
+        && execution.nonce.as_bytes() == challenge)
+}
+
 /// Require execution evidence from this boot and this Xen domain, independently of process state.
 /// The isolated readiness marker means the service is executing with IPC disabled.
 pub fn ready(name: &str, artifact: &Descriptor, xid: u32) -> Result<()> {

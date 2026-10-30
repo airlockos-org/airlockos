@@ -210,11 +210,10 @@ pub fn synchronize() -> (bytes: [u8; HEADER])
     bytes
 }
 
-/// Encode a native guest WRITE for the existing handled counter. This is a
-/// protocol request, not authority to write arbitrary Qubes policy values.
-/// The control owner supplies only its internally constructed handled path.
-pub(crate) fn counter(path: &[u8], value: &[u8]) -> (bytes: Vec<u8>)
-    requires 0 < path@.len() < 64, 0 < value@.len() <= 10,
+/// Encode the control owner's bounded guest WRITE: either its boot notice or
+/// an existing handled counter. This is not a public arbitrary-policy writer.
+pub(crate) fn guest_write(path: &[u8], value: &[u8]) -> (bytes: Vec<u8>)
+    requires 0 < path@.len() < 64, 0 < value@.len() <= 36,
         forall|i: int| 0 <= i < path@.len() ==> path_byte(path@[i], i),
     ensures bytes@.len() == HEADER+value@.len(), bytes@[0] == WRITE,
         bytes@.subrange(1, 1+path@.len() as int) == path@, bytes@[1+path@.len() as int] == 0,

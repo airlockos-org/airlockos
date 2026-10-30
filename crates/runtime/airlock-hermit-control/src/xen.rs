@@ -3,6 +3,7 @@
 //! control; explicit close consumes the native client. There is no automatic
 //! reconnect or replay in the same VM boot.
 
+use airlock_boot_core::Challenge;
 use airlock_qubes_control::{
     binding::{Assigned, Bound, Request},
     control::{Control, Step},
@@ -41,10 +42,9 @@ pub enum Event {
     Idle,
     /// More bounded work remains or the native output is temporarily full.
     Progress,
-    /// Native initial synchronization completed; source policies remain blocked.
-    /// The application reports this with its admitted boot challenge. Its Qubes
-    /// lifecycle owner must then request the normal upstream firewall reload:
-    /// an initial dump cannot distinguish old roots from an unfinished update.
+    /// Initial synchronization and the native current-boot notice ACK completed.
+    /// The host's QubesDB watch requests normal upstream policy rewrites; source
+    /// policies remain blocked until their fresh completion markers arrive.
     Synchronized,
     /// A live update was applied; consult typed source rejection diagnostics.
     Changed,
@@ -72,13 +72,15 @@ impl Session {
     /// Open the fixed native QubesDB endpoint. Missing setup (-2) has no mapping
     /// effect and may be retried by bounded startup code; any other failure needs
     /// VM teardown/recovery. The stream pump sends exactly one initial MULTIREAD.
-    pub fn open() -> Result<Self, Error> {
+    /// Supply the challenge parsed from the admitted `airlock.boot` argument.
+    /// The control owner publishes it automatically after initial synchronization.
+    pub fn open(challenge: Challenge) -> Result<Self, Error> {
         let now = endpoint::now_ns();
         let native =
             Client::open(0, 111, now.saturating_add(500_000_000)).map_err(Error::Transport)?;
         Ok(Self {
             native,
-            control: Control::synchronizing_at(now),
+            control: Control::synchronizing_at(now, challenge),
             input: [0; 1024],
         })
     }

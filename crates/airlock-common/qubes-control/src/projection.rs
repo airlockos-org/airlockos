@@ -208,8 +208,8 @@ impl View {
 
     /// Native whole-database barrier. Initial source roots are deliberately
     /// ignored: a dom0 writer may have left an old root during a partial update.
-    /// A protected startup observer requests the normal upstream firewall reload
-    /// after this sync; no alternate policy writer or relay is introduced.
+    /// The current-boot QubesDB notice requests the normal upstream firewall
+    /// reload after this sync; no alternate policy writer or relay is introduced.
     pub fn synchronized(&mut self, cache: &Cache) -> (accepted: bool)
         requires old(self).valid(), cache.valid(),
         ensures final(self).valid(),

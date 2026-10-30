@@ -18,6 +18,11 @@
 
 extern crate alloc;
 
+/// Guest-originated current-boot synchronization notice. The host watches this
+/// ordinary QubesDB key and rewrites policy through Qubes' existing NetVM API.
+/// Its value correlates a boot; it never carries rules or grants authority.
+pub const READY_PATH: &str = "/airlock-network-control-ready";
+
 pub mod address;
 pub mod backend;
 pub mod binding;

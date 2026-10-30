@@ -8,6 +8,7 @@ license = "MIT"
 description = "Native Hermit QubesDB owner and interface admission"
 
 [dependencies]
+airlock-boot-core = { path = "../../airlock-common/boot" }
 airlock-qubes-control = { path = "../../airlock-common/qubes-control" }
 
 [target.'cfg(target_os = "hermit")'.dependencies]

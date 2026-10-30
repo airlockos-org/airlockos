@@ -4,6 +4,9 @@
 //! one outstanding ACK and one 1024-byte private ingress buffer. Input cannot
 //! advance past an unsent ACK, and a lost/invalid stream is terminal.
 
+use airlock_boot_core::Challenge;
+#[cfg(verus_keep_ghost)]
+use airlock_boot_core::challenge_bytes;
 use alloc::vec::Vec;
 use vstd::prelude::*;
 
@@ -25,7 +28,8 @@ pub enum Step {
     Send,
     /// One byte was consumed without a completed application event.
     Progress,
-    /// Native initial synchronization completed; source roots remain blocked.
+    /// Initial synchronization and the current-boot notice ACK completed.
+    /// Source roots remain blocked until fresh upstream policy writes arrive.
     Synchronized,
     /// A live native mutation was applied and acknowledged locally.
     Changed {
@@ -74,13 +78,16 @@ pub struct Control {
     awaiting: Option<u32>,
     /// Whole guest-write barrier deadline, independent of incoming progress.
     barrier_since: Option<u64>,
+    /// Admitted boot correlation, published only after the initial dump completes.
+    challenge: Challenge,
 }
 
 impl Control {
     /// Independently valid components, including during a composed transition.
     closed spec fn parts_valid(&self) -> bool {
         self.decoder.valid() && self.replica.valid() && self.view.valid()
-            && self.cursor <= self.incoming@.len() <= 1024 && self.sent <= self.output@.len() <= wire::HEADER+10
+            && challenge_bytes(self.challenge.value())
+            && self.cursor <= self.incoming@.len() <= 1024 && self.sent <= self.output@.len() <= wire::HEADER+36
             && self.output_since <= self.clock && self.started <= self.clock && self.completed <= self.serial
             && (self.record_since.is_some() ==> self.record_since.unwrap() <= self.clock)
             && (self.barrier_since.is_some() ==> self.barrier_since.unwrap() <= self.clock)
@@ -98,8 +105,11 @@ impl Control {
     /// Exact retained source/configuration data, never runtime transport authority.
     pub closed spec fn view(&self) -> View { self.view }
 
-    /// Begin a fresh native stream with exactly the initial empty MULTIREAD.
-    pub fn synchronizing_at(now: u64) -> (control: Self)
+    /// Begin with the one initial MULTIREAD. Its terminator automatically queues
+    /// this boot's notice; its positive ACK becomes the synchronization event.
+    /// A caller cannot forget the host policy-refresh handoff.
+    pub fn synchronizing_at(now: u64, challenge: Challenge) -> (control: Self)
+        requires challenge_bytes(challenge.value()),
         ensures control.valid(), control.replica.phase() == Phase::Synchronizing,
             control.view().phase() == crate::projection::Phase::Synchronizing,
             control.output@ == wire::synchronization(), control.sent == 0,
@@ -107,7 +117,7 @@ impl Control {
         Self { decoder: Decoder::fresh(), replica: Replica::synchronizing(), view: View::synchronizing(),
             incoming: Vec::new(), cursor: 0, output: copy(&wire::synchronize()), sent: 0,
             started: now, clock: now, record_since: None, output_since: now,
-            serial: 0, completed: 0, awaiting: None, barrier_since: None }
+            serial: 0, completed: 0, awaiting: None, barrier_since: None, challenge }
     }
 
     /// Terminal stream loss. Clear operational gates before exposing the failure;
@@ -175,7 +185,7 @@ impl Control {
     pub fn outgoing(&self) -> (bytes: &[u8])
         requires self.valid(),
         ensures bytes@ == self.output@.subrange(self.sent as int, self.output@.len() as int),
-            bytes@.len() <= wire::HEADER+10,
+            bytes@.len() <= wire::HEADER+36,
     { &self.output[self.sent..] }
 
     /// Commit the transport's actual positive write count. Zero is backpressure
@@ -222,7 +232,20 @@ impl Control {
             Ok(Update::Initial) => {
                 let cache = match self.replica.current() { Some(value) => value, None => { self.disconnect(); return Step::Failed; } };
                 if !self.view.synchronized(cache) { self.disconnect(); return Step::Failed; }
-                Step::Synchronized
+                // The dump may contain a surviving root from an unfinished
+                // policy update. Ask dom0 to replay through its normal writer;
+                // never activate that root or repeat the forbidden MULTIREAD.
+                let path = copy(crate::READY_PATH.as_bytes());
+                let value = copy(self.challenge.as_bytes());
+                let output = wire::guest_write(path.as_slice(), value.as_slice());
+                if !self.replica.barrier(path, value) { self.disconnect(); return Step::Failed; }
+                self.serial = 1;
+                self.awaiting = Some(1);
+                self.barrier_since = Some(self.clock);
+                self.output = output;
+                self.sent = 0;
+                self.output_since = self.clock;
+                Step::Progress
             }
             Ok(Update::Changed { key, removed, acknowledgement }) => {
                 let cache = match self.replica.current() { Some(value) => value, None => { self.disconnect(); return Step::Failed; } };
@@ -237,7 +260,7 @@ impl Control {
                 self.awaiting = None;
                 self.barrier_since = None;
                 self.completed = serial;
-                Step::Barrier { serial }
+                if serial == 1 { Step::Synchronized } else { Step::Barrier { serial } }
             }
             Err(_) => { self.disconnect(); Step::Failed }
         }
@@ -252,7 +275,7 @@ impl Control {
     /// source root whose next handled counter fits both protocol and u32 bounds.
     /// This is an input/output contract; no peer processing is assumed here.
     pub closed spec fn can_barrier(&self, root: Seq<u8>) -> bool {
-        self.replica.phase() == Phase::Ready && self.awaiting.is_none()
+        self.replica.phase() == Phase::Ready && self.awaiting.is_none() && self.completed > 0
             && self.cursor == self.incoming@.len() && self.sent == self.output@.len()
             && self.serial < u32::MAX && Self::counter_path(root).len() < 64
             && (exists|ip: crate::address::Ip| crate::policy::source_path(root, ip, root.len() as int))
@@ -275,7 +298,7 @@ impl Control {
             serial.is_some() ==> final(self).awaiting == serial && final(self).serial == serial.unwrap()
                 && serial.unwrap() > old(self).serial && final(self).sent == 0,
     {
-        if self.replica.state() != Phase::Ready || self.awaiting.is_some()
+        if self.replica.state() != Phase::Ready || self.awaiting.is_some() || self.completed == 0
             || self.cursor != self.incoming.len() || self.sent != self.output.len() { return None; }
         let source = Path::parse(root)?;
         if !source.is_root(root) { return None; }
@@ -292,7 +315,7 @@ impl Control {
         };
         if previous == u32::MAX || self.serial == u32::MAX { self.disconnect(); return None; }
         let value = number::encode(previous+1);
-        let output = wire::counter(path.as_slice(), value.as_slice());
+        let output = wire::guest_write(path.as_slice(), value.as_slice());
         if !self.replica.barrier(path, value) { self.disconnect(); return None; }
         self.serial += 1;
         self.awaiting = Some(self.serial);
