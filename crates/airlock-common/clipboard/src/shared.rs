@@ -11,12 +11,6 @@ pub mod storage;
 
 use storage::{CHUNK, NoDisk, RAM_LIMIT, Spool, Storage};
 
-/// Maximum number of representations in one clipboard offer.
-pub const MAX_FORMATS: usize = 64;
-
-/// Maximum bytes in a format name, independent of payload capacity.
-pub const MAX_FORMAT_NAME: usize = 192;
-
 /// Maximum total payload retained in the default clipboard service.
 pub const DEFAULT_CAPACITY: usize = 64 * 1024 * 1024;
 
@@ -26,35 +20,10 @@ pub const WRITE_TIMEOUT: u64 = 120_000_000_000;
 use crate::authority::Admissions;
 pub use crate::authority::{Caller, Participant, Provisioner};
 
-/// Failure categories carry no clipboard payload or format contents.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Error {
-    /// The connection is not a valid authenticated participant.
-    Unauthorized,
-    /// The requested generation has been replaced or never existed.
-    Stale,
-    /// A format, payload, or offer exceeds the configured resource bound.
-    Bounds,
-    /// File references and clipboard protocol control targets cannot be shared.
-    Unsupported,
-    /// The write does not belong to this connection, or chunks arrived out of order.
-    Order,
-    /// The incomplete offer exceeded its fixed deadline.
-    Timeout,
-    /// Available memory or disk could not accommodate this replacement.
-    Capacity,
-    /// Private storage failed; no partial offer is published or returned.
-    Io,
-}
-
-/// Metadata for an immutable representation; the body stays private to the service.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Format {
-    /// Desktop MIME type or X selection target identifying these bytes.
-    pub name: String,
-    /// Exact representation size, including zero-byte content.
-    pub size: usize,
-}
+use crate::formats::CheckedOffer;
+pub use crate::formats::{
+    Error, Format, MAX_FORMAT_NAME, MAX_FORMATS, is_data_format, is_file_format, validate_formats,
+};
 
 /// Public identity of a complete clipboard offer.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -239,7 +208,7 @@ impl<S: Storage> Clipboard<S> {
     ) -> Result<(), Error> {
         self.access(caller)?;
         self.tick(now);
-        validate_formats(&formats, self.capacity)?;
+        let layout = CheckedOffer::new(formats, self.capacity)?;
         let deadline = match &self.state {
             State::Reserved {
                 generation: reserved,
@@ -249,6 +218,7 @@ impl<S: Storage> Clipboard<S> {
             _ => return Err(Error::Stale),
         };
         self.abort();
+        let (formats, total) = layout.into_parts();
         if formats.is_empty() {
             return Ok(());
         }
@@ -256,7 +226,6 @@ impl<S: Storage> Clipboard<S> {
         representations
             .try_reserve_exact(formats.len())
             .map_err(|_| Error::Capacity)?;
-        let total = formats.iter().map(|format| format.size).sum();
         self.storage.allocate(total)?;
         let mut offset = 0;
         for format in formats {
@@ -442,65 +411,6 @@ impl<S: Storage> Clipboard<S> {
             self.abort();
         }
     }
-}
-
-/// Reject file references and desktop clipboard control targets at every endpoint.
-/// Do not forward filenames as a text fallback when an offer contains file targets.
-pub fn is_file_format(name: &str) -> bool {
-    matches!(
-        name,
-        "text/uri-list"
-            | "x-special/gnome-copied-files"
-            | "application/x-kde-cutselection"
-            | "application/vnd.portal.filetransfer"
-            | "application/vnd.portal.files"
-            | "x-special/nautilus-clipboard"
-    )
-}
-
-/// Whether a representation carries transferable data rather than selection control.
-pub fn is_data_format(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= MAX_FORMAT_NAME
-        && name.bytes().all(|b| (0x20..=0x7e).contains(&b))
-        && !is_file_format(name)
-        && !matches!(
-            name,
-            "TARGETS"
-                | "TIMESTAMP"
-                | "MULTIPLE"
-                | "INCR"
-                | "SAVE_TARGETS"
-                | "DELETE"
-                | "INSERT_SELECTION"
-                | "INSERT_PROPERTY"
-                | "PIXMAP"
-                | "BITMAP"
-                | "COLORMAP"
-                | "WINDOW"
-                | "DRAWABLE"
-        )
-}
-
-/// Validate the complete offer before allocating or replacing clipboard storage.
-pub fn validate_formats(formats: &[Format], capacity: usize) -> Result<(), Error> {
-    if formats.len() > MAX_FORMATS {
-        return Err(Error::Bounds);
-    }
-    let mut total = 0usize;
-    for (index, format) in formats.iter().enumerate() {
-        if !is_data_format(&format.name) {
-            return Err(Error::Unsupported);
-        }
-        if formats[..index].iter().any(|f| f.name == format.name) {
-            return Err(Error::Order);
-        }
-        total = total.checked_add(format.size).ok_or(Error::Bounds)?;
-        if total > capacity {
-            return Err(Error::Bounds);
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

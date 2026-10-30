@@ -14,3 +14,6 @@ pub mod resources;
 
 /// Object-bound authority and revocable clipboard caller capabilities.
 pub mod authority;
+
+/// Verified offer-name policy, representation uniqueness and bounded layout.
+pub mod formats;
