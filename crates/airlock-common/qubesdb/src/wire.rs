@@ -66,6 +66,15 @@ pub open spec fn path_at(bytes: Seq<u8>, length: int) -> bool {
         && forall|i: int| 0 <= i < length ==> #[trigger] path_byte(bytes[1+i], i)
 }
 
+/// The first NUL boundary is unique because native path bytes exclude NUL.
+pub proof fn path_unique(bytes: Seq<u8>, left: int, right: int)
+    requires path_at(bytes, left), path_at(bytes, right),
+    ensures left == right,
+{
+    if left < right { assert(path_byte(bytes[1+left], left)); }
+    if right < left { assert(path_byte(bytes[1+right], right)); }
+}
+
 /// Direction-specific opcode and payload shape. Local-only watches/reads and
 /// an unsolicited reverse sync request are not valid guest-replica commands.
 pub open spec fn shape(kind: u8, path: Seq<u8>, count: int) -> bool {
@@ -351,13 +360,13 @@ impl Message {
 
     /// Associate only meaningful native fields with the exact consumed private
     /// record. Padding and trailing path storage intentionally have no semantics.
-    pub closed spec fn corresponds(&self, bytes: Seq<u8>) -> bool {
-        self.valid() && bytes.len() == HEADER + self.header.count()
-            && self.header.kind() == bytes[0]
-            && self.header.count() == native_length(bytes)
-            && path_at(bytes, self.header.path().len() as int)
-            && self.header.path() == bytes.subrange(1, 1+self.header.path().len() as int)
-            && self.value@ == bytes.subrange(HEADER as int, bytes.len() as int)
+    pub open spec fn corresponds(&self, bytes: Seq<u8>) -> bool {
+        self.valid() && bytes.len() == HEADER + self.header().count()
+            && self.header().kind() == bytes[0]
+            && self.header().count() == native_length(bytes)
+            && path_at(bytes, self.header().path().len() as int)
+            && self.header().path() == bytes.subrange(1, 1+self.header().path().len() as int)
+            && self.value() == bytes.subrange(HEADER as int, bytes.len() as int)
     }
 
     /// Consume only these owned fields; callers cannot replace the header
@@ -379,6 +388,12 @@ pub open spec fn accepted_header(bytes: Seq<u8>) -> bool {
 pub open spec fn complete_record(bytes: Seq<u8>) -> bool {
     accepted_header(bytes) && bytes.len() == HEADER + native_length(bytes)
         && forall|i: int| HEADER <= i < bytes.len() ==> bytes[i] != 0
+}
+
+/// A proper prefix which has not yet completed a valid native record. Header
+/// bytes are uninterpreted until all 72 arrive; complete headers must be valid.
+pub open spec fn incomplete_record(bytes: Seq<u8>) -> bool {
+    bytes.len() < HEADER || (accepted_header(bytes) && bytes.len() < HEADER + native_length(bytes))
 }
 
 /// Record interpretation depends only on the first header, regardless of body.
@@ -484,6 +499,7 @@ impl Decoder {
             old(self).failed() ==> result.is_err(),
             !old(self).failed() && old(self).prefix().len()+1 < HEADER ==> matches!(result, Ok(None)),
             !old(self).failed() && complete_record(old(self).prefix().push(byte)) ==> matches!(result, Ok(Some(_))),
+            !old(self).failed() && incomplete_record(old(self).prefix().push(byte)) ==> matches!(result, Ok(None)),
     {
         if self.failed { return Err(Failure::MalformedRecord); }
         let ghost before = self.bytes@;

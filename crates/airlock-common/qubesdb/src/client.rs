@@ -64,7 +64,7 @@ pub enum Step {
 impl Step {
     /// Every delivered record has complete bounded native bytes; phases and
     /// positive-response correlation are specified by Client::step separately.
-    pub closed spec fn valid(&self) -> bool {
+    pub open spec fn valid(&self) -> bool {
         match self {
             Self::Entry { key, value } | Self::Changed { key, value, .. } =>
                 0 < key@.len() < 64 && value@.len() <= wire::MAX_VALUE,
@@ -118,7 +118,7 @@ pub struct Client {
 
 impl Client {
     /// Bounded private buffers, truthful publication counts and write ownership.
-    pub closed spec fn valid(&self) -> bool {
+    pub closed spec fn parts_valid(&self) -> bool {
         self.decoder.valid() && self.cursor <= self.incoming@.len() <= 1024
             && self.sent <= self.output@.len() <= wire::MAX_RECORD
             && self.started <= self.clock && self.output_since <= self.clock
@@ -131,6 +131,36 @@ impl Client {
                     && self.serial > 0 && write.started <= self.clock
                     && wire::writable(write.key@, write.value@),
             }
+    }
+
+    /// Live phases use a live decoder, and synchronization precedes every local
+    /// WRITE. Failed decoder state is retained only after terminal disconnection.
+    pub closed spec fn valid(&self) -> bool {
+        self.parts_valid()
+            && (self.phase != Phase::Failed ==> !self.decoder.failed())
+            && (self.phase == Phase::Synchronizing ==> self.serial == 0 && self.completed == 0 && self.pending.is_none())
+    }
+
+    /// Exact record formed if the next private input byte completes the current
+    /// prefix. This observation grants no permission to skip output backpressure.
+    pub closed spec fn next_record(&self) -> Seq<u8> {
+        self.decoder.prefix().push(self.incoming@[self.cursor as int])
+    }
+
+    /// Native validated spelling of a completed record's first NUL-delimited key.
+    pub closed spec fn next_key(&self, key: Seq<u8>) -> bool {
+        wire::path_at(self.next_record(), key.len() as int)
+            && key == self.next_record().subrange(1, 1+key.len() as int)
+    }
+
+    /// The consumer may take one input byte after all selected output was sent.
+    pub closed spec fn input_available(&self) -> bool {
+        self.phase != Phase::Failed && self.sent == self.output@.len() && self.cursor < self.incoming@.len()
+    }
+
+    /// Exact outstanding request label and original bytes, if a response is owed.
+    pub closed spec fn request(&self) -> Option<(u32, Seq<u8>, Seq<u8>)> {
+        match self.pending { Some(write) => Some((self.serial, write.key@, write.value@)), None => None }
     }
 
     /// Exact protocol phase, independent of any consumer's publication gates.
@@ -153,6 +183,15 @@ impl Client {
     pub closed spec fn within_deadlines(&self, now: u64) -> bool {
         self.clock == now && !matches!(self.phase, Phase::Failed)
             && (matches!(self.phase, Phase::Synchronizing) ==> now-self.started <= 10_000_000_000)
+            && (self.record_since.is_some() ==> now-self.record_since.unwrap() <= 2_000_000_000)
+            && (self.sent < self.output@.len() ==> now-self.output_since <= 2_000_000_000)
+            && (self.pending.is_some() ==> now-self.pending.unwrap().started <= 2_000_000_000)
+    }
+
+    /// A monotonic observation lies within every currently active time budget.
+    pub closed spec fn permits_time(&self, now: u64) -> bool {
+        self.phase != Phase::Failed && self.clock <= now
+            && (self.phase == Phase::Synchronizing ==> now-self.started <= 10_000_000_000)
             && (self.record_since.is_some() ==> now-self.record_since.unwrap() <= 2_000_000_000)
             && (self.sent < self.output@.len() ==> now-self.output_since <= 2_000_000_000)
             && (self.pending.is_some() ==> now-self.pending.unwrap().started <= 2_000_000_000)
@@ -213,7 +252,7 @@ impl Client {
 
     /// Terminate the original stream and relinquish pending response ownership.
     pub fn disconnect(&mut self)
-        requires old(self).valid(),
+        requires old(self).valid() || old(self).parts_valid(),
         ensures final(self).valid(), final(self).phase() == Phase::Failed,
     { self.phase = Phase::Failed; self.pending = None; }
 
@@ -223,8 +262,9 @@ impl Client {
     pub fn tick(&mut self, now: u64) -> (live: bool)
         requires old(self).valid(),
         ensures final(self).valid(),
+            live == old(self).permits_time(now),
             live ==> final(self).within_deadlines(now) && now >= old(self).observed_time()
-                && final(self).phase() == old(self).phase(),
+                && final(self).phase() == old(self).phase() && final(self).request() == old(self).request(),
             !live ==> final(self).phase() == Phase::Failed,
     {
         if matches!(self.phase, Phase::Failed) || now < self.clock { self.disconnect(); return false; }
@@ -249,7 +289,8 @@ impl Client {
     pub fn deliver(&mut self, bytes: &[u8]) -> (accepted: bool)
         requires old(self).valid(),
         ensures final(self).valid(), accepted ==> final(self).received(bytes@)
-            && final(self).phase() == old(self).phase(),
+            && final(self).phase() == old(self).phase() && final(self).request() == old(self).request(),
+            accepted == (old(self).phase() != Phase::Failed && old(self).input_drained() && 0 < bytes@.len() <= 1024),
             !accepted ==> final(self).phase() == Phase::Failed,
     {
         if matches!(self.phase, Phase::Failed) || self.cursor != self.incoming.len()
@@ -272,7 +313,8 @@ impl Client {
         requires old(self).valid(),
         ensures final(self).valid(),
             accepted ==> final(self).publication(*old(self), count)
-                && final(self).phase() == old(self).phase(),
+                && final(self).phase() == old(self).phase() && final(self).request() == old(self).request(),
+            accepted == (old(self).phase() != Phase::Failed && 0 < count <= old(self).unpublished().len()),
             !accepted ==> final(self).phase() == Phase::Failed,
     {
         if matches!(self.phase, Phase::Failed) || count == 0 || count > self.output.len()-self.sent {
@@ -294,8 +336,34 @@ impl Client {
             step is Entry ==> old(self).phase() == Phase::Synchronizing,
             step is Synchronized ==> old(self).phase() == Phase::Synchronizing && final(self).phase() == Phase::Ready,
             step is Changed ==> old(self).phase() == Phase::Ready,
-            step is Written ==> final(self).write_completed(step->Written_serial),
+            step is Written ==> old(self).phase() == Phase::Ready && final(self).write_completed(step->Written_serial)
+                && old(self).request() == Some((step->Written_serial, step->Written_key@, step->Written_value@)),
+            !(step is Failed) && !(step is Synchronized) ==> final(self).phase() == old(self).phase(),
+            step is Synchronized ==> final(self).write_available(),
+            !(step is Failed) && !(step is Written) ==> final(self).request() == old(self).request(),
+            old(self).phase() != Phase::Failed && old(self).unpublished().len() > 0 ==> step is Send,
+            old(self).phase() != Phase::Failed && old(self).unpublished().len() == 0
+                && old(self).input_drained() ==> step is Receive,
+            old(self).input_available() && wire::incomplete_record(old(self).next_record()) ==> step is Progress,
+            old(self).input_available() && wire::complete_record(old(self).next_record()) ==> {
+                let bytes = old(self).next_record();
+                &&& bytes[0] == wire::ENTRY && old(self).phase() == Phase::Synchronizing ==>
+                    (if wire::path_at(bytes, 0) { step is Synchronized } else {
+                        step is Entry && old(self).next_key(step->Entry_key@)
+                            && step->Entry_value@ == bytes.subrange(wire::HEADER as int, bytes.len() as int)
+                    })
+                &&& (bytes[0] == wire::WRITE || bytes[0] == wire::REMOVE) && old(self).phase() == Phase::Ready ==>
+                    step is Changed && old(self).next_key(step->Changed_key@)
+                        && step->Changed_value@ == bytes.subrange(wire::HEADER as int, bytes.len() as int)
+                        && step->Changed_removed == (bytes[0] == wire::REMOVE)
+                &&& bytes[0] == wire::OK && old(self).phase() == Phase::Ready && old(self).request().is_some()
+                    && old(self).next_key(old(self).request().unwrap().1) ==> step is Written
+                        && step->Written_serial == old(self).request().unwrap().0
+                        && step->Written_key@ == old(self).request().unwrap().1
+                        && step->Written_value@ == old(self).request().unwrap().2
+            },
     {
+        let ghost previous = *self;
         if matches!(self.phase, Phase::Failed) { return Step::Failed; }
         if self.sent < self.output.len() { return Step::Send; }
         if self.cursor == self.incoming.len() { return Step::Receive; }
@@ -311,6 +379,15 @@ impl Client {
         let (header, value) = message.into_parts();
         let operation = header.operation();
         let key = header.key();
+        proof {
+            assert forall|length: int| #[trigger] wire::path_at(previous.next_record(), length)
+                implies length == key@.len() by {
+                wire::path_unique(previous.next_record(), length, key@.len() as int);
+            }
+            if previous.request().is_some() && previous.next_key(previous.request().unwrap().1) {
+                assert(key@ =~= previous.request().unwrap().1);
+            }
+        }
         if operation == wire::ENTRY && matches!(self.phase, Phase::Synchronizing) {
             if key.is_empty() { self.phase = Phase::Ready; return Step::Synchronized; }
             return Step::Entry { key: slice_to_vec(key), value };
@@ -343,8 +420,9 @@ impl Client {
         requires old(self).valid(),
         ensures final(self).valid(),
             serial.is_some() == (old(self).write_available() && wire::writable(key@, value@)),
-            serial.is_some() ==> final(self).selected(*old(self), serial.unwrap())
-                && final(self).phase() == old(self).phase(),
+            serial.is_some() ==> serial.unwrap() > 0 && final(self).selected(*old(self), serial.unwrap())
+                && final(self).phase() == old(self).phase()
+                && final(self).request() == Some((serial.unwrap(), key@, value@)),
     {
         if self.serial == u32::MAX { self.disconnect(); return None; }
         if !matches!(self.phase, Phase::Ready) || self.pending.is_some()
