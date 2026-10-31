@@ -10,8 +10,10 @@ use vstd::prelude::*;
 
 verus! {
 
+broadcast use { vstd::seq::Seq::lemma_as_ref_index, crate::address::cut_unique };
+
 /// Partial startup state with terminal failure; related flags cannot disagree.
-enum Stage {
+pub enum Stage {
     /// No boot challenge has been provided.
     Pending,
     /// Exact validated challenge, with no duplicate allowed.
@@ -28,6 +30,9 @@ pub struct Parser {
 }
 
 impl Parser {
+    /// Exact startup selection or terminal rejection, without exposing mutation.
+    pub closed spec fn stage(&self) -> Stage { self.stage }
+
     /// Any chosen challenge satisfies the shared boot grammar.
     pub closed spec fn valid(&self) -> bool {
         match self.stage { Stage::Chosen(value) => challenge_bytes(value.value()), _ => true }
@@ -35,7 +40,7 @@ impl Parser {
 
     /// Start without an observed challenge or any runtime authority.
     pub fn empty() -> (parser: Self)
-        ensures parser.valid(), parser.stage is Pending,
+        ensures parser.valid(), parser.stage() is Pending,
     { Self { stage: Stage::Pending } }
 
     /// Consume a bounded kernel argument. Exactly one valid boot key succeeds;
@@ -43,16 +48,21 @@ impl Parser {
     pub fn push(&mut self, argument: &[u8]) -> (accepted: bool)
         requires old(self).valid(),
         ensures final(self).valid(),
-            !accepted ==> final(self).stage is Failed,
-            old(self).stage is Failed ==> !accepted,
+            !accepted ==> final(self).stage() is Failed,
+            old(self).stage() is Failed ==> !accepted,
             accepted && prefix_key(argument@, b"airlock.boot="@) ==>
-                final(self).stage is Chosen
-                && final(self).stage->Chosen_0.value() == argument@.subrange(13, argument@.len() as int),
-            accepted && !prefix_key(argument@, b"airlock.boot="@) ==> final(self).stage == old(self).stage,
+                final(self).stage() is Chosen
+                && final(self).stage()->Chosen_0.value() == argument@.subrange(13, argument@.len() as int),
+            accepted && !prefix_key(argument@, b"airlock.boot="@) ==> final(self).stage() == old(self).stage(),
     {
         if matches!(self.stage, Stage::Failed) { return false; }
         if argument.len() > 4096 { self.stage = Stage::Failed; return false; }
-        if argument.starts_with(b"airlock.boot=") {
+        let boot = argument.starts_with(b"airlock.boot=");
+        proof {
+            if boot { assert(argument@.subrange(0, 13) =~= b"airlock.boot="@); }
+            assert(boot == prefix_key(argument@, b"airlock.boot="@));
+        }
+        if boot {
             if !matches!(self.stage, Stage::Pending) { self.stage = Stage::Failed; return false; }
             let challenge = match Challenge::parse(&argument[13..]) { Some(value) => value, None => { self.stage = Stage::Failed; return false; } };
             self.stage = Stage::Chosen(challenge);
@@ -67,8 +77,8 @@ impl Parser {
     pub fn finish(self) -> (challenge: Option<Challenge>)
         requires self.valid(),
         ensures match challenge {
-            Some(value) => self.stage == Stage::Chosen(value) && challenge_bytes(value.value()),
-            None => !(self.stage is Chosen),
+            Some(value) => self.stage() == Stage::Chosen(value) && challenge_bytes(value.value()),
+            None => !(self.stage() is Chosen),
         },
     { match self.stage { Stage::Chosen(value) => Some(value), _ => None } }
 }

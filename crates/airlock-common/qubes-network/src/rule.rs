@@ -26,6 +26,8 @@ use options::Options;
 
 verus! {
 
+broadcast use { vstd::seq::Seq::lemma_as_ref_index, crate::address::cut_unique, Ip::unique };
+
 /// At most this many ordered rules can belong to one source snapshot.
 pub const MAX_RULES: usize = 256;
 
@@ -45,15 +47,25 @@ pub open spec fn action_token(bytes: Seq<u8>, action: Action) -> bool {
 
 /// Decode a complete action token; no empty or unknown default becomes accept.
 pub fn action(bytes: &[u8]) -> (action: Option<Action>)
-    requires bytes@.len() <= 4096,
     ensures match action {
         Some(value) => action_token(bytes@, value),
         None => !(exists|value: Action| action_token(bytes@, value)),
     },
 {
-    if bytes == b"accept" { Some(Action::Accept) }
-    else if bytes == b"drop" { Some(Action::Drop) }
-    else { None }
+    if *bytes == *b"accept".as_slice() {
+        proof { assert(bytes@ =~= b"accept"@); }
+        Some(Action::Accept)
+    } else if *bytes == *b"drop".as_slice() {
+        proof { assert(bytes@ =~= b"drop"@); }
+        Some(Action::Drop)
+    } else {
+        proof {
+            assert(bytes@ != b"accept"@);
+            assert(bytes@ != b"drop"@);
+            assert forall|value: Action| !action_token(bytes@, value) by { match value { Action::Accept => (), Action::Drop => () }; }
+        }
+        None
+    }
 }
 
 /// Pinned network protocol conditions; Any means the option was absent.
@@ -81,16 +93,28 @@ pub open spec fn protocol_token(bytes: Seq<u8>, protocol: Protocol) -> bool {
 
 /// Decode the complete pinned protocol language without a shell/service lookup.
 fn protocol(bytes: &[u8]) -> (protocol: Option<Protocol>)
-    requires bytes@.len() <= 4096,
     ensures match protocol {
         Some(value) => protocol_token(bytes@, value),
         None => !(exists|value: Protocol| protocol_token(bytes@, value)),
     },
 {
-    if bytes == b"tcp" { Some(Protocol::Tcp) }
-    else if bytes == b"udp" { Some(Protocol::Udp) }
-    else if bytes == b"icmp" { Some(Protocol::Icmp) }
-    else { None }
+    if *bytes == *b"tcp".as_slice() {
+        proof { assert(bytes@ =~= b"tcp"@); }
+        Some(Protocol::Tcp)
+    } else if *bytes == *b"udp".as_slice() {
+        proof { assert(bytes@ =~= b"udp"@); }
+        Some(Protocol::Udp)
+    } else if *bytes == *b"icmp".as_slice() {
+        proof { assert(bytes@ =~= b"icmp"@); }
+        Some(Protocol::Icmp)
+    } else {
+        proof {
+            assert forall|value: Protocol| !protocol_token(bytes@, value) by {
+                match value { Protocol::Any | Protocol::Tcp | Protocol::Udp | Protocol::Icmp => () };
+            }
+        }
+        None
+    }
 }
 
 /// Safe pinned hostname alphabet; it is a DNS obligation, not a resolved address.
@@ -108,13 +132,16 @@ pub struct Hostname {
 }
 
 impl Hostname {
+    /// Construction established the bounded hostname grammar.
+    pub closed spec fn valid(&self) -> bool { hostname(self.bytes@) }
+
     /// Exact hostname spelling retained from the completed source policy.
     pub closed spec fn bytes(&self) -> Seq<u8> { self.bytes@ }
 
     /// Validate a complete bounded hostname without invoking DNS or normalization.
     pub fn parse(bytes: &[u8]) -> (host: Option<Self>)
         ensures match host {
-            Some(value) => hostname(value.bytes()) && value.bytes() == bytes@,
+            Some(value) => value.valid() && hostname(value.bytes()) && value.bytes() == bytes@,
             None => !hostname(bytes@),
         },
     {
@@ -137,6 +164,7 @@ impl Hostname {
 
     /// Borrow the exact bounded name for the consumer's pinned DNS resolver.
     pub fn name(&self) -> (bytes: &[u8])
+        requires self.valid(),
         ensures bytes@ == self.bytes(), hostname(bytes@),
     { self.bytes.as_slice() }
 }
@@ -152,17 +180,19 @@ pub struct Ports {
 
 /// Normative range spelling: one decimal port or two ordered endpoints.
 pub open spec fn ports_token(bytes: Seq<u8>, low: int, high: int) -> bool {
-    0 <= low <= high <= 65535 && (
-        (number::digits(bytes, true) && low == high && number::decimal(bytes) == low)
-        || (exists|index: int| address::cut(bytes, index, b'-') && index < bytes.len()
+    0 <= low <= high <= 65535 && exists|index: int|
+        address::cut(bytes, index, b'-')
             && number::digits(bytes.subrange(0, index), true)
-            && number::digits(bytes.subrange(index+1, bytes.len() as int), true)
             && number::decimal(bytes.subrange(0, index)) == low
-            && number::decimal(bytes.subrange(index+1, bytes.len() as int)) == high)
-    )
+            && if index == bytes.len() { high == low }
+                else { number::digits(bytes.subrange(index+1, bytes.len() as int), true)
+                    && number::decimal(bytes.subrange(index+1, bytes.len() as int)) == high }
 }
 
 impl Ports {
+    /// Inclusive endpoints are ordered within the native u16 port range.
+    pub closed spec fn valid(&self) -> bool { self.low <= self.high }
+
     /// Validated minimum destination port.
     pub closed spec fn low(&self) -> u16 { self.low }
 
@@ -173,11 +203,12 @@ impl Ports {
     pub fn parse(bytes: &[u8]) -> (ports: Option<Self>)
         requires bytes@.len() <= 4096,
         ensures match ports {
-            Some(value) => ports_token(bytes@, value.low() as int, value.high() as int),
+            Some(value) => value.valid() && ports_token(bytes@, value.low() as int, value.high() as int),
             None => !(exists|low: int, high: int| ports_token(bytes@, low, high)),
         },
     {
-        let index = bytes.iter().position(|byte| *byte == b'-').unwrap_or(bytes.len());
+        let index = bytes.iter().position(|byte: &u8| -> (found: bool) ensures found == (*byte == b'-') { *byte == b'-' }).unwrap_or(bytes.len());
+        proof { assert(crate::address::cut(bytes@, index as int, b'-')); }
         let low = {
             let value = number::parse(&bytes[..index], 65535, true)?;
             value as u16
@@ -194,6 +225,7 @@ impl Ports {
 
     /// Read the ordered inclusive endpoints for packet matching.
     pub fn bounds(&self) -> (bounds: (u16, u16))
+        requires self.valid(),
         ensures bounds.0 == self.low() && bounds.1 == self.high(), bounds.0 <= bounds.1,
     { (self.low, self.high) }
 }
@@ -211,8 +243,7 @@ pub struct Network {
 pub open spec fn network_token(bytes: Seq<u8>, address: Ip, prefix: int, family: u8) -> bool {
     (family == 4 || family == 6) && address.valid() && address.family() == family
         && exists|index: int| address::cut(bytes, index, b'/')
-            && (if family == 4 { address::ipv4(bytes.subrange(0, index), address.words()) }
-                else { address::ipv6(bytes.subrange(0, index), address.words()) })
+            && address.describes(bytes.subrange(0, index))
             && if index == bytes.len() { prefix == if family == 4 { 32int } else { 128int } }
                 else { number::digits(bytes.subrange(index+1, bytes.len() as int), true)
                     && prefix == number::decimal(bytes.subrange(index+1, bytes.len() as int))
@@ -240,7 +271,8 @@ impl Network {
             None => !(exists|address: Ip, prefix: int| network_token(bytes@, address, prefix, family)),
         },
     {
-        let index = bytes.iter().position(|byte| *byte == b'/').unwrap_or(bytes.len());
+        let index = bytes.iter().position(|byte: &u8| -> (found: bool) ensures found == (*byte == b'/') { *byte == b'/' }).unwrap_or(bytes.len());
+        proof { assert(crate::address::cut(bytes@, index as int, b'/')); }
         let address = Ip::parse(&bytes[..index])?;
         if address.version() != family { return None; }
         let width = if family == 4 { 32 } else { 128 };
@@ -284,11 +316,29 @@ pub struct Rule {
 }
 
 /// Exact useful rule language, rather than successful tokenization alone.
-pub closed spec fn well_formed(bytes: Seq<u8>, family: u8) -> bool {
-    exists|rule: Rule| rule.family == family && rule.describes(bytes)
+pub open spec fn well_formed(bytes: Seq<u8>, family: u8) -> bool {
+    exists|rule: Rule| rule.family_value() == family && rule.describes(bytes)
 }
 
 impl Rule {
+    /// Exact family condition retained by this validated rule.
+    pub closed spec fn family_value(&self) -> u8 { self.family }
+
+    /// Exact host condition retained by this validated rule.
+    pub closed spec fn host_value(&self) -> Option<Hostname> { self.host }
+
+    /// Exact network condition retained by this validated rule.
+    pub closed spec fn network_value(&self) -> Option<Network> { self.network }
+
+    /// Exact ports condition retained by this validated rule.
+    pub closed spec fn ports_value(&self) -> Option<Ports> { self.ports }
+
+    /// Exact icmp condition retained by this validated rule.
+    pub closed spec fn icmp_value(&self) -> Option<u8> { self.icmp }
+
+    /// Exact dns condition retained by this validated rule.
+    pub closed spec fn dns_value(&self) -> bool { self.dns }
+
     /// Every condition is valid and meaningful together with the others.
     pub closed spec fn valid(&self) -> bool {
         (self.family == 4 || self.family == 6)
@@ -342,6 +392,16 @@ impl Rule {
         self.valid() && exists|options: Options| options.describes(bytes) && self.interprets(options)
     }
 
+    /// Two interpretations of the same complete rule agree on the DNS obligation.
+    pub proof fn hostname_agrees(&self, other: Self, bytes: Seq<u8>)
+        requires self.describes(bytes), other.describes(bytes),
+        ensures self.has_hostname() == other.has_hostname(),
+    {
+        let left = choose|options: Options| options.describes(bytes) && self.interprets(options);
+        let right = choose|options: Options| options.describes(bytes) && other.interprets(options);
+        left.hostname_agrees(right, bytes);
+    }
+
     /// Exact disposition selected by the required action option.
     pub closed spec fn action(&self) -> Action { self.action }
 
@@ -349,19 +409,21 @@ impl Rule {
     pub closed spec fn protocol(&self) -> Protocol { self.protocol }
 
     /// Whether this rule carries an unresolved hostname obligation.
-    pub closed spec fn has_hostname(&self) -> bool { self.host.is_some() }
+    pub open spec fn has_hostname(&self) -> bool { self.host_value().is_some() }
 
     /// Decode the whole option schema, then reject every unsupported value or
     /// incompatible combination before constructing a usable rule.
+    #[verifier::rlimit(20)]
     pub fn parse(bytes: &[u8], family: u8) -> (rule: Option<Self>)
         ensures match rule {
-            Some(value) => value.valid() && value.describes(bytes@) && value.family == family,
+            Some(value) => value.valid() && value.describes(bytes@) && value.family_value() == family,
             None => !well_formed(bytes@, family),
         },
     {
         if family != 4 && family != 6 { return None; }
 
         let options = Options::parse(bytes)?;
+        let ghost decoded = options;
         let action = action(options.action.as_slice())?;
         let protocol = match options.proto { Some(bytes) => protocol(bytes.as_slice())?, None => Protocol::Any };
         let network = match (options.dst4, options.dst6) {
@@ -378,14 +440,33 @@ impl Rule {
         };
         let dns = match options.specialtarget {
             None => false,
-            Some(bytes) if bytes.as_slice() == b"dns" => true,
-            _ => return None,
+            Some(bytes) => {
+                if *bytes.as_slice() != *b"dns".as_slice() { return None; }
+                proof { assert(bytes@ =~= b"dns"@); }
+                true
+            },
         };
 
-        if network.is_some() && host.is_some() || icmp.is_some() && protocol != Protocol::Icmp
-            || protocol == Protocol::Icmp && (ports.is_some() || dns) { return None; }
-
-        Some(Self { action, protocol, network, host, ports, icmp, dns, family })
+        if network.is_some() && host.is_some() || icmp.is_some() && !matches!(protocol, Protocol::Icmp)
+            || matches!(protocol, Protocol::Icmp) && (ports.is_some() || dns) {
+            proof {
+                assert forall|candidate: Self| !(candidate.family == family && #[trigger] candidate.describes(bytes@)) by {
+                    if candidate.family == family && candidate.describes(bytes@) {
+                        let other = choose|other: Options| other.describes(bytes@) && candidate.interprets(other);
+                        assert(decoded.same_claims(other));
+                        match protocol { Protocol::Any | Protocol::Tcp | Protocol::Udp | Protocol::Icmp => () };
+                    }
+                }
+            }
+            return None;
+        }
+        let rule = Self { action, protocol, network, host, ports, icmp, dns, family };
+        proof {
+            assert(rule.valid());
+            assert(rule.interprets(decoded));
+            assert(rule.describes(bytes@));
+        }
+        Some(rule)
     }
 
     /// Read the required disposition without searching option records.
@@ -402,8 +483,8 @@ impl Rule {
     pub fn host(&self) -> (host: Option<&Hostname>)
         requires self.valid(),
         ensures match host {
-            Some(value) => self.host == Some(*value) && hostname(value.bytes()),
-            None => self.host.is_none(),
+            Some(value) => self.host_value() == Some(*value) && hostname(value.bytes()),
+            None => self.host_value().is_none(),
         },
     { self.host.as_ref() }
 
@@ -411,8 +492,8 @@ impl Rule {
     pub fn network(&self) -> (network: Option<&Network>)
         requires self.valid(),
         ensures match network {
-            Some(value) => self.network == Some(*value) && value.valid() && value.address().family() == self.family,
-            None => self.network.is_none(),
+            Some(value) => self.network_value() == Some(*value) && value.valid() && value.address().family() == self.family_value(),
+            None => self.network_value().is_none(),
         },
     { self.network.as_ref() }
 
@@ -420,28 +501,28 @@ impl Rule {
     pub fn ports(&self) -> (ports: Option<&Ports>)
         requires self.valid(),
         ensures match ports {
-            Some(value) => self.ports == Some(*value) && value.low() <= value.high(),
-            None => self.ports.is_none(),
+            Some(value) => self.ports_value() == Some(*value) && value.low() <= value.high(),
+            None => self.ports_value().is_none(),
         },
     { self.ports.as_ref() }
 
     /// Read the native ICMP type restriction; IPv6 consumers use ICMPv6.
     pub fn icmp_type(&self) -> (icmp: Option<u8>)
-        requires self.valid(), ensures icmp == self.icmp,
+        requires self.valid(), ensures icmp == self.icmp_value(),
             icmp.is_some() ==> self.protocol() == Protocol::Icmp,
     { self.icmp }
 
     /// Whether configured DNS destinations and port 53 must also match.
     pub fn dns_target(&self) -> (dns: bool)
-        requires self.valid(), ensures dns == self.dns,
+        requires self.valid(), ensures dns == self.dns_value(),
     { self.dns }
 
     /// Preserve the pinned worker's matches-none behavior when an explicit DNS
     /// special-target port range is anything other than exactly port 53.
     pub fn matches_none(&self) -> (never: bool)
         requires self.valid(),
-        ensures never == (self.dns && self.ports.is_some()
-            && (self.ports.unwrap().low() != 53 || self.ports.unwrap().high() != 53)),
+        ensures never == (self.dns_value() && self.ports_value().is_some()
+            && (self.ports_value().unwrap().low() != 53 || self.ports_value().unwrap().high() != 53)),
     {
         if !self.dns { return false; }
         match &self.ports { Some(value) => { let (low, high) = value.bounds(); low != 53 || high != 53 }, None => false }
@@ -449,7 +530,7 @@ impl Rule {
 
     /// Address family of the source snapshot that owns this rule.
     pub fn family(&self) -> (family: u8)
-        requires self.valid(), ensures family == self.family, family == 4 || family == 6,
+        requires self.valid(), ensures family == self.family_value(), family == 4 || family == 6,
     { self.family }
 }
 

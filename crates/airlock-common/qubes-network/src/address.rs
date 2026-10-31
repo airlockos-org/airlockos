@@ -1,14 +1,13 @@
 //! IP observations decoded by Rust's standard address parser. The parser is an
-//! explicitly trusted dependency; the grammar below specifies the correspondence
-//! expected at that boundary, not a proof of the library. Qubes membership and
+//! explicitly trusted dependency; the model specifies its normalized output and
+//! bounded ASCII token guarantees, not a proof of the library. Qubes membership and
 //! interface authorization remain separate from a successfully parsed address.
 
 use vstd::prelude::*;
 
-#[cfg(verus_keep_ghost)]
-use crate::number;
-
 verus! {
+
+broadcast use vstd::seq::Seq::lemma_as_ref_index;
 
 /// First delimiter, or the exact end of a token without that delimiter.
 pub open spec fn cut(bytes: Seq<u8>, index: int, delimiter: u8) -> bool {
@@ -17,73 +16,37 @@ pub open spec fn cut(bytes: Seq<u8>, index: int, delimiter: u8) -> bool {
         && (index == bytes.len() || bytes[index] == delimiter)
 }
 
-/// Exact dotted sequence of canonical decimal octets. The caller fixes its
-/// length to four; this smaller recursive language also specifies suffixes.
-pub open spec fn octets(bytes: Seq<u8>, values: Seq<u8>) -> bool
-    decreases values.len(),
+/// Two observations of the first delimiter in the same bytes must agree.
+pub broadcast proof fn cut_unique(bytes: Seq<u8>, left: int, right: int, delimiter: u8)
+    requires #[trigger] cut(bytes, left, delimiter), #[trigger] cut(bytes, right, delimiter),
+    ensures left == right,
 {
-    values.len() > 0 && exists|index: int| cut(bytes, index, b'.')
-        && number::digits(bytes.subrange(0, index), true)
-        && number::decimal(bytes.subrange(0, index)) == values[0]
-        && if values.len() == 1 { index == bytes.len() }
-            else { index < bytes.len() && octets(bytes.subrange(index+1, bytes.len() as int), values.drop_first()) }
+    if left < right { assert(bytes[left] != delimiter); }
+    if right < left { assert(bytes[right] != delimiter); }
 }
 
-/// IPv4 tail occupies exactly two network-order words in an IPv6 spelling.
-pub open spec fn dotted_tail(bytes: Seq<u8>, words: Seq<u16>) -> bool {
-    bytes.len() <= 15 && words.len() == 2
-        && (exists|i: int| 0 <= i < bytes.len() && bytes[i] == b'.')
-        && exists|values: Seq<u8>| values.len() == 4 && octets(bytes, values)
-            && words[0] == values[0] as int*256+values[1] as int
-            && words[1] == values[2] as int*256+values[3] as int
+/// Rust's pure `core::net::IpAddr` interpretation, normalized to family and
+/// network-order words. The standard library defines this grammar; this crate
+/// assumes its result rather than maintaining a second parser or grammar.
+pub uninterp spec fn standard_address(bytes: Seq<u8>) -> Option<(u8, Seq<u16>)>;
+
+/// Accepted Rust IP spellings fit one bounded ASCII token, without separators
+/// used by the surrounding native Qubes formats, zones or socket brackets.
+pub open spec fn token(bytes: Seq<u8>) -> bool {
+    0 < bytes.len() <= 45 && forall|i: int| 0 <= i < bytes.len() ==>
+        (b'0' <= bytes[i] <= b'9') || (b'a' <= bytes[i] <= b'f')
+            || (b'A' <= bytes[i] <= b'F') || bytes[i] == b':' || bytes[i] == b'.'
 }
 
-/// Colon-separated words with an optional final dotted IPv4 tail. Empty sides
-/// are admitted only by the separate double-colon expansion rule.
-pub open spec fn groups(bytes: Seq<u8>, words: Seq<u16>, allow_tail: bool) -> bool
-    decreases bytes.len(),
+/// A surrounding format's separator cannot occur inside a parsed IP token.
+pub broadcast proof fn token_cut(address: Ip, bytes: Seq<u8>, index: int, delimiter: u8)
+    requires #[trigger] address.describes(bytes), #[trigger] cut(bytes, index, delimiter),
+        !((b'0' <= delimiter <= b'9') || (b'a' <= delimiter <= b'f')
+            || (b'A' <= delimiter <= b'F') || delimiter == b':' || delimiter == b'.'),
+    ensures index == bytes.len(),
 {
-    if bytes.len() == 0 { words.len() == 0 }
-    else {
-        exists|index: int| cut(bytes, index, b':') && (
-            if exists|j: int| 0 <= j < index && bytes[j] == b'.' {
-                allow_tail && index == bytes.len() && dotted_tail(bytes, words)
-            } else {
-                words.len() > 0 && number::hex_word(bytes.subrange(0, index), words[0] as int)
-                    && if index == bytes.len() { words.len() == 1 }
-                        else { index+1 < bytes.len() && groups(bytes.subrange(index+1, bytes.len() as int), words.drop_first(), allow_tail) }
-            }
-        )
-    }
-}
-
-/// A possible double-colon marker, including overlapping malformed triples.
-pub open spec fn double_at(bytes: Seq<u8>, index: int) -> bool {
-    0 <= index && index+1 < bytes.len() && bytes[index] == b':' && bytes[index+1] == b':'
-}
-
-/// Normative IPv6 expansion: eight words directly, or one marker replacing
-/// at least one all-zero word between two independently parsed sides.
-pub open spec fn ipv6(bytes: Seq<u8>, words: Seq<u16>) -> bool {
-    0 < bytes.len() <= 45 && words.len() == 8 && (
-        ((forall|i: int| !double_at(bytes, i)) && groups(bytes, words, true))
-        || (exists|index: int, left: Seq<u16>, right: Seq<u16>|
-            double_at(bytes, index)
-                && (forall|j: int| double_at(bytes, j) ==> j == index)
-                && groups(bytes.subrange(0, index), left, false)
-                && groups(bytes.subrange(index+2, bytes.len() as int), right, true)
-                && left.len()+right.len() < 8
-                && words == left + Seq::new((8-left.len()-right.len()) as nat, |_: int| 0u16) + right)
-    )
-}
-
-/// Normative IPv4 expansion: four octets followed by six unused zero words.
-pub open spec fn ipv4(bytes: Seq<u8>, words: Seq<u16>) -> bool {
-    0 < bytes.len() <= 15 && words.len() == 8
-        && (forall|i: int| 2 <= i < 8 ==> words[i] == 0)
-        && exists|values: Seq<u8>| values.len() == 4 && octets(bytes, values)
-            && words[0] == values[0] as int*256+values[1] as int
-            && words[1] == values[2] as int*256+values[3] as int
+    reveal(Ip::describes);
+    if index < bytes.len() { assert(bytes[index] != delimiter); }
 }
 
 /// A complete parsed IP observation with no mutable or unchecked constructor.
@@ -110,23 +73,34 @@ impl Ip {
     }
 
     /// Native token meaning of this normalized address, independent of spelling.
-    pub closed spec fn describes(&self, bytes: Seq<u8>) -> bool {
-        self.valid() && if self.family == 4 { ipv4(bytes, self.words()) }
-            else { ipv6(bytes, self.words()) }
+    #[verifier::opaque]
+    pub open spec fn describes(&self, bytes: Seq<u8>) -> bool {
+        self.valid() && token(bytes) && standard_address(bytes) == Some((self.family(), self.words()))
+    }
+
+    /// A pure standard-library parse gives one normalized address per token.
+    pub broadcast proof fn unique(left: Self, right: Self, bytes: Seq<u8>)
+        requires #[trigger] left.describes(bytes), #[trigger] right.describes(bytes),
+        ensures left == right,
+    {
+        reveal(Ip::describes);
+        assert(left.words@ == right.words@);
+        assert(left.words =~= right.words);
     }
 
     /// Decode a complete IPv4/IPv6 token, including a compressed or dotted-tail
     /// IPv6 spelling. Signs, zones, whitespace, brackets and trailing bytes reject.
     /// Trust boundary: safe UTF-8 conversion, core::net::IpAddr parsing and its
     /// octet/segment accessors. Reuse avoids maintaining a second IP parser;
-    /// correctness of their correspondence to describes remains assumed. The
-    /// 45-byte cap, private normalized representation and later Qubes checks
+    /// correspondence to the standard-library model and token bounds remains
+    /// assumed. The 45-byte cap, private normalized representation and later Qubes checks
     /// bound this dependency and prevent parsed syntax becoming authority.
     #[verifier::external_body]
     pub fn parse(bytes: &[u8]) -> (address: Option<Self>)
         ensures match address {
-            Some(value) => value.valid() && value.describes(bytes@),
-            None => !(exists|words: Seq<u16>| ipv4(bytes@, words) || ipv6(bytes@, words)),
+            Some(value) => value.valid() && value.describes(bytes@) && 0 < bytes@.len() <= 45,
+            None => standard_address(bytes@).is_none()
+                && !(exists|other: Self| other.describes(bytes@)),
         },
     {
         if bytes.is_empty() || bytes.len() > 45 { return None; }
@@ -161,18 +135,14 @@ impl Ip {
     pub fn same(&self, other: &Self) -> (same: bool)
         ensures same == (self.family() == other.family() && self.words() == other.words()), same == (*self == *other),
     {
-        if self.family != other.family { return false; }
-        let mut i = 0;
-        while i < 8
-            invariant i <= 8, self.family == other.family,
-                forall|j: int| 0 <= j < i ==> self.words@[j] == other.words@[j],
-            decreases 8-i,
-        {
-            if self.words[i] != other.words[i] { return false; }
-            i += 1;
+        let same = self.family == other.family && self.words == other.words;
+        proof {
+            if same {
+                assert(self.words@ =~= other.words@);
+                assert(self.words =~= other.words);
+            }
         }
-        assert(self.words@ =~= other.words@);
-        true
+        same
     }
 }
 

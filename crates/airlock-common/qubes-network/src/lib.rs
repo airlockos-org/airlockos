@@ -10,18 +10,30 @@
 //! consumes replicated writes/removals after the initial full-database barrier.
 //!
 //! Connection state is volatile. Losing the control stream blocks forwarding
-//! and new admissions. A fresh, fully synchronized stream is required before
-//! rebuilding interface bindings; acknowledgements promise no crash durability.
+//! and new admissions for that owner permanently. A fresh VM boot must complete
+//! synchronization and fresh source publications before rebuilding bindings;
+//! acknowledgements promise no crash durability.
+//!
+//! Continuing-service progress assumes the runtime schedules this owner fairly,
+//! supplies private input chunks in native stream order, publishes its exact
+//! output suffix and checks monotonic deadlines before admission or I/O. Finite
+//! operations have explicit byte, record and source limits. Payload accounting
+//! excludes allocator/container metadata; standard allocation failure is fatal
+//! to the guest lifetime. Library correspondence and effect assumptions remain
+//! explicit at the Serde, standard-library and native transport boundaries.
 
 #![no_std]
 #![warn(missing_docs)]
 
 extern crate alloc;
 
+vstd::prelude::verus! {
 /// Guest-originated current-boot synchronization notice. The host watches this
 /// ordinary QubesDB key and rewrites policy through Qubes' existing NetVM API.
 /// Its value correlates a boot; it never carries rules or grants authority.
-pub const READY_PATH: &str = "/airlock-network-control-ready";
+#[expect(clippy::redundant_static_lifetimes, reason = "Pinned Verus requires an explicit lifetime on reference constants")]
+pub const READY_PATH: &'static str = "/airlock-network-control-ready";
+}
 
 pub mod address;
 pub mod backend;
