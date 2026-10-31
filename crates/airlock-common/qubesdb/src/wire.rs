@@ -10,6 +10,8 @@ use vstd::prelude::*;
 
 verus! {
 
+broadcast use vstd::seq::group_seq_lemmas;
+
 /// Invalid native record framing; the original connection cannot be replayed.
 /// Consumers must discard decisions requiring a live replication stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,10 +47,9 @@ pub const ERROR: u8 = 9;
 /// Native initial-synchronization entry or empty-path completion barrier.
 pub const ENTRY: u8 = 11;
 
-/// Mathematical native length, independent of Rust's integer conversion APIs.
+/// Native length interpreted by vstd's little-endian byte model.
 pub open spec fn native_length(bytes: Seq<u8>) -> int {
-    bytes[68] as int + bytes[69] as int*256
-        + bytes[70] as int*65536 + bytes[71] as int*16777216
+    vstd::bytes::spec_u32_from_le_bytes(bytes.subrange(68, 72)) as int
 }
 
 /// Pinned upstream path alphabet, including its prohibition on a leading dash.
@@ -62,7 +63,7 @@ pub open spec fn path_byte(byte: u8, index: int) -> bool {
 /// Exact path acceptance: a first NUL exists inside the 64-byte native field.
 pub open spec fn path_at(bytes: Seq<u8>, length: int) -> bool {
     0 <= length < 64 && bytes[1+length] == 0
-        && forall|i: int| 0 <= i < length ==> path_byte(bytes[1+i], i)
+        && forall|i: int| 0 <= i < length ==> #[trigger] path_byte(bytes[1+i], i)
 }
 
 /// Direction-specific opcode and payload shape. Local-only watches/reads and
@@ -122,7 +123,9 @@ impl Header {
         let mut i = 0;
         while i < 64
             invariant i <= 64, path@ == bytes@.subrange(1, 1+i as int),
-                forall|j: int| 0 <= j < i ==> path_byte(bytes@[1+j], j),
+                count == native_length(bytes@), count <= MAX_VALUE,
+                forall|j: int| 0 <= j < i ==> #[trigger] path_byte(bytes@[1+j], j),
+                forall|length: int| #[trigger] path_at(bytes@, length) ==> i <= length,
             decreases 64-i,
         {
             let byte = bytes[1+i];
@@ -135,13 +138,47 @@ impl Header {
                     ENTRY => i > 0 || count == 0,
                     _ => false,
                 };
-                if !accepted { return None; }
-                return Some(Self { kind, path, count: count as u16 });
+                if !accepted {
+                    proof {
+                        assert forall|length: int| #[trigger] path_at(bytes@, length)
+                            implies !shape(bytes@[0], bytes@.subrange(1, 1+length), native_length(bytes@)) by {
+                            if length > i { assert(path_byte(bytes@[1+i as int], i as int)); }
+                        }
+                    }
+                    return None;
+                }
+                let header = Self { kind, path, count: count as u16 };
+                proof {
+                    assert forall|j: int| 0 <= j < header.path@.len()
+                        implies path_byte(#[trigger] header.path@[j], j) by {
+                        assert(header.path@[j] == bytes@[1+j]);
+                        assert(path_byte(bytes@[1+j], j));
+                    }
+                    assert(shape(kind, header.path@, count as int));
+                    assert(header.valid());
+                    assert(header.count() == native_length(bytes@));
+                    assert(path_at(bytes@, header.path().len() as int));
+                }
+                return Some(header);
             }
             let accepted = byte.is_ascii_alphanumeric()
                 || (byte == b'-' && i > 0) || byte == b'_' || byte == b'/'
                 || byte == b'.' || byte == b':' || byte == b'@';
-            if !accepted { return None; }
+            if !accepted {
+                proof {
+                    assert forall|length: int| !#[trigger] path_at(bytes@, length) by {
+                        if path_at(bytes@, length) && length > i {
+                            assert(path_byte(bytes@[1+i as int], i as int));
+                        }
+                    }
+                }
+                return None;
+            }
+            proof {
+                assert forall|length: int| #[trigger] path_at(bytes@, length) implies i+1 <= length by {
+                    if length == i { assert(bytes@[1+length] == 0); }
+                }
+            }
             path.push(byte);
             i += 1;
         }
@@ -177,6 +214,9 @@ impl Header {
         let mut bytes = [0; HEADER];
         bytes[0] = OK;
         bytes[1..1+self.path.len()].copy_from_slice(self.path.as_slice());
+        let length = vstd::bytes::u32_to_le_bytes(0);
+        bytes[68..72].copy_from_slice(length.as_slice());
+        proof { vstd::bytes::lemma_auto_spec_u32_to_from_le_bytes(); }
         bytes
     }
 }
@@ -242,10 +282,17 @@ pub(crate) fn guest_write(path: &[u8], value: &[u8]) -> (bytes: Vec<u8>)
     let mut header = [0; HEADER];
     header[0] = WRITE;
     header[1..1+path.len()].copy_from_slice(path);
-    header[68..72].copy_from_slice(&(value.len() as u32).to_le_bytes());
+    let length = vstd::bytes::u32_to_le_bytes(value.len() as u32);
+    header[68..72].copy_from_slice(length.as_slice());
+    proof {
+        assert(header@.subrange(68, 72) =~= length@);
+        vstd::bytes::lemma_auto_spec_u32_to_from_le_bytes();
+        assert(native_length(header@) == value@.len());
+    }
 
     let mut bytes = vstd::slice::slice_to_vec(&header);
     bytes.extend_from_slice(value);
+    proof { assert(bytes@.subrange(68, 72) =~= header@.subrange(68, 72)); }
     bytes
 }
 
@@ -334,6 +381,38 @@ pub open spec fn complete_record(bytes: Seq<u8>) -> bool {
         && forall|i: int| HEADER <= i < bytes.len() ==> bytes[i] != 0
 }
 
+/// Record interpretation depends only on the first header, regardless of body.
+proof fn header_prefix(bytes: Seq<u8>)
+    requires bytes.len() >= HEADER,
+    ensures accepted_header(bytes) == accepted_header(bytes.subrange(0, HEADER as int)),
+        native_length(bytes) == native_length(bytes.subrange(0, HEADER as int)),
+        forall|length: int| #[trigger] path_at(bytes, length)
+            == path_at(bytes.subrange(0, HEADER as int), length),
+{
+    let prefix = bytes.subrange(0, HEADER as int);
+    assert(prefix.subrange(68, 72) =~= bytes.subrange(68, 72));
+    assert forall|length: int| 0 <= length < 64 implies
+        #[trigger] prefix.subrange(1, 1+length) == bytes.subrange(1, 1+length) by {
+        assert(prefix.subrange(1, 1+length) =~= bytes.subrange(1, 1+length));
+    }
+    assert forall|length: int| #[trigger] path_at(bytes, length) == path_at(prefix, length) by {
+        assert forall|i: int| 0 <= i < length && 0 <= length < 64 implies
+            #[trigger] path_byte(bytes[1+i], i) == path_byte(prefix[1+i], i) by {}
+    }
+    if accepted_header(bytes) {
+        let length = choose|length: int| path_at(bytes, length)
+            && shape(bytes[0], bytes.subrange(1, 1+length), native_length(bytes));
+        assert(path_at(prefix, length));
+        assert(shape(prefix[0], prefix.subrange(1, 1+length), native_length(prefix)));
+    }
+    if accepted_header(prefix) {
+        let length = choose|length: int| path_at(prefix, length)
+            && shape(prefix[0], prefix.subrange(1, 1+length), native_length(prefix));
+        assert(path_at(bytes, length));
+        assert(shape(bytes[0], bytes.subrange(1, 1+length), native_length(bytes)));
+    }
+}
+
 /// Snapshot just the native header from owned stream bytes.
 fn snapshot(bytes: &[u8]) -> (header: Option<[u8; HEADER]>)
     ensures match header {
@@ -395,7 +474,7 @@ impl Decoder {
         requires old(self).valid(),
         ensures final(self).valid(),
             match result {
-                Ok(Some(message)) => !old(self).failed() && !final(self).failed()
+                Ok(Some(message)) => message.valid() && !old(self).failed() && !final(self).failed()
                     && message.corresponds(old(self).prefix().push(byte))
                     && final(self).prefix().len() == 0,
                 Ok(None) => !old(self).failed() && !final(self).failed()
@@ -409,9 +488,21 @@ impl Decoder {
         if self.failed { return Err(Failure::MalformedRecord); }
         let ghost before = self.bytes@;
         self.bytes.push(byte);
+        proof {
+            if self.bytes@.len() >= HEADER { header_prefix(self.bytes@); }
+            if before.len() >= HEADER {
+                header_prefix(before);
+                assert(self.bytes@.subrange(0, HEADER as int) =~= before.subrange(0, HEADER as int));
+            }
+        }
         if self.bytes.len() == HEADER {
             let raw = match snapshot(self.bytes.as_slice()) { Some(value) => value, None => { self.failed = true; return Err(Failure::MalformedRecord); } };
             let header = match Header::decode(&raw) { Some(value) => value, None => { self.failed = true; return Err(Failure::MalformedRecord); } };
+            proof {
+                assert(path_at(self.bytes@, header.path().len() as int));
+                assert(self.bytes@.subrange(1, 1+header.path().len() as int) =~= header.path());
+                assert(accepted_header(self.bytes@));
+            }
             self.target = HEADER + header.value_length();
         }
         if self.bytes.len() < self.target { return Ok(None); }
@@ -419,7 +510,12 @@ impl Decoder {
         let header = match Header::decode(&raw) { Some(value) => value, None => { self.failed = true; return Err(Failure::MalformedRecord); } };
         let body = &self.bytes.as_slice()[HEADER..];
         let message = match Message::new(header, body) { Some(value) => value, None => { self.failed = true; return Err(Failure::MalformedRecord); } };
-        proof { assert(message.corresponds(before.push(byte))); }
+        proof {
+            assert(message.valid());
+            assert(message.header().count() == native_length(before.push(byte)));
+            assert(message.header().path() == before.push(byte).subrange(1, 1+message.header().path().len() as int));
+            assert(message.corresponds(before.push(byte)));
+        }
         self.bytes = Vec::new();
         self.target = HEADER;
         Ok(Some(message))

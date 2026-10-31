@@ -124,10 +124,10 @@ impl Client {
             && self.started <= self.clock && self.output_since <= self.clock
             && self.completed <= self.serial
             && (self.record_since.is_some() ==> self.record_since.unwrap() <= self.clock)
-            && (self.phase == Phase::Failed ==> self.pending.is_none())
+            && (matches!(self.phase, Phase::Failed) ==> self.pending.is_none())
             && match &self.pending {
                 None => true,
-                Some(write) => self.phase == Phase::Ready && self.completed < self.serial
+                Some(write) => matches!(self.phase, Phase::Ready) && self.completed < self.serial
                     && self.serial > 0 && write.started <= self.clock
                     && wire::writable(write.key@, write.value@),
             }
@@ -141,29 +141,64 @@ impl Client {
         self.output@.subrange(self.sent as int, self.output@.len() as int)
     }
 
+    /// The initial request is selected in full and no byte has been published.
+    pub closed spec fn initial_request(&self) -> bool {
+        self.output@ == wire::synchronization() && self.sent == 0
+    }
+
+    /// Exact most recent monotonic observation, without exposing mutable clocks.
+    pub closed spec fn observed_time(&self) -> u64 { self.clock }
+
+    /// All time budgets hold at this exact observation.
+    pub closed spec fn within_deadlines(&self, now: u64) -> bool {
+        self.clock == now && !matches!(self.phase, Phase::Failed)
+            && (matches!(self.phase, Phase::Synchronizing) ==> now-self.started <= 10_000_000_000)
+            && (self.record_since.is_some() ==> now-self.record_since.unwrap() <= 2_000_000_000)
+            && (self.sent < self.output@.len() ==> now-self.output_since <= 2_000_000_000)
+            && (self.pending.is_some() ==> now-self.pending.unwrap().started <= 2_000_000_000)
+    }
+
+    /// The exact supplied chunk is retained from its first unconsumed byte.
+    pub closed spec fn received(&self, bytes: Seq<u8>) -> bool {
+        self.incoming@ == bytes && self.cursor == 0
+    }
+
+    /// Native publication advanced by exactly count on the same selected output.
+    pub closed spec fn publication(&self, previous: Self, count: usize) -> bool {
+        count > 0 && self.sent == previous.sent+count && self.output@ == previous.output@
+    }
+
+    /// Every byte of the private ingress chunk has been consumed.
+    pub closed spec fn input_drained(&self) -> bool { self.cursor == self.incoming@.len() }
+
+    /// This newer request owns the one response slot, before any publication.
+    pub closed spec fn selected(&self, previous: Self, serial: u32) -> bool {
+        serial > previous.serial && self.serial == serial && self.pending.is_some() && self.sent == 0
+    }
+
     /// Remaining ability to issue another nonreused local write identifier.
     pub closed spec fn write_available(&self) -> bool {
-        self.phase == Phase::Ready && self.pending.is_none() && self.serial < u32::MAX
+        matches!(self.phase, Phase::Ready) && self.pending.is_none() && self.serial < u32::MAX
             && self.sent == self.output@.len() && self.decoder.prefix().len() == 0
     }
 
     /// Complete-record input/output drain; an outstanding WRITE may still await
     /// its response. Consumers separately check write availability when issuing.
     pub closed spec fn drained(&self) -> bool {
-        self.phase == Phase::Ready && self.cursor == self.incoming@.len()
+        matches!(self.phase, Phase::Ready) && self.cursor == self.incoming@.len()
             && self.sent == self.output@.len() && self.decoder.prefix().len() == 0
     }
 
     /// Exact latest positive write response, without subsequent issue or failure.
     pub closed spec fn write_completed(&self, serial: u32) -> bool {
-        self.phase == Phase::Ready && self.pending.is_none()
+        matches!(self.phase, Phase::Ready) && self.pending.is_none()
             && serial > 0 && self.completed == serial && self.serial == serial
     }
 
     /// Start a fresh connection with exactly the initial empty MULTIREAD.
     pub fn synchronizing_at(now: u64) -> (client: Self)
         ensures client.valid(), client.phase() == Phase::Synchronizing,
-            client.output@ == wire::synchronization(), client.sent == 0,
+            client.initial_request(),
     {
         Self { decoder: Decoder::fresh(), phase: Phase::Synchronizing,
             incoming: Vec::new(), cursor: 0, output: slice_to_vec(&wire::synchronize()), sent: 0,
@@ -188,22 +223,24 @@ impl Client {
     pub fn tick(&mut self, now: u64) -> (live: bool)
         requires old(self).valid(),
         ensures final(self).valid(),
-            live ==> final(self).clock == now && now >= old(self).clock
-                && final(self).phase() != Phase::Failed
-                && (final(self).phase() == Phase::Synchronizing ==> now-final(self).started <= 10_000_000_000)
-                && (final(self).record_since.is_some() ==> now-final(self).record_since.unwrap() <= 2_000_000_000),
+            live ==> final(self).within_deadlines(now) && now >= old(self).observed_time()
+                && final(self).phase() == old(self).phase(),
             !live ==> final(self).phase() == Phase::Failed,
     {
-        if self.phase == Phase::Failed || now < self.clock { self.disconnect(); return false; }
+        if matches!(self.phase, Phase::Failed) || now < self.clock { self.disconnect(); return false; }
         self.clock = now;
-        if self.phase == Phase::Synchronizing && now-self.started > 10_000_000_000
+        if matches!(self.phase, Phase::Synchronizing) && now-self.started > 10_000_000_000
             || self.sent < self.output.len() && now-self.output_since > 2_000_000_000 {
             self.disconnect(); return false;
         }
-        if let Some(started) = self.record_since
-            && now-started > 2_000_000_000 { self.disconnect(); return false; }
-        if let Some(write) = &self.pending
-            && now-write.started > 2_000_000_000 { self.disconnect(); return false; }
+        match self.record_since {
+            Some(started) if now-started > 2_000_000_000 => { self.disconnect(); return false; }
+            _ => (),
+        }
+        match &self.pending {
+            Some(write) if now-write.started > 2_000_000_000 => { self.disconnect(); return false; }
+            _ => (),
+        }
         true
     }
 
@@ -211,10 +248,11 @@ impl Client {
     /// was consumed. Invalid caller sequencing is terminal, without data loss.
     pub fn deliver(&mut self, bytes: &[u8]) -> (accepted: bool)
         requires old(self).valid(),
-        ensures final(self).valid(), accepted ==> final(self).incoming@ == bytes@ && final(self).cursor == 0,
+        ensures final(self).valid(), accepted ==> final(self).received(bytes@)
+            && final(self).phase() == old(self).phase(),
             !accepted ==> final(self).phase() == Phase::Failed,
     {
-        if self.phase == Phase::Failed || self.cursor != self.incoming.len()
+        if matches!(self.phase, Phase::Failed) || self.cursor != self.incoming.len()
             || bytes.is_empty() || bytes.len() > 1024 { self.disconnect(); return false; }
         self.incoming = slice_to_vec(bytes);
         self.cursor = 0;
@@ -233,10 +271,11 @@ impl Client {
     pub fn published(&mut self, count: usize) -> (accepted: bool)
         requires old(self).valid(),
         ensures final(self).valid(),
-            accepted ==> count > 0 && final(self).sent == old(self).sent+count && final(self).output@ == old(self).output@,
+            accepted ==> final(self).publication(*old(self), count)
+                && final(self).phase() == old(self).phase(),
             !accepted ==> final(self).phase() == Phase::Failed,
     {
-        if self.phase == Phase::Failed || count == 0 || count > self.output.len()-self.sent {
+        if matches!(self.phase, Phase::Failed) || count == 0 || count > self.output.len()-self.sent {
             self.disconnect(); return false;
         }
         self.sent += count;
@@ -250,14 +289,14 @@ impl Client {
         requires old(self).valid(),
         ensures final(self).valid(), step.valid(), step is Failed ==> final(self).phase() == Phase::Failed,
             old(self).phase() == Phase::Failed ==> step is Failed,
-            step is Send ==> final(self).sent < final(self).output@.len(),
-            step is Receive ==> final(self).cursor == final(self).incoming@.len(),
+            step is Send ==> final(self).unpublished().len() > 0,
+            step is Receive ==> final(self).input_drained(),
             step is Entry ==> old(self).phase() == Phase::Synchronizing,
             step is Synchronized ==> old(self).phase() == Phase::Synchronizing && final(self).phase() == Phase::Ready,
             step is Changed ==> old(self).phase() == Phase::Ready,
             step is Written ==> final(self).write_completed(step->Written_serial),
     {
-        if self.phase == Phase::Failed { return Step::Failed; }
+        if matches!(self.phase, Phase::Failed) { return Step::Failed; }
         if self.sent < self.output.len() { return Step::Send; }
         if self.cursor == self.incoming.len() { return Step::Receive; }
         if self.record_since.is_none() { self.record_since = Some(self.clock); }
@@ -272,22 +311,24 @@ impl Client {
         let (header, value) = message.into_parts();
         let operation = header.operation();
         let key = header.key();
-        if operation == wire::ENTRY && self.phase == Phase::Synchronizing {
+        if operation == wire::ENTRY && matches!(self.phase, Phase::Synchronizing) {
             if key.is_empty() { self.phase = Phase::Ready; return Step::Synchronized; }
             return Step::Entry { key: slice_to_vec(key), value };
         }
-        if self.phase == Phase::Ready && (operation == wire::WRITE || operation == wire::REMOVE) {
+        if matches!(self.phase, Phase::Ready) && (operation == wire::WRITE || operation == wire::REMOVE) {
             self.output = slice_to_vec(&header.acknowledge());
             self.sent = 0;
             self.output_since = self.clock;
             return Step::Changed { key: slice_to_vec(key), value, removed: operation == wire::REMOVE };
         }
-        if self.phase == Phase::Ready && operation == wire::OK {
+        if matches!(self.phase, Phase::Ready) && operation == wire::OK {
             let pending = self.pending.take();
-            if let Some(write) = pending
-                && key == write.key.as_slice() {
-                self.completed = self.serial;
-                return Step::Written { serial: self.serial, key: write.key, value: write.value };
+            match pending {
+                Some(write) if key == write.key.as_slice() => {
+                    self.completed = self.serial;
+                    return Step::Written { serial: self.serial, key: write.key, value: write.value };
+                }
+                _ => (),
             }
         }
         self.disconnect();
@@ -302,11 +343,11 @@ impl Client {
         requires old(self).valid(),
         ensures final(self).valid(),
             serial.is_some() == (old(self).write_available() && wire::writable(key@, value@)),
-            serial.is_some() ==> serial.unwrap() > old(self).serial && final(self).serial == serial.unwrap()
-                && final(self).pending.is_some() && final(self).sent == 0,
+            serial.is_some() ==> final(self).selected(*old(self), serial.unwrap())
+                && final(self).phase() == old(self).phase(),
     {
         if self.serial == u32::MAX { self.disconnect(); return None; }
-        if self.phase != Phase::Ready || self.pending.is_some()
+        if !matches!(self.phase, Phase::Ready) || self.pending.is_some()
             || self.sent != self.output.len() || self.decoder.buffered() != 0
             || !wire::writeable(key, value) { return None; }
         self.output = wire::guest_write(key, value);
@@ -321,7 +362,7 @@ impl Client {
     pub fn available(&self) -> (available: bool)
         requires self.valid(), ensures available == self.write_available(),
     {
-        self.phase == Phase::Ready && self.pending.is_none() && self.serial < u32::MAX
+        matches!(self.phase, Phase::Ready) && self.pending.is_none() && self.serial < u32::MAX
             && self.sent == self.output.len() && self.decoder.buffered() == 0
     }
 
@@ -329,14 +370,14 @@ impl Client {
     pub fn between_records(&self) -> (idle: bool)
         requires self.valid(), ensures idle == self.drained(),
     {
-        self.phase == Phase::Ready && self.cursor == self.incoming.len()
+        matches!(self.phase, Phase::Ready) && self.cursor == self.incoming.len()
             && self.sent == self.output.len() && self.decoder.buffered() == 0
     }
 
     /// Confirm this exact latest WRITE received its native positive response.
     pub fn completed(&self, serial: u32) -> (completed: bool)
         requires self.valid(), ensures completed == self.write_completed(serial),
-    { self.phase == Phase::Ready && self.pending.is_none() && serial > 0 && self.completed == serial && self.serial == serial }
+    { matches!(self.phase, Phase::Ready) && self.pending.is_none() && serial > 0 && self.completed == serial && self.serial == serial }
 }
 
 }
