@@ -191,7 +191,7 @@ version = "0.1.0"
 dependencies = [
  "airlock-boot-core",
  "airlock-qubes-network",
- "xen-transport 0.1.0 (git+https://github.com/airlockos-org/hermit-xen?rev=3460f02c38142d98fab7446ad1876370a677de26)",
+ "xen-transport 0.1.0 (git+https://github.com/airlockos-org/hermit-xen?rev=7f54bfa8a15aa450f928e4edcf3970c9dcef5721)",
 ]
 
 [[package]]
@@ -4720,7 +4720,7 @@ checksum = "213b7324336b53d2414b2db8537e56544d981803139155afa84f76eeebb7a546"
 [[package]]
 name = "xen-transport"
 version = "0.1.0"
-source = "git+https://github.com/airlockos-org/hermit-xen?rev=3460f02c38142d98fab7446ad1876370a677de26#3460f02c38142d98fab7446ad1876370a677de26"
+source = "git+https://github.com/airlockos-org/hermit-xen?rev=7f54bfa8a15aa450f928e4edcf3970c9dcef5721#7f54bfa8a15aa450f928e4edcf3970c9dcef5721"
 
 [[package]]
 name = "xen-transport"
