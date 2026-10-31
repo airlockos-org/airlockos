@@ -291,6 +291,7 @@ impl Network {
     /// Prefix length to use unchanged during matching.
     pub fn bits(&self) -> (prefix: u8)
         requires self.valid(), ensures prefix == self.prefix(),
+            self.address().family() == 4 ==> prefix <= 32,
     { self.prefix }
 }
 
@@ -413,7 +414,8 @@ impl Rule {
 
     /// Decode the whole option schema, then reject every unsupported value or
     /// incompatible combination before constructing a usable rule.
-    #[verifier::rlimit(20)]
+    #[verifier::spinoff_prover]
+    #[verifier::rlimit(60)]
     pub fn parse(bytes: &[u8], family: u8) -> (rule: Option<Self>)
         ensures match rule {
             Some(value) => value.valid() && value.describes(bytes@) && value.family_value() == family,
@@ -483,7 +485,7 @@ impl Rule {
     pub fn host(&self) -> (host: Option<&Hostname>)
         requires self.valid(),
         ensures match host {
-            Some(value) => self.host_value() == Some(*value) && hostname(value.bytes()),
+            Some(value) => self.host_value() == Some(*value) && value.valid() && hostname(value.bytes()),
             None => self.host_value().is_none(),
         },
     { self.host.as_ref() }
@@ -501,7 +503,7 @@ impl Rule {
     pub fn ports(&self) -> (ports: Option<&Ports>)
         requires self.valid(),
         ensures match ports {
-            Some(value) => self.ports_value() == Some(*value) && value.low() <= value.high(),
+            Some(value) => self.ports_value() == Some(*value) && value.valid() && value.low() <= value.high(),
             None => self.ports_value().is_none(),
         },
     { self.ports.as_ref() }

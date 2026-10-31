@@ -1,6 +1,9 @@
 [workspace]
 exclude = ["tooling/airlock-store-packer"]
 members = [
+    "airlock-common/bounded-heap",
+    "airlock-common/firewall",
+    "runtime/airlock-sys-firewall",
     "airlock-common/boot",
     "airlock-common/clipboard",
     "airlock-common/qubesdb",

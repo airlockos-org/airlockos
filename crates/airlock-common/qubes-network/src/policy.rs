@@ -709,6 +709,8 @@ impl Snapshot {
     /// Borrow all complete rules in their exact numeric order.
     pub fn rules(&self) -> (rules: &[Ordered])
         requires self.valid(), ensures rules@ == self.rules_value(), rules@.len() <= MAX_RULES,
+            forall|i: int| 0 <= i < rules@.len() ==> rules@[i].rule().valid()
+                && rules@[i].rule().family_value() == self.source_value().family(),
     { self.rules.as_slice() }
 
     /// A whole-source DNS obligation; skipping only that rule is forbidden.

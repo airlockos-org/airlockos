@@ -115,6 +115,58 @@ impl Ip {
         Some(Self { family, words })
     }
 
+    /// Mathematical normalized IPv4 representation used by packet contracts.
+    pub closed spec fn v4_value(bytes: [u8; 4]) -> Self {
+        Self { family: 4, words: [(bytes[0] as u16 * 256 + bytes[1] as u16) as u16,
+            (bytes[2] as u16 * 256 + bytes[3] as u16) as u16, 0, 0, 0, 0, 0, 0] }
+    }
+
+    /// Normalized IPv4 data cannot identify two different four-byte addresses.
+    pub proof fn v4_injective(left: [u8; 4], right: [u8; 4])
+        requires Self::v4_value(left) == Self::v4_value(right),
+        ensures left == right,
+    {
+        assert(left[0] == right[0]); assert(left[1] == right[1]);
+        assert(left[2] == right[2]); assert(left[3] == right[3]);
+        assert(left@ =~= right@);
+    }
+
+    /// Construct normalized IPv4 data from an already decoded packet/DNS address.
+    /// This produces address data; interface ownership remains a separate check.
+    pub fn from_ipv4(bytes: [u8; 4]) -> (address: Self)
+        ensures address.valid(), address == Self::v4_value(bytes), address.family() == 4,
+            address.words()[0] == bytes@[0] as int * 256 + bytes@[1] as int,
+            address.words()[1] == bytes@[2] as int * 256 + bytes@[3] as int,
+    {
+        Self { family: 4, words: [crate::library::network_word([bytes[0], bytes[1]]),
+            crate::library::network_word([bytes[2], bytes[3]]), 0, 0, 0, 0, 0, 0] }
+    }
+
+    /// Construct normalized IPv6 data from standard-library network-order words.
+    pub fn from_ipv6(words: [u16; 8]) -> (address: Self)
+        ensures address.valid(), address.family() == 6, address.words() == words@,
+    { Self { family: 6, words } }
+
+    /// Return IPv4 octets without formatting and reparsing the address.
+    pub fn ipv4(&self) -> (bytes: Option<[u8; 4]>)
+        requires self.valid(),
+        ensures bytes.is_some() == (self.family() == 4),
+            bytes.is_some() ==> *self == Self::v4_value(bytes.unwrap()),
+            bytes.is_some() ==> self.words()[0] == bytes.unwrap()@[0] as int * 256 + bytes.unwrap()@[1] as int
+                && self.words()[1] == bytes.unwrap()@[2] as int * 256 + bytes.unwrap()@[3] as int,
+    {
+        if self.family != 4 { return None; }
+        let high = crate::library::network_bytes(self.words[0]);
+        let low = crate::library::network_bytes(self.words[1]);
+        let bytes = [high[0], high[1], low[0], low[1]];
+        proof {
+            let rebuilt = Self::v4_value(bytes);
+            assert(self.words@ =~= rebuilt.words@);
+            assert(self.words =~= rebuilt.words);
+        }
+        Some(bytes)
+    }
+
     /// Return the parsed family without exposing mutable representation.
     pub fn version(&self) -> (family: u8)
         requires self.valid(), ensures family == self.family(), family == 4 || family == 6,

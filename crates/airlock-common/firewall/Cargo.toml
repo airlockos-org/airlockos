@@ -1,0 +1,25 @@
+[package]
+name = "airlock-firewall-core"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+publish = false
+license = "MIT"
+description = "Bounded IPv4 routed firewall and NAT packet core"
+
+[dependencies]
+airlock-qubes-network = { path = "../qubes-network" }
+# Ethernet wire exports select smoltcp's socket module, which requires one socket
+# variant. No socket/interface instance is created by the firewall.
+smoltcp = { version = "=0.13.1", default-features = false, features = ["alloc", "medium-ethernet", "proto-ipv4", "socket-raw"] }
+domain = { version = "=0.12.3", default-features = false, features = ["alloc"] }
+rand_chacha = { version = "=0.9.0", default-features = false }
+rand_core = { version = "=0.9.5", default-features = false }
+internet-checksum = { version = "=0.2.1", default-features = false }
+vstd = { version = "=0.0.0-2026-10-18-0147", default-features = false, features = ["alloc"] }
+
+[package.metadata.verus]
+verify = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_keep_ghost)', 'cfg(verus_only)'] }

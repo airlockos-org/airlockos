@@ -22,6 +22,7 @@ use crate::config::Config;
 #[cfg(verus_keep_ghost)]
 use crate::config::MAX_CLIENTS;
 use crate::policy::{self, Path, Rejection, Snapshot};
+use crate::resolution::Resolved;
 
 verus! {
 
@@ -45,6 +46,13 @@ enum Publication {
     /// A complete update was rejected with an observable reason.
     Blocked(/// Exact reason this completed source is blocked.
         Rejection),
+    /// Fresh complete policy awaiting all hostname obligations.
+    Resolving(/// Exact immutable snapshot retained while DNS work is pending.
+        Snapshot),
+    /// Complete policy with a checked positive answer for every hostname.
+    CompleteDns(/// Exact completed policy owning these answers.
+        Snapshot, /// Bounded DNS data accepted at this policy's observed revision.
+        Resolved),
     /// Complete validated data; only constructed after a live completion write.
     Complete(/// Complete same-source validated policy, never a partial prefix.
         Snapshot),
@@ -64,6 +72,10 @@ impl Slot {
         self.source.valid() && match self.publication {
             Publication::Complete(snapshot) => snapshot.valid()
                 && snapshot.source_value() == self.source && !snapshot.unresolved_value(),
+            Publication::Resolving(snapshot) => snapshot.valid() && snapshot.source_value() == self.source
+                && snapshot.unresolved_value(),
+            Publication::CompleteDns(snapshot, answers) => snapshot.valid() && snapshot.source_value() == self.source
+                && snapshot.unresolved_value() && answers.valid() && answers.source_value() == self.source && answers.matches(snapshot),
             _ => true,
         }
     }
@@ -82,6 +94,19 @@ pub struct View {
     slots: Vec<Slot>,
     /// Monotonic volatile revision used to invalidate cached connection decisions.
     generation: u64,
+}
+
+/// A publication exposes one exact completed policy, with DNS data when needed.
+closed spec fn installed(publication: Publication, snapshot: Snapshot) -> bool {
+    match publication {
+        Publication::Complete(value) | Publication::CompleteDns(value, _) => value == snapshot,
+        _ => false,
+    }
+}
+
+/// Whether a publication has passed its complete-policy and DNS gates.
+closed spec fn has_installed(publication: Publication) -> bool {
+    publication is Complete || publication is CompleteDns
 }
 
 /// Sources' normalized identities, independent of their per-source state.
@@ -111,7 +136,7 @@ impl View {
     /// A complete source snapshot occupies its exact source's publication slot.
     pub closed spec fn complete_for(&self, source: Ip, snapshot: Snapshot) -> bool {
         exists|i: int| 0 <= i < self.slots@.len()
-            && self.slots@[i].source == source && self.slots@[i].publication == Publication::Complete(snapshot)
+            && self.slots@[i].source == source && installed(self.slots@[i].publication, snapshot)
     }
 
     /// A source has a complete snapshot, independently of its rule contents.
@@ -160,9 +185,9 @@ impl View {
         ensures left == right,
     {
         let i = choose|i: int| 0 <= i < self.slots@.len()
-            && self.slots@[i].publication == Publication::Complete(left);
+            && installed(self.slots@[i].publication, left);
         let j = choose|j: int| 0 <= j < self.slots@.len()
-            && self.slots@[j].publication == Publication::Complete(right);
+            && installed(self.slots@[j].publication, right);
         assert(self.slots@[i].source == left.source_value());
         assert(self.slots@[j].source == right.source_value());
         assert(i == j);
@@ -305,10 +330,10 @@ impl View {
             assert forall|source: Ip, snapshot: Snapshot| self.complete_for(source, snapshot) == (
                 old(self).config.is_some() && old(self).config.unwrap().same_network_as(config)
                     && config.sources().contains(source) && old(self).complete_for(source, snapshot)) by {
-                let slot = Slot { source, publication: Publication::Complete(snapshot) };
-                if self.complete_for(source, snapshot) { assert(self.slots@.contains(slot)); }
                 if self.complete_for(source, snapshot) {
-                    let j = choose|j: int| 0 <= j < self.slots@.len() && self.slots@[j] == slot;
+                    let j = choose|j: int| 0 <= j < self.slots@.len() && self.slots@[j].source == source
+                        && installed(self.slots@[j].publication, snapshot);
+                    let slot = self.slots@[j];
                     assert(config.sources()[j] == source);
                     assert(config.sources().contains(source));
                     assert(preserve && previous.contains(slot));
@@ -316,6 +341,9 @@ impl View {
                     assert(old(self).complete_for(source, snapshot));
                 }
                 if preserve && config.sources().contains(source) && old(self).complete_for(source, snapshot) {
+                    let k = choose|k: int| 0 <= k < previous.len() && previous[k].source == source
+                        && installed(previous[k].publication, snapshot);
+                    let slot = previous[k];
                     assert(previous.contains(slot));
                     if remaining.contains(slot) {
                         let j = choose|j: int| 0 <= j < remaining.len() && remaining[j] == slot;
@@ -339,9 +367,9 @@ impl View {
             final(self).slots@ == old(self).slots@.update(index as int,
                 Slot { source: old(self).slots@[index as int].source, publication }),
             forall|source: Ip, snapshot: Snapshot| final(self).complete_for(source, snapshot) ==
-                (if source == old(self).slots@[index as int].source { publication == Publication::Complete(snapshot) }
+                (if source == old(self).slots@[index as int].source { installed(publication, snapshot) }
                     else { old(self).complete_for(source, snapshot) }),
-            final(self).has_complete(old(self).slots@[index as int].source) == (publication is Complete),
+            final(self).has_complete(old(self).slots@[index as int].source) == has_installed(publication),
     {
         let ghost previous = self.slots@;
         let ghost chosen = publication;
@@ -349,33 +377,50 @@ impl View {
         proof {
             assert(identities(self.slots@) =~= identities(previous));
             assert forall|source: Ip, snapshot: Snapshot| self.complete_for(source, snapshot) ==
-                (if source == previous[index as int].source { publication == Publication::Complete(snapshot) }
+                (if source == previous[index as int].source { installed(publication, snapshot) }
                     else { old(self).complete_for(source, snapshot) }) by {
                 assert forall|j: int| 0 <= j < previous.len() && previous[j].source == previous[index as int].source
                     implies j == index by { }
-                if source == previous[index as int].source && publication == Publication::Complete(snapshot) {
-                    assert(self.slots@[index as int].publication == Publication::Complete(snapshot));
+                if source == previous[index as int].source && installed(publication, snapshot) {
+                    assert(installed(self.slots@[index as int].publication, snapshot));
                 }
                 if self.complete_for(source, snapshot) {
                     let j = choose|j: int| 0 <= j < self.slots@.len() && self.slots@[j].source == source
-                        && self.slots@[j].publication == Publication::Complete(snapshot);
+                        && installed(self.slots@[j].publication, snapshot);
                     assert(previous[j].source == source);
                     if source == previous[index as int].source { assert(j == index); }
                     else { assert(old(self).complete_for(source, snapshot)); }
                 }
                 if source != previous[index as int].source && old(self).complete_for(source, snapshot) {
                     let j = choose|j: int| 0 <= j < previous.len() && previous[j].source == source
-                        && previous[j].publication == Publication::Complete(snapshot);
+                        && installed(previous[j].publication, snapshot);
                     assert(j != index);
-                    assert(self.slots@[j].publication == Publication::Complete(snapshot));
+                    assert(installed(self.slots@[j].publication, snapshot));
                     assert(self.complete_for(source, snapshot));
                 }
             }
-            if let Publication::Complete(snapshot) = chosen {
+            if let Publication::Complete(snapshot) | Publication::CompleteDns(snapshot, _) = chosen {
                 assert(self.complete_for(previous[index as int].source, snapshot));
                 assert(self.has_complete(previous[index as int].source));
             }
         }
+    }
+
+    /// Move one original publication out while leaving that source's gate shut.
+    /// Exclusive mutable access prevents an observer seeing this intermediate
+    /// state during replacement; no fallible external effect occurs here.
+    fn take_publication(&mut self, index: usize) -> (publication: Publication)
+        requires old(self).valid(), index < old(self).slots@.len(),
+        ensures final(self).valid(), final(self).phase() == old(self).phase(),
+            final(self).revision() == old(self).revision(), final(self).config == old(self).config,
+            publication == old(self).slots@[index as int].publication,
+            final(self).slots@ == old(self).slots@.update(index as int,
+                Slot { source: old(self).slots@[index as int].source, publication: Publication::Waiting }),
+    {
+        let ghost previous = self.slots@;
+        let publication = core::mem::replace(&mut self.slots[index].publication, Publication::Waiting);
+        proof { assert(identities(self.slots@) =~= identities(previous)); }
+        publication
     }
 
     /// Native whole-database barrier. Initial source roots are deliberately
@@ -535,15 +580,15 @@ impl View {
                                         snapshot.dns_agrees(candidate, *cache);
                                     }
                                 }
-                                if snapshot.unresolved() { Publication::Blocked(Rejection::Dns) }
+                                if snapshot.unresolved() { Publication::Resolving(snapshot) }
                                 else { Publication::Complete(snapshot) }
                             },
                             Err(reason) => Publication::Blocked(reason),
                         }
                     };
                     proof {
-                        if let Publication::Complete(snapshot) = &publication {
-                            assert(publishable(*cache, key@));
+                        if let Publication::Complete(snapshot) | Publication::Resolving(snapshot) = &publication {
+                            if !snapshot.unresolved_value() { assert(publishable(*cache, key@)); }
                             policy::source_unique(key@.subrange(0, path.end() as int), path.source(), path.end() as int,
                                 snapshot.source_value(), snapshot.root_value().len() as int);
                         }
@@ -563,11 +608,152 @@ impl View {
         }
     }
 
+    /// Exact retained whole-source observation awaiting its DNS obligations.
+    pub closed spec fn awaiting(&self, source: Ip, snapshot: Snapshot) -> bool {
+        self.phase == Phase::Synchronized && exists|i: int| 0 <= i < self.slots@.len()
+            && self.slots@[i].source == source && self.slots@[i].publication == Publication::Resolving(snapshot)
+    }
+
+    /// Positive DNS data owned by the same exact currently installed source.
+    pub closed spec fn resolved_for(&self, source: Ip, answers: Resolved) -> bool {
+        exists|i: int, snapshot: Snapshot| 0 <= i < self.slots@.len()
+            && self.slots@[i].source == source
+            && self.slots@[i].publication == Publication::CompleteDns(snapshot, answers)
+    }
+
+    /// Any stale DNS source forces a new volatile revision before forwarding.
+    pub closed spec fn needs_expiry(&self, now: u64) -> bool {
+        exists|i: int| 0 <= i < self.slots@.len() && match #[trigger] self.slots@[i].publication {
+            Publication::CompleteDns(_, answers) => !answers.unexpired(now), _ => false,
+        }
+    }
+
+    /// Complete answers may activate only their original pending observation.
+    pub closed spec fn accepts_resolution(&self, answers: Resolved, now: u64) -> bool {
+        answers.valid() && self.phase == Phase::Synchronized && answers.revision_value() == self.revision()
+            && answers.unexpired(now) && exists|snapshot: Snapshot|
+                self.awaiting(answers.source_value(), snapshot) && answers.matches(snapshot)
+    }
+
+    /// Find a source slot without copying or manufacturing its publication.
+    fn slot_index(&self, source: &Ip) -> (index: Option<usize>)
+        requires self.valid(), source.valid(),
+        ensures match index {
+            Some(i) => i < self.slots@.len() && self.slots@[i as int].source == *source,
+            None => forall|i: int| 0 <= i < self.slots@.len() ==> self.slots@[i].source != *source,
+        },
+    {
+        self.slots.iter().position(|slot: &Slot| -> (same: bool)
+            requires slot.valid(), ensures same == (slot.source == *source),
+        { slot.source.same(source) })
+    }
+
+    /// Borrow a fresh completed snapshot for bounded DNS work. Candidate data
+    /// alone does not satisfy member_ready or permit an interface operation.
+    pub fn candidate(&self, source: &Ip) -> (candidate: Option<(u64, &Snapshot)>)
+        requires self.valid(), source.valid(),
+        ensures match candidate {
+            Some((revision, snapshot)) => revision == self.revision() && snapshot.valid()
+                && snapshot.source_value() == *source && snapshot.unresolved_value() && self.awaiting(*source, *snapshot),
+            None => !(exists|snapshot: Snapshot| self.awaiting(*source, snapshot)),
+        },
+    {
+        if !matches!(self.phase, Phase::Synchronized) { return None; }
+        let index = self.slot_index(source)?;
+        match &self.slots[index].publication {
+            Publication::Resolving(snapshot) => Some((self.generation, snapshot)),
+            _ => None,
+        }
+    }
+
+    /// Borrow the current positive DNS data; packet admission checks expiry at
+    /// the operation's own monotonic time even while this immutable view is held.
+    pub fn resolution(&self, source: &Ip) -> (answers: Option<&Resolved>)
+        requires self.valid(), source.valid(),
+        ensures match answers {
+            Some(value) => value.valid() && value.source_value() == *source && self.resolved_for(*source, *value)
+                && (forall|other: Resolved| self.resolved_for(*source, other) ==> other == *value)
+                && (exists|snapshot: Snapshot| self.complete_for(*source, snapshot) && value.matches(snapshot)),
+            None => !(exists|value: Resolved| self.resolved_for(*source, value)),
+        },
+    {
+        let index = self.slot_index(source)?;
+        match &self.slots[index].publication { Publication::CompleteDns(_, answers) => Some(answers), _ => None }
+    }
+
+    /// Consume complete answers only for the still-current policy observation.
+    /// Any intervening QubesDB mutation forces the resolver to obtain a new view.
+    pub fn resolve(&mut self, answers: Resolved, now: u64) -> (accepted: bool)
+        requires old(self).valid(), answers.valid(),
+        ensures final(self).valid(),
+            accepted == (old(self).accepts_resolution(answers, now) && old(self).revision() < u64::MAX),
+            accepted ==> final(self).phase() == Phase::Synchronized
+                && final(self).revision() == old(self).revision() + 1
+                && final(self).configuration_value() == old(self).configuration_value()
+                && final(self).resolved_for(answers.source_value(), answers),
+            !accepted ==> *final(self) == *old(self) || final(self).phase() == Phase::Lost,
+    {
+        if !matches!(self.phase, Phase::Synchronized) || answers.revision() != self.generation { return false; }
+        let index = match self.slot_index(answers.source()) { Some(index) => index, None => return false };
+        match &self.slots[index].publication {
+            Publication::Resolving(snapshot) => if !answers.applies(snapshot, now) { return false; },
+            _ => return false,
+        }
+        if !self.advance() { return false; }
+        let previous = self.take_publication(index);
+        match previous {
+            Publication::Resolving(snapshot) => { self.publish(index, Publication::CompleteDns(snapshot, answers)); true }
+            _ => false,
+        }
+    }
+
+    /// Revoke expired DNS publications before new bindings or packet operations.
+    /// One revision covers the whole bounded expiry pass; no stale flow survives it.
+    pub fn expire(&mut self, now: u64) -> (live: bool)
+        requires old(self).valid(),
+        ensures final(self).valid(),
+            live == (old(self).phase() != Phase::Lost
+                && !(old(self).needs_expiry(now) && old(self).revision() == u64::MAX)),
+            live ==> final(self).phase() == old(self).phase()
+                && final(self).configuration_value() == old(self).configuration_value()
+                && final(self).revision() == old(self).revision() + if old(self).needs_expiry(now) { 1u64 } else { 0u64 }
+                && !final(self).needs_expiry(now),
+            !live ==> final(self).phase() == Phase::Lost,
+    {
+        if matches!(self.phase, Phase::Lost) { return false; }
+        let stale = self.slots.iter().any(|slot: &Slot| -> (stale: bool)
+            requires slot.valid(),
+            ensures stale == match slot.publication { Publication::CompleteDns(_, answers) => !answers.unexpired(now), _ => false },
+        { match &slot.publication { Publication::CompleteDns(_, answers) => !answers.fresh(now), _ => false } });
+        proof { assert(stale == self.needs_expiry(now)); }
+        if !stale { return true; }
+        proof { assert(self.phase() == Phase::Synchronized); }
+        if !self.advance() { return false; }
+        let mut i = 0;
+        while i < self.slots.len()
+            invariant self.valid(), self.phase() == Phase::Synchronized, i <= self.slots@.len() <= 2*MAX_CLIENTS,
+                self.config == old(self).config, self.generation == old(self).generation + 1,
+                old(self).phase() == Phase::Synchronized, old(self).needs_expiry(now),
+                forall|j: int| 0 <= j < i ==> match #[trigger] self.slots@[j].publication {
+                    Publication::CompleteDns(_, answers) => answers.unexpired(now), _ => true,
+                },
+            decreases self.slots.len() - i,
+        {
+            let stale = match &self.slots[i].publication { Publication::CompleteDns(_, answers) => !answers.fresh(now), _ => false };
+            if stale {
+                let previous = self.take_publication(i);
+                if let Publication::CompleteDns(snapshot, _) = previous { self.publish(i, Publication::Resolving(snapshot)); }
+            }
+            i += 1;
+        }
+        true
+    }
+
     /// Borrow current complete addressing; no cached projection survives loss.
     pub fn config(&self) -> (config: Option<&Config>)
         requires self.valid(),
         ensures match config {
-            Some(value) => self.phase() == Phase::Synchronized && value.valid() && self.configuration_value() == Some(*value),
+            Some(value) => self.phase() == Phase::Synchronized && value.valid() && self.configuration_value() == Some(*value) && self.revision() > 0,
             None => self.configuration_value().is_none(),
         },
     { self.config.as_ref() }
@@ -578,27 +764,29 @@ impl View {
         requires self.valid(), source.valid(),
         ensures match policy {
             Some(value) => self.phase() == Phase::Synchronized && self.configuration_value().is_some()
-                && value.valid() && value.source_value() == *source && !value.unresolved_value()
+                && value.valid() && value.source_value() == *source
                 && self.member_ready(*source) && self.published(*value)
                 && self.complete_for(*source, *value)
+                && (forall|other: Snapshot| self.complete_for(*source, other) ==> other == *value)
                 && (forall|other: Snapshot| self.published(other) && other.source_value() == *source ==> other == *value),
-            None => !self.has_complete(*source) && !self.member_ready(*source),
+            None => !self.has_complete(*source) && !self.member_ready(*source)
+                && (forall|snapshot: Snapshot| !self.complete_for(*source, snapshot)),
         },
     {
         let mut i = 0;
         while i < self.slots.len()
             invariant self.valid(), source.valid(), i <= self.slots.len() <= 2*MAX_CLIENTS,
                 forall|j: int, snapshot: Snapshot| 0 <= j < i && self.slots@[j].source == *source
-                    ==> self.slots@[j].publication != Publication::Complete(snapshot),
+                    ==> !installed(self.slots@[j].publication, snapshot),
             decreases self.slots.len()-i,
         {
             if self.slots[i].source.same(source) {
                 proof {
                     assert forall|j: int, snapshot: Snapshot| 0 <= j < self.slots@.len()
                         && self.slots@[j].source == *source
-                        && self.slots@[j].publication == Publication::Complete(snapshot)
+                        && installed(self.slots@[j].publication, snapshot)
                         implies j == i by { }
-                    if let Publication::Complete(value) = self.slots@[i as int].publication {
+                    if let Publication::Complete(value) | Publication::CompleteDns(value, _) = self.slots@[i as int].publication {
                         assert(self.complete_for(*source, value));
                         assert(self.has_complete(*source));
                         assert(identities(self.slots@)[i as int] == *source);
@@ -608,7 +796,10 @@ impl View {
                             implies other == value by { self.unique_snapshot(other, value); }
                     }
                 }
-                return match &self.slots[i].publication { Publication::Complete(value) => Some(value), _ => None };
+                return match &self.slots[i].publication {
+                    Publication::Complete(value) | Publication::CompleteDns(value, _) => Some(value),
+                    _ => None,
+                };
             }
             i += 1;
         }
@@ -630,13 +821,14 @@ impl View {
         {
             if self.slots[i].source.same(source) {
                 proof {
-                    if let Publication::Complete(value) = self.slots@[i as int].publication {
+                    if let Publication::Complete(value) | Publication::CompleteDns(value, _) = self.slots@[i as int].publication {
                         assert(self.complete_for(*source, value));
                         assert(self.has_complete(*source));
                     }
                 }
                 return match &self.slots[i].publication {
-                    Publication::Complete(_) => None,
+                    Publication::Complete(_) | Publication::CompleteDns(_, _) => None,
+                    Publication::Resolving(_) => Some(Rejection::Dns),
                     Publication::Waiting => Some(Rejection::Incomplete),
                     Publication::Blocked(reason) => Some(*reason),
                 };
@@ -645,6 +837,11 @@ impl View {
         }
         Some(Rejection::Configuration)
     }
+
+    /// Observe the native projection's lifecycle without exposing mutable state.
+    pub fn state(&self) -> (phase: Phase)
+        requires self.valid(), ensures phase == self.phase(),
+    { self.phase }
 
     /// Current volatile revision for invalidating any cached flow decision.
     pub fn generation(&self) -> (generation: u64)

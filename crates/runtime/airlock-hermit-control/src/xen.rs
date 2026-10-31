@@ -75,9 +75,36 @@ impl Session {
     /// Supply the challenge parsed from the admitted `airlock.boot` argument.
     /// The control owner publishes it automatically after initial synchronization.
     pub fn open(challenge: Challenge) -> Result<Self, Error> {
+        // Only the native documented MissingSetup result has no mapping effect.
+        // Every other failure is terminal; an uncertain owner is never reopened.
+        let start = endpoint::now_ns();
+        let deadline = start.saturating_add(10_000_000_000);
+        let mut previous = start;
+        let mut connected = None;
+        for _ in 0..100 {
+            let observed = endpoint::generation();
+            let now = endpoint::now_ns();
+            if now < previous || now >= deadline {
+                return Err(Error::Protocol);
+            }
+            previous = now;
+            match Client::open(0, 111, deadline.min(now.saturating_add(500_000_000))) {
+                Ok(native) => {
+                    connected = Some(native);
+                    break;
+                }
+                Err(XenError::Platform(-2)) => {
+                    endpoint::wait(observed, deadline.min(now.saturating_add(100_000_000)))
+                        .map_err(Error::Transport)?
+                }
+                Err(error) => return Err(Error::Transport(error)),
+            }
+        }
+        let native = connected.ok_or(Error::Protocol)?;
         let now = endpoint::now_ns();
-        let native =
-            Client::open(0, 111, now.saturating_add(500_000_000)).map_err(Error::Transport)?;
+        if now < previous {
+            return Err(Error::Protocol);
+        }
         Ok(Self {
             native,
             control: Control::synchronizing_at(now, challenge),
@@ -222,23 +249,7 @@ impl Session {
         interface: &'a mut Netback,
         certificate: &'a Certificate,
     ) -> Result<Option<Permit<'a>>, Error> {
-        self.alive()?;
-        if !self.control.between_records() {
-            return Ok(None);
-        }
-        // Do not call poll here: consuming an event internally could hide a
-        // different interface's completed barrier from the application loop.
-        let count = match self.native.try_read(&mut self.input) {
-            Ok(value) => value,
-            Err(error) => {
-                self.control.disconnect();
-                return Err(Error::Transport(error));
-            }
-        };
-        if count > 0 {
-            if !self.control.deliver(&self.input[..count]) {
-                return Err(Error::Protocol);
-            }
+        if !self.drained()? {
             return Ok(None);
         }
         if interface.progress().map_err(Error::Transport)? != Status::Ready {
@@ -262,6 +273,53 @@ impl Session {
         }))
     }
 
+    /// Borrow a drained live control observation for router/resolver upstream
+    /// effects. This grants no client-interface authority and cannot authorize
+    /// an output carrying a client owner; those require the original Permit.
+    pub fn observation(&mut self) -> Result<Option<Observation<'_>>, Error> {
+        if !self.drained()? {
+            return Ok(None);
+        }
+        Ok(Some(Observation { session: self }))
+    }
+
+    /// Inspect pending native bytes before any effect; do not consume a barrier
+    /// event internally. The public poll loop retains all event correlation.
+    fn drained(&mut self) -> Result<bool, Error> {
+        self.alive()?;
+        if !self.control.between_records() {
+            return Ok(false);
+        }
+        // Do not call poll here: consuming an event internally could hide a
+        // different interface's completed barrier from the application loop.
+        let count = match self.native.try_read(&mut self.input) {
+            Ok(value) => value,
+            Err(error) => {
+                self.control.disconnect();
+                return Err(Error::Transport(error));
+            }
+        };
+        if count > 0 {
+            if !self.control.deliver(&self.input[..count]) {
+                return Err(Error::Protocol);
+            }
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    /// Supply complete resolver data bound to its original native policy revision.
+    /// The caller must obtain it from the firewall's checked outstanding DNS work.
+    pub fn resolve(
+        &mut self,
+        answers: airlock_qubes_network::resolution::Resolved,
+    ) -> Result<bool, Error> {
+        if !self.drained()? {
+            return Ok(false);
+        }
+        Ok(self.control.resolve(answers, endpoint::now_ns()))
+    }
+
     /// Consume this owner and explicitly release its native maps/events. Any
     /// uncertain release remains quarantined by the kernel until VM teardown.
     pub fn close(mut self) -> Result<(), Error> {
@@ -275,6 +333,13 @@ impl Session {
 pub struct Pending {
     /// Exact typed request produced by the deterministic state transition.
     request: Request,
+}
+
+impl Certificate {
+    /// Borrow the exact completed data binding; native effects still require permit.
+    pub fn binding(&self) -> &Bound {
+        &self.binding
+    }
 }
 
 impl Pending {
@@ -306,6 +371,17 @@ pub struct Permit<'a> {
 }
 
 impl<'a> Permit<'a> {
+    /// Borrow the checked binding while the actual interface/control owners stay held.
+    pub fn binding(&self) -> &Bound {
+        &self.certificate.binding
+    }
+
+    /// Consume a current effect permission for a core-approved output frame.
+    /// The application rechecks queued packet revision and destination owner first.
+    pub fn send(self, bytes: &[u8]) -> Result<bool, Error> {
+        self.interface.try_send(bytes).map_err(Error::Transport)
+    }
+
     /// Actual source-address authority for packet anti-spoofing decisions.
     pub fn assigned(&self) -> &Assigned {
         self.certificate.binding.assigned()
@@ -341,6 +417,11 @@ pub struct Received<'a> {
 }
 
 impl Received<'_> {
+    /// Original admitted interface identity, held with its native owner.
+    pub fn binding(&self) -> &Bound {
+        self.context.binding()
+    }
+
     /// Exact private packet bytes; their claimed source is never interface identity.
     pub fn bytes(&self) -> &[u8] {
         self.bytes
@@ -354,5 +435,18 @@ impl Received<'_> {
     /// Complete current policy/configuration held stable with this packet.
     pub fn projection(&self) -> &View {
         self.context.projection()
+    }
+}
+
+/// One live native control owner held immutable through an upstream-only effect.
+pub struct Observation<'a> {
+    /// Exact original session; no detached projection can construct this token.
+    session: &'a Session,
+}
+
+impl Observation<'_> {
+    /// Current synchronized control data held stable throughout the operation.
+    pub fn projection(&self) -> &View {
+        self.session.projection()
     }
 }

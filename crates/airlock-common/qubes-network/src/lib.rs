@@ -35,6 +35,8 @@ vstd::prelude::verus! {
 pub const READY_PATH: &'static str = "/airlock-network-control-ready";
 }
 
+mod library;
+
 pub mod address;
 pub mod backend;
 pub mod binding;
@@ -47,6 +49,7 @@ mod number;
 
 pub mod config;
 pub mod control;
+pub mod resolution;
 
 pub mod cache;
 

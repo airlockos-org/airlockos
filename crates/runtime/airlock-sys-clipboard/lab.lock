@@ -3,6 +3,14 @@
 version = 4
 
 [[package]]
+name = "airlock-bounded-heap"
+version = "0.1.0"
+dependencies = [
+ "talc",
+ "vstd",
+]
+
+[[package]]
 name = "airlock-boot-core"
 version = "0.1.0"
 dependencies = [
@@ -14,6 +22,7 @@ dependencies = [
 name = "airlock-clipboard-core"
 version = "0.1.0"
 dependencies = [
+ "airlock-bounded-heap",
  "airlock-boot-core",
  "vstd",
 ]
@@ -22,9 +31,9 @@ dependencies = [
 name = "airlock-sys-clipboard"
 version = "0.1.0"
 dependencies = [
+ "airlock-bounded-heap",
  "airlock-clipboard-core",
  "hermit",
- "talc",
  "xen-transport",
 ]
 

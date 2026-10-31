@@ -191,9 +191,10 @@ impl Control {
     pub fn tick(&mut self, now: u64) -> (live: bool)
         requires old(self).valid(),
         ensures final(self).valid(), !live ==> final(self).startup() is Lost,
-            live ==> final(self).view() == old(self).view() && final(self).startup() == old(self).startup(),
+            live ==> final(self).view().phase() == old(self).view().phase()
+                && final(self).view().revision() >= old(self).view().revision() && final(self).startup() == old(self).startup(),
     {
-        if !self.native.tick(now) { self.disconnect(); return false; }
+        if !self.native.tick(now) || !self.view.expire(now) { self.disconnect(); return false; }
         true
     }
 
@@ -342,6 +343,21 @@ impl Control {
         let serial = self.native.write(path.as_slice(), value.as_slice());
         if serial.is_none() { self.disconnect(); }
         serial
+    }
+
+    /// Install complete DNS data without creating another control channel or
+    /// bypassing the source's original ordered native completion observation.
+    pub fn resolve(&mut self, answers: crate::resolution::Resolved, now: u64) -> (accepted: bool)
+        requires old(self).valid(), answers.valid(),
+        ensures final(self).valid(),
+            accepted ==> final(self).view().resolved_for(answers.source_value(), answers)
+                && final(self).view().revision() == old(self).view().revision() + 1,
+            !accepted ==> final(self).view() == old(self).view() || final(self).startup() is Lost,
+    {
+        if !matches!(self.startup, Startup::Ready) || !self.native.between_records() { return false; }
+        let accepted = self.view.resolve(answers, now);
+        if matches!(self.view.state(), crate::projection::Phase::Lost) { self.disconnect(); }
+        accepted
     }
 
     /// Exact latest handled-counter ACK after the network boot handoff.

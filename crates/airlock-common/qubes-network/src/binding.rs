@@ -285,6 +285,12 @@ impl Bound {
     /// Exact control/interface/peer correlation from the completed request.
     pub closed spec fn labels(&self) -> (u32, u32, u16) { (self.connection, self.lease, self.peer) }
 
+    /// Copy lifetime labels for bounded packet state, never native authority.
+    pub fn identity(&self) -> (identity: (u32, u32, u16))
+        requires self.valid(), ensures identity == self.labels(), identity.0 > 0 && identity.1 > 0
+            && 0 < identity.2 < 0x7ff0,
+    { (self.connection, self.lease, self.peer) }
+
     /// Read exact source address data for packet anti-spoofing after permission.
     pub fn assigned(&self) -> (assigned: &Assigned)
         requires self.valid(), ensures assigned.valid(), *assigned == self.assigned_value(),

@@ -1,0 +1,24 @@
+[package]
+name = "airlock-sys-firewall"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+publish = false
+license = "MIT"
+description = "Hermit routed firewall service"
+
+[dependencies]
+airlock-boot-core = { path = "../../airlock-common/boot" }
+airlock-bounded-heap = { path = "../../airlock-common/bounded-heap", features = ["allocator"] }
+airlock-firewall-core = { path = "../../airlock-common/firewall" }
+airlock-hermit-control = { path = "../airlock-hermit-control" }
+airlock-qubes-network = { path = "../../airlock-common/qubes-network" }
+getrandom = "=0.3.4"
+
+[target.'cfg(target_os = "hermit")'.dependencies]
+hermit = { git = "https://github.com/hermit-os/hermit-rs", rev = "e9dc6784ad1a2dc6d18c6819ee51198cab9fb78a", default-features = false, features = ["pvh", "fsgsbase", "kernel-stack"] }
+xen-transport = { git = "https://github.com/airlockos-org/hermit-xen", rev = "7f54bfa8a15aa450f928e4edcf3970c9dcef5721", features = ["hermit"] }
+
+[[bin]]
+name = "sys-firewall"
+path = "src/bin/hermit.rs"
