@@ -12,6 +12,7 @@ use crate::{
     engine::Owner,
     wire::{Packet, Tcp, Tuple},
 };
+use airlock_qubes_network::address::Ip;
 use alloc::collections::BTreeMap;
 use rand_core::RngCore;
 
@@ -78,10 +79,12 @@ pub(crate) struct Flow {
     pub(crate) owner: Owner,
     /// Exact tuple as received on the client interface.
     pub(crate) original: Tuple,
+    /// Stable primary assigned address shared by this interface's IPv4/IPv6 quotas.
+    pub(crate) quota: Ip,
     /// Outbound tuple after destination redirection, before source NAT.
     pub(crate) policy: Tuple,
     /// Assigned application IP used for source masquerade.
-    pub(crate) external: [u8; 4],
+    pub(crate) external: Ip,
     /// Client sender MAC on this owner only; not an identity credential.
     pub(crate) mac: [u8; 6],
     /// Absolute inactivity deadline; queries never refresh on rejected packets.
@@ -98,7 +101,8 @@ impl Flow {
     /// One bounded same-family mapping retains the original source identity and
     /// a release deadline no earlier than its inactivity deadline.
     pub(crate) open spec fn valid(&self) -> bool {
-        self.owner.valid() && self.original.valid() && self.policy.valid()
+        self.owner.valid() && self.quota.valid() && self.external.valid()
+            && self.external.family() == self.original.src.family() && self.original.valid() && self.policy.valid()
             && self.original.src == self.policy.src && self.original.proto == self.policy.proto
             && self.original.sport == self.policy.sport && self.original.dport == self.policy.dport
             && self.deadline <= self.release && self.revision > 0
@@ -114,7 +118,7 @@ impl Flow {
     /// Exact admission for live UDP/echo traffic and guarded TCP control events.
     pub(crate) open spec fn accepts(&self, packet: Packet<'_>, outbound: bool, now: u64) -> bool {
         self.usable(now)
-            && (packet.tuple.proto != 1 || packet.icmp == if outbound { 8u8 } else { 0u8 })
+            && (!packet.tuple.icmp() || packet.icmp == if outbound { packet.tuple.request() } else { packet.tuple.reply() })
             && (packet.tuple.proto != 6 || tcp_admissible(self.state, packet.tcp, outbound))
     }
 
@@ -132,6 +136,7 @@ impl Flow {
         ensures final(self).valid(), !final(self).usable(now), final(self).retired(),
             final(self).revision == old(self).revision,
             final(self).external == old(self).external, final(self).mac == old(self).mac,
+            final(self).quota == old(self).quota,
             final(self).owner == old(self).owner && final(self).original == old(self).original
                 && final(self).policy == old(self).policy && final(self).release_deadline() >= old(self).release_deadline(),
     {
@@ -144,11 +149,11 @@ impl Flow {
     pub(crate) fn reply(&self, tuple: Tuple, port: u16) -> (reply: bool)
         requires self.valid(), tuple.valid(),
         ensures reply == (tuple.src == self.policy.dst && tuple.dst == self.external && tuple.proto == self.policy.proto
-            && (if tuple.proto == 1 { tuple.sport == port }
+            && (if tuple.icmp() { tuple.sport == port }
                 else { tuple.sport == self.policy.dport && tuple.dport == port })),
     {
         tuple.src == self.policy.dst && tuple.dst == self.external && tuple.proto == self.policy.proto
-            && if tuple.proto == 1 { tuple.sport == port }
+            && if tuple.icmp() { tuple.sport == port }
                 else { tuple.sport == self.policy.dport && tuple.dport == port }
     }
 
@@ -161,14 +166,15 @@ impl Flow {
             accepted && !final(self).retired() ==> final(self).deadline > now,
             accepted && old(self).state is Established && !packet.tcp.rst ==> final(self).state is Established,
             final(self).external == old(self).external, final(self).mac == old(self).mac,
+            final(self).quota == old(self).quota,
             final(self).owner == old(self).owner && final(self).original == old(self).original
                 && final(self).policy == old(self).policy && final(self).revision == old(self).revision,
             old(self).retired() ==> !accepted && final(self).retired(),
-            accepted && packet.tuple.proto == 1 ==> packet.icmp == if outbound { 8u8 } else { 0u8 },
+            accepted && packet.tuple.icmp() ==> packet.icmp == if outbound { packet.tuple.request() } else { packet.tuple.reply() },
     {
         if !self.live(now) { self.retire(now); return false; }
-        if packet.tuple.proto == 1 && packet.icmp != if outbound { 8 } else { 0 } { return false; }
-        let mut timeout = if packet.tuple.proto == 1 { 10 * SECOND } else { 30 * SECOND };
+        if packet.tuple.icmp() && packet.icmp != if outbound { packet.tuple.request() } else { packet.tuple.reply() } { return false; }
+        let mut timeout = if packet.tuple.icmp() { 10 * SECOND } else { 30 * SECOND };
         if packet.tuple.proto == 6 {
             let tcp = packet.tcp;
             let next = match self.state {
@@ -224,8 +230,10 @@ pub(crate) struct NewMapping {
     pub owner: Owner,
     /// Authorized tuple after provider-DNS redirection.
     pub policy: Tuple,
+    /// Primary assigned address; both address families spend the same quota.
+    pub quota: Ip,
     /// Current source-NAT IPv4 address.
-    pub external: [u8; 4],
+    pub external: Ip,
     /// Original sender's MAC, scoped only to this native lifetime.
     pub mac: [u8; 6],
     /// Observation revision under which the route was permitted.
@@ -244,8 +252,8 @@ pub(crate) struct Table {
 
 impl Table {
     /// Reservations charged to one original source, including retired entries.
-    pub(crate) open spec fn source_ports(&self, source: [u8; 4]) -> Set<u16> {
-        self.entries@.dom().filter(|port: u16| self.entries@[port].original.src == source)
+    pub(crate) open spec fn source_ports(&self, source: Ip) -> Set<u16> {
+        self.entries@.dom().filter(|port: u16| self.entries@[port].quota == source)
     }
 
     /// Finite bijection between reserved NAT ports and exact owner/tuple keys.
@@ -260,7 +268,7 @@ impl Table {
             && (forall|key: (Owner, Tuple)| self.outbound@.dom().contains(key) ==>
                 self.entries@.dom().contains(self.outbound@[key])
                 && self.entries@[self.outbound@[key]].owner == key.0 && self.entries@[self.outbound@[key]].original == key.1)
-            && (forall|source: [u8; 4]| (#[trigger] self.source_ports(source)).len() <= CLIENT_FLOWS)
+            && (forall|source: Ip| (#[trigger] self.source_ports(source)).len() <= CLIENT_FLOWS)
     }
 
     /// Stored leases, observed without exposing the native map representation.
@@ -274,7 +282,7 @@ impl Table {
         requires before.valid(), self.entries@ == before.entries@, self.outbound@ == before.outbound@,
         ensures self.valid(),
     {
-        assert forall|source: [u8; 4]| self.source_ports(source).len() <= CLIENT_FLOWS by {
+        assert forall|source: Ip| self.source_ports(source).len() <= CLIENT_FLOWS by {
             assert(before.source_ports(source).len() <= CLIENT_FLOWS);
             assert(self.source_ports(source) == before.source_ports(source));
         }
@@ -288,9 +296,10 @@ impl Table {
             self.entries@ == before.entries@.insert(port, self.entries@[port]),
             self.entries@[port].valid(), self.entries@[port].owner == before.entries@[port].owner,
             self.entries@[port].original == before.entries@[port].original,
+            self.entries@[port].quota == before.entries@[port].quota,
         ensures self.valid(),
     {
-        assert forall|source: [u8; 4]| self.source_ports(source).len() <= CLIENT_FLOWS by {
+        assert forall|source: Ip| self.source_ports(source).len() <= CLIENT_FLOWS by {
             assert(self.source_ports(source) =~= before.source_ports(source));
         }
     }
@@ -302,7 +311,7 @@ impl Table {
         proof { crate::library::derived_key_order(); }
         let table = Self { entries: BTreeMap::new(), outbound: BTreeMap::new(), cursor: 0 };
         proof {
-            assert forall|source: [u8; 4]| table.source_ports(source).len() <= CLIENT_FLOWS by {
+            assert forall|source: Ip| table.source_ports(source).len() <= CLIENT_FLOWS by {
                 assert(table.source_ports(source) =~= Set::empty());
             }
         }
@@ -323,7 +332,8 @@ impl Table {
     /// Admit a new mapping only for supported initiating packets and bounded
     /// available global/per-client capacity. Failed admission changes no state.
     pub(crate) fn create(&mut self, mapping: NewMapping, packet: &Packet<'_>, now: u64, random: &mut impl RngCore) -> (port: Option<u16>)
-        requires old(self).valid(), mapping.owner.valid(), packet.valid(), mapping.policy.valid(), mapping.revision > 0,
+        requires old(self).valid(), mapping.owner.valid(), mapping.quota.valid(), mapping.external.valid(), packet.valid(),
+            mapping.external.family() == packet.tuple.src.family(), mapping.policy.valid(), mapping.revision > 0,
             packet.tuple.src == mapping.policy.src && packet.tuple.sport == mapping.policy.sport
                 && packet.tuple.dport == mapping.policy.dport && packet.tuple.proto == mapping.policy.proto,
             !old(self).index_value().dom().contains((mapping.owner, packet.tuple)),
@@ -338,21 +348,22 @@ impl Table {
     {
         let owner = mapping.owner;
         let policy = mapping.policy;
+        let quota = mapping.quota;
         let external = mapping.external;
         let mac = mapping.mac;
         let revision = mapping.revision;
         let predicate = |flow: &Flow| -> (matches: bool)
-            ensures matches == (flow.original.src == packet.tuple.src),
-        { flow.original.src == packet.tuple.src };
+            ensures matches == (flow.quota == quota),
+        { flow.quota == quota };
         let count = crate::library::count_values(&self.entries, predicate);
         proof {
-            assert(crate::library::selected_keys(self.entries@, predicate) =~= self.source_ports(packet.tuple.src));
-            assert(count == self.source_ports(packet.tuple.src).len());
+            assert(crate::library::selected_keys(self.entries@, predicate) =~= self.source_ports(quota));
+            assert(count == self.source_ports(quota).len());
         }
         if now == u64::MAX || self.entries.len() >= MAX_FLOWS
             || count >= CLIENT_FLOWS
             || (packet.tuple.proto == 6 && !initial(packet.tcp))
-            || (packet.tuple.proto == 1 && packet.icmp != 8) { return None; }
+            || (packet.tuple.icmp() && packet.icmp != packet.tuple.request()) { return None; }
         let start = (random.next_u32() % 16384) as u16;
         let entries = &self.entries;
         let port = (0..=MAX_FLOWS).find_map(|offset: usize| -> (candidate: Option<u16>)
@@ -363,7 +374,7 @@ impl Table {
         })?;
         let deadline = now.saturating_add(30 * SECOND);
         let ghost before = *self;
-        let flow = Flow { owner, original: packet.tuple, policy, external, mac,
+        let flow = Flow { owner, original: packet.tuple, quota, policy, external, mac,
             deadline, release: deadline.saturating_add(HOLD), revision,
             state: if packet.tuple.proto == 6 { State::Syn { client: packet.tcp.seq } } else { State::Datagram } };
         self.outbound.insert((owner, packet.tuple), port); self.entries.insert(port, flow);
@@ -378,8 +389,8 @@ impl Table {
             assert forall|key: (Owner, Tuple)| self.outbound@.dom().contains(key) implies
                 self.entries@.dom().contains(self.outbound@[key])
                 && self.entries@[self.outbound@[key]].owner == key.0 && self.entries@[self.outbound@[key]].original == key.1 by { }
-            assert forall|source: [u8; 4]| self.source_ports(source).len() <= CLIENT_FLOWS by {
-                if source == packet.tuple.src {
+            assert forall|source: Ip| self.source_ports(source).len() <= CLIENT_FLOWS by {
+                if source == quota {
                     assert(self.source_ports(source) =~= before.source_ports(source).insert(port));
                 } else { assert(self.source_ports(source) =~= before.source_ports(source)); }
             }
@@ -416,12 +427,12 @@ impl Table {
             let ghost before = *self;
             if let Some(flow) = self.entries.get_mut(&port) {
                 let address_ok = match view.config() {
-                    Some(config) => config.address().ipv4() == Some(flow.external)
-                        && config.contains(&airlock_qubes_network::address::Ip::from_ipv4(flow.original.src)),
+                    Some(config) => crate::policy::external(config, flow.original.src.version()) == Some(flow.external)
+                        && config.contains(&flow.original.src),
                     None => false,
                 };
                 let redirect_ok = crate::policy::redirect(view, flow.original) == Some(flow.policy);
-                if !address_ok || !redirect_ok || !crate::policy::allows(view, flow.policy, if flow.policy.proto == 1 { 8 } else { 0 }, now) {
+                if !address_ok || !redirect_ok || !crate::policy::allows(view, flow.policy, if flow.policy.icmp() { flow.policy.request() } else { 0 }, now) {
                     flow.retire(now);
                 } else { flow.revision = view.generation(); }
             }
@@ -476,7 +487,7 @@ impl Table {
         let key = (flow.owner, flow.original);
         self.entries.remove(&port); self.outbound.remove(&key);
         proof {
-            assert forall|source: [u8; 4]| self.source_ports(source).len() <= CLIENT_FLOWS by {
+            assert forall|source: Ip| self.source_ports(source).len() <= CLIENT_FLOWS by {
                 assert(self.source_ports(source).subset_of(before.source_ports(source)));
                 vstd::set_lib::lemma_len_subset(self.source_ports(source), before.source_ports(source));
             }

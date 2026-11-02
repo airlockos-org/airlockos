@@ -21,7 +21,7 @@ pub(crate) struct Header {
     pub opcode: u8,
     /// QR bit; the caller requires a response.
     pub response: bool,
-    /// TC bit; the caller rejects truncated UDP answers.
+    /// TC bit; the caller starts bounded TCP fallback after question correlation.
     pub truncated: bool,
     /// Native response code, zero for success.
     pub rcode: u8,
@@ -60,6 +60,27 @@ pub(crate) struct Record {
     pub ttl: u32,
     /// Library-decoded address, alias or other record kind.
     pub data: Data,
+}
+
+/// Library-decoded question, including replies whose answer section is truncated.
+pub(crate) struct Question {
+    /// Complete canonical encoded name, including its root label.
+    pub name: Vec<u8>,
+    /// Native record class, normally IN.
+    pub class: u16,
+    /// Native record type, A or AAAA for this resolver.
+    pub kind: u16,
+}
+
+/// Decode only the question; the answer section may legitimately be truncated.
+#[verifier::external_body]
+pub(crate) fn question(bytes: &[u8]) -> (question: Option<Question>)
+    ensures question.is_some() ==> 0 < question.unwrap().name@.len() <= 255,
+{
+    let message = Message::from_octets(bytes).ok()?;
+    let question = message.sole_question().ok()?;
+    Some(Question { name: question.qname().to_canonical_name::<Vec<u8>>().into_octets(),
+        class: question.qclass().to_int(), kind: question.qtype().to_int() })
 }
 
 /// The library's complete sections and canonical-name traversal result.

@@ -12,13 +12,13 @@ verus! {
 /// structurally and cannot attach an external specification to `[u8; 2]`.
 /// This bridge trusts only the unchanged standard-library call, not validation.
 #[verifier::external_body]
-pub(crate) fn network_word(bytes: [u8; 2]) -> (word: u16)
+pub fn network_word(bytes: [u8; 2]) -> (word: u16)
     ensures word as int == bytes[0] as int * 256 + bytes[1] as int,
 { u16::from_be_bytes(bytes) }
 
 /// Delegate exact network-order encoding under the same array-signature gap.
 #[verifier::external_body]
-pub(crate) fn network_bytes(word: u16) -> (bytes: [u8; 2])
+pub fn network_bytes(word: u16) -> (bytes: [u8; 2])
     ensures bytes[0] as int == word as int / 256, bytes[1] as int == word as int % 256,
 { word.to_be_bytes() }
 

@@ -5,13 +5,16 @@ edition = "2024"
 rust-version = "1.91"
 publish = false
 license = "MIT"
-description = "Bounded IPv4 routed firewall and NAT packet core"
+description = "Bounded dual-stack routed firewall and NAT packet core"
 
 [dependencies]
 airlock-qubes-network = { path = "../qubes-network" }
-# Ethernet wire exports select smoltcp's socket module, which requires one socket
-# variant. No socket/interface instance is created by the firewall.
-smoltcp = { version = "=0.13.1", default-features = false, features = ["alloc", "medium-ethernet", "proto-ipv4", "socket-raw"] }
+# Wire codecs serve forwarding; one private IP/TCP endpoint handles truncated
+# policy DNS replies. Native packets still pass through the engine's queues.
+smoltcp = { version = "=0.13.1", default-features = false, features = ["alloc", "medium-ethernet", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-raw", "socket-tcp"] }
+# Reuse extension-header decoding and IP reassembly. The std feature supplies
+# owned reassembly buffers on both Linux and Hermit; no second wire parser is maintained.
+etherparse = "=0.21.0"
 domain = { version = "=0.12.3", default-features = false, features = ["alloc"] }
 rand_chacha = { version = "=0.9.0", default-features = false }
 rand_core = { version = "=0.9.5", default-features = false }

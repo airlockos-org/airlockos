@@ -203,6 +203,7 @@ version = "0.1.0"
 dependencies = [
  "airlock-qubes-network",
  "domain",
+ "etherparse",
  "internet-checksum",
  "rand_chacha",
  "rand_core",
@@ -1356,6 +1357,15 @@ name = "error-code"
 version = "3.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b5343afd4a8365a643ac588dab4cf234a190c7f6c88c9f6dd6ffe00837661b7"
+
+[[package]]
+name = "etherparse"
+version = "0.21.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "17304d06addb3283cdc4bd528e42dd95e73c8ee2d6492ffce415e93660885449"
+dependencies = [
+ "arrayvec",
+]
 
 [[package]]
 name = "fallible-iterator"
@@ -4949,7 +4959,7 @@ checksum = "213b7324336b53d2414b2db8537e56544d981803139155afa84f76eeebb7a546"
 [[package]]
 name = "xen-transport"
 version = "0.1.0"
-source = "git+https://github.com/airlockos-org/hermit-xen?rev=8a1c1cddfe883b3e4dce81bfd1be17be6a91be23#8a1c1cddfe883b3e4dce81bfd1be17be6a91be23"
+source = "git+https://github.com/airlockos-org/hermit-xen?rev=7a4fada0fbe415822c13812d00ea31db29f9a71b#7a4fada0fbe415822c13812d00ea31db29f9a71b"
 dependencies = [
  "libc",
 ]

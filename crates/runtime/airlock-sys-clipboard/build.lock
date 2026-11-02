@@ -121,6 +121,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 version = "0.2.7"
 
 [[package]]
+checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
+name = "arrayvec"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+version = "0.7.8"
+
+[[package]]
 name = "async-executor"
 source = "git+https://github.com/hermit-os/async-executor.git?branch=v1.14.x#7fd6019c6df4e8040640322bce45e480485820f4"
 version = "1.14.0"
@@ -508,6 +514,12 @@ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 name = "errno"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 version = "0.3.14"
+
+[[package]]
+checksum = "17304d06addb3283cdc4bd528e42dd95e73c8ee2d6492ffce415e93660885449"
+name = "etherparse"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+version = "0.21.0"
 
 [[package]]
 checksum = "5a23add41df1562121a9393cb065eab5146a1242410f23a644851e90cfd669d2"

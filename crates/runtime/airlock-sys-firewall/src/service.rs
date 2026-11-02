@@ -160,7 +160,7 @@ pub fn run(challenge: Challenge, seed: [u8; 32]) -> Result<(), Error> {
         }
         if !announced && control.projection().config().is_some() {
             println!(
-                "AIRLOCK_FIREWALL_EXECUTING scope=ipv4-experiment forwarding=per-client-gated"
+                "AIRLOCK_FIREWALL_EXECUTING scope=dual-stack-experiment forwarding=per-client-gated"
             );
             announced = true;
         }

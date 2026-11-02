@@ -24,7 +24,7 @@ fn main() {
         std::process::exit(1);
     }
     println!(
-        "AIRLOCK_FIREWALL_BUILD source={source} scope=ipv4-experiment",
+        "AIRLOCK_FIREWALL_BUILD source={source} scope=dual-stack-experiment",
         source = option_env!("AIRLOCK_SOURCE_REVISION").unwrap_or("unrecorded")
     );
     if let Err(error) = airlock_sys_firewall::service::run(challenge, seed) {

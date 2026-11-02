@@ -1,16 +1,13 @@
-//! Packet library adapter. All offsets used for mutation come from a checked
-//! fixed IPv4 header and a checked library transport view. Never decode identity.
+//! Family-neutral datagrams interpreted by maintained packet libraries. Native
+//! interface ownership and policy remain separate from every packet claim.
 //!
-//! Dependency contracts: smoltcp new_checked rejects buffers too short for its
-//! getters; IPv4 total_len bounds payload; TCP data offset and UDP length bound
-//! their payload; checksum verification/fill covers the complete private bytes
-//! and supplied pseudo-header. We require software-complete checksums rather
-//! than trusting peer checksum-offload metadata. internet-checksum::update is
-//! RFC 1624 one's-complement replacement of equal-length network-order words.
-//! These codecs do not supply Airlock policy, identity or connection authority.
+//! smoltcp supplies field access and checksums; etherparse supplies bounded IPv6
+//! extension decoding. Their interpretations and standard encoding effects are
+//! explicit dependency contracts in codec. Airlock verifies acceptance, length,
+//! family/protocol compatibility, hop handling and the inputs to those effects.
 
+use airlock_qubes_network::address::Ip;
 use alloc::{vec, vec::Vec};
-
 use vstd::prelude::*;
 use vstd::slice::slice_to_vec;
 
@@ -18,32 +15,29 @@ pub(crate) mod codec;
 
 verus! {
 
-broadcast use { vstd::std_specs::iter::group_iter_axioms, crate::library::byte_array_equality,
-    vstd::std_specs::vec::group_vec_axioms,
-    vstd::std_specs::vecdeque::group_vec_dequeue_axioms,
-    vstd::set::group_set_lemmas, vstd::seq_lib::group_filter_ensures, vstd::seq::group_seq_lemmas, vstd::seq_lib::group_seq_properties,
-    vstd::seq::Seq::lemma_as_ref_index, vstd::slice::group_slice_axioms,
-    vstd::std_specs::btree::group_btree_axioms };
+broadcast use { vstd::seq_lib::group_seq_properties, vstd::seq::Seq::lemma_as_ref_index };
 
-/// Largest private input frame accepted, including Ethernet overhead.
+/// Maximum native Ethernet frame, fitting the existing single-grant transport.
 pub const FRAME_BYTES: usize = 4096;
 
-/// Accepted transport tuple; ICMP uses the identifier as its source port.
+/// Largest ordinary IP datagram; IPv6 jumbograms are outside the bounded profile.
+pub(crate) const DATAGRAM_BYTES: usize = 65_575;
+
+/// An address-family-preserving transport tuple, without interface authority.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Tuple {
-    /// Original or translated IPv4 sender.
-    pub src: [u8; 4],
-    /// Original or translated IPv4 receiver.
-    pub dst: [u8; 4],
-    /// TCP/UDP source port or echo identifier.
+    /// Observed sender, or the exact configured address after translation.
+    pub src: Ip,
+    /// Observed or deliberately redirected recipient in the same family.
+    pub dst: Ip,
+    /// TCP/UDP source port or ICMP echo identifier.
     pub sport: u16,
-    /// TCP/UDP destination port; zero for echo.
+    /// TCP/UDP destination port; zero for ICMP.
     pub dport: u16,
-    /// IANA transport number: TCP 6, UDP 17, ICMP 1.
+    /// IANA protocol: TCP 6, UDP 17, ICMPv4 1 or ICMPv6 58.
     pub proto: u8,
 }
 
-/// Exact structural meaning of Rust's compiler-derived tuple equality.
 #[cfg(verus_keep_ghost)]
 impl vstd::std_specs::cmp::PartialEqSpecImpl for Tuple {
     open spec fn obeys_eq_spec() -> bool { true }
@@ -51,185 +45,179 @@ impl vstd::std_specs::cmp::PartialEqSpecImpl for Tuple {
     open spec fn eq_spec(&self, other: &Self) -> bool { *self == *other }
 }
 
-/// Validated transport control fields needed by connection tracking.
+/// Transport control observations used by the shared connection state machine.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Tcp {
-    /// Initial SYN or SYN retransmission.
+    /// Initial SYN or retransmission.
     pub syn: bool,
-    /// ACK flag, not merely a nonzero acknowledgement field.
+    /// Acknowledgement flag.
     pub ack: bool,
-    /// Stream half-close marker.
+    /// Half-close marker.
     pub fin: bool,
-    /// Connection reset marker.
+    /// Reset marker.
     pub rst: bool,
-    /// Native wrapping TCP sequence number.
+    /// Wrapping sequence number.
     pub seq: u32,
-    /// Native wrapping acknowledgement number.
+    /// Wrapping acknowledgement number.
     pub acknowledge: u32,
-    /// Application payload bytes, excluding header/options.
+    /// Application bytes after the complete TCP header.
     pub payload: usize,
 }
 
-/// One complete unfragmented checked IPv4 datagram with verified checksums.
-pub(crate) struct Packet<'a> {
-    /// Exact IP total-length prefix; Ethernet padding is never forwarded.
-    pub bytes: &'a [u8],
-    /// Checked transport tuple, never an interface selector.
-    pub tuple: Tuple,
-    /// Remaining IPv4 hop limit before this router.
-    pub ttl: u8,
-    /// ICMP type, zero for TCP/UDP.
-    pub icmp: u8,
-    /// Checked TCP flags/sequence fields, default for other transports.
-    pub tcp: Tcp,
-}
-
-/// Abstract meaning of a complete supported/checksummed wire datagram. This is
-/// the packet library's interpretation, not a second grammar or executable
-/// parser. Dependency specifications must connect field/checksum API results to
-/// this meaning before the surrounding production bodies can be called proved.
-/// Components are tuple, TTL, ICMP type, TCP control fields and application data.
-pub(crate) open spec fn decoded(bytes: Seq<u8>) -> Option<(Tuple, u8, u8, Tcp, Seq<u8>)> {
-    if !codec::ipv4_value(bytes).is_some() { None }
-    else {
-        let ip = codec::ipv4_value(bytes).unwrap();
-        if ip.version != 4 || ip.header != 20 || ip.fragments || ip.offset != 0 || !ip.checksum
-            || ip.total < 28 || ip.total > bytes.len() { None }
-        else {
-            let data = bytes.subrange(20, ip.total as int);
-            if ip.protocol == 6 && codec::tcp_value(data, ip.source, ip.destination).is_some() {
-                let tcp = codec::tcp_value(data, ip.source, ip.destination).unwrap();
-                if !tcp.checksum || tcp.source == 0 || tcp.destination == 0 || tcp.header < 20
-                    || tcp.header > data.len() || (tcp.control.syn && (tcp.control.fin || tcp.control.rst)) { None }
-                else { Some((Tuple { src: ip.source, dst: ip.destination, sport: tcp.source, dport: tcp.destination, proto: 6 },
-                    ip.ttl, 0, tcp.control, data.skip(tcp.header as int))) }
-            } else if ip.protocol == 17 && codec::udp_value(data, ip.source, ip.destination).is_some() {
-                let udp = codec::udp_value(data, ip.source, ip.destination).unwrap();
-                if !udp.checksum || udp.source == 0 || udp.destination == 0 || udp.length != data.len() { None }
-                else { Some((Tuple { src: ip.source, dst: ip.destination, sport: udp.source, dport: udp.destination, proto: 17 },
-                    ip.ttl, 0, Tcp::vacant(), data.skip(8))) }
-            } else if ip.protocol == 1 && codec::icmp_value(data).is_some() {
-                let icmp = codec::icmp_value(data).unwrap();
-                if !icmp.checksum || !(((icmp.kind == 0 || icmp.kind == 8) && icmp.code == 0)
-                    || icmp.kind == 3 || icmp.kind == 11 || icmp.kind == 12) { None }
-                else { Some((Tuple { src: ip.source, dst: ip.destination, sport: if icmp.kind == 0 || icmp.kind == 8 { icmp.identifier } else { 0 }, dport: 0, proto: 1 },
-                    ip.ttl, icmp.kind, Tcp::vacant(), data.skip(8))) }
-            } else { None }
-        }
-    }
-}
-
 impl Tcp {
-    /// No TCP control metadata accompanies another transport.
+    /// No TCP metadata belongs to UDP or ICMP.
     pub(crate) open spec fn vacant() -> Self {
         Self { syn: false, ack: false, fin: false, rst: false, seq: 0, acknowledge: 0, payload: 0 }
     }
 
-    /// Construct the empty metadata used for UDP and ICMP observations.
-    pub(crate) fn empty() -> (tcp: Self)
-        ensures tcp == Self::vacant(),
-    { Self { syn: false, ack: false, fin: false, rst: false, seq: 0, acknowledge: 0, payload: 0 } }
+
 }
 
 impl Tuple {
-    /// The experiment implements only port-bearing TCP/UDP and echo tuples.
+    /// Same-family supported transport, with nonzero TCP/UDP ports.
     pub(crate) open spec fn valid(&self) -> bool {
-        (self.proto == 6 || self.proto == 17) && self.sport > 0 && self.dport > 0
-            || self.proto == 1 && self.dport == 0
+        self.src.valid() && self.dst.valid() && self.src.family() == self.dst.family()
+            && ((self.proto == 6 || self.proto == 17) && self.sport > 0 && self.dport > 0
+                || self.dport == 0 && ((self.proto == 1 && self.src.family() == 4)
+                    || (self.proto == 58 && self.src.family() == 6)))
+    }
+
+    /// Protocol identity independent of an echo message's request/reply number.
+    pub(crate) open spec fn is_icmp(&self) -> bool { self.proto == 1 || self.proto == 58 }
+
+    /// Request type belonging to this tuple's address family.
+    pub(crate) open spec fn request_kind(&self) -> u8 { if self.proto == 58 { 128 } else { 8 } }
+
+    /// Reply type belonging to this tuple's address family.
+    pub(crate) open spec fn reply_kind(&self) -> u8 { if self.proto == 58 { 129 } else { 0 } }
+
+    /// Both ICMP families use the shared echo/related-flow rules.
+    #[verifier::when_used_as_spec(is_icmp)]
+    pub(crate) fn icmp(&self) -> (icmp: bool)
+        ensures icmp == (self.proto == 1 || self.proto == 58),
+    { self.proto == 1 || self.proto == 58 }
+
+    /// Echo request number belonging to this tuple's family.
+    #[verifier::when_used_as_spec(request_kind)]
+    pub(crate) fn request(&self) -> (kind: u8)
+        ensures kind == if self.proto == 58 { 128u8 } else { 8u8 },
+    { if self.proto == 58 { 128 } else { 8 } }
+
+    /// Echo reply number belonging to this tuple's family.
+    #[verifier::when_used_as_spec(reply_kind)]
+    pub(crate) fn reply(&self) -> (kind: u8)
+        ensures kind == if self.proto == 58 { 129u8 } else { 0u8 },
+    { if self.proto == 58 { 129 } else { 0 } }
+}
+
+/// Complete private datagram after any bounded fragment reassembly.
+pub(crate) struct Packet<'a> {
+    /// Exact IP-length prefix, without Ethernet padding.
+    pub bytes: &'a [u8],
+    /// Checked transport observation; never an interface selector.
+    pub tuple: Tuple,
+    /// Remaining TTL/hop limit before forwarding.
+    pub ttl: u8,
+    /// ICMP type, zero for TCP/UDP.
+    pub icmp: u8,
+    /// Checked TCP control fields, neutral for other protocols.
+    pub tcp: Tcp,
+    /// Start of the transport header after library-decoded extension headers.
+    pub transport: usize,
+}
+
+/// Explicit acceptance conditions around the library's private packet snapshot.
+pub(crate) open spec fn acceptable(data: codec::Datagram) -> bool {
+    data.tuple.valid() && data.header_checksum && data.checksum && !data.fragmented
+        && data.fragment_headers <= 1 && data.extensions <= 8 && !data.routing && !data.authenticated
+        && (forall|i: int| 0 <= i < data.options@.len() ==> data.options@[i] < 64)
+        && ((data.tuple.src.family() == 4 && data.header == 20)
+            || (data.tuple.src.family() == 6 && 40 <= data.header <= 256))
+        && data.header + 8 <= data.total <= DATAGRAM_BYTES
+        && (data.tuple.proto == 17 ==> data.udp_length == data.total - data.header && (data.tuple.src.family() == 6 ==> data.udp_checksum != 0))
+        && (data.tuple.proto == 6 ==> data.header + 20 <= data.total
+            && !(data.tcp.syn && (data.tcp.fin || data.tcp.rst)))
+        && ((data.tuple.proto == 1 || data.tuple.proto == 58) ==>
+            match data.tuple.proto {
+                1 => (data.kind == 0 || data.kind == 8) && data.code == 0
+                    || data.kind == 3 || data.kind == 11 || data.kind == 12,
+                _ => (data.kind == 128 || data.kind == 129 || data.kind == 135 || data.kind == 136) && data.code == 0
+                    || 1 <= data.kind <= 4,
+            })
+}
+
+/// Meaning of a supported complete datagram, parameterized by the library snapshot.
+pub(crate) open spec fn decoded(bytes: Seq<u8>) -> Option<codec::Datagram> {
+    if bytes.len() > DATAGRAM_BYTES { None } else {
+        match codec::datagram_value(bytes) {
+            Some(data) if acceptable(data) => Some(data),
+            _ => None,
+        }
     }
 }
 
 impl<'a> Packet<'a> {
-    /// Checked datagram shape retained across normalized policy decisions.
+    /// The exact retained bytes and fields describe one accepted library snapshot.
     pub(crate) open spec fn valid(&self) -> bool {
-        28 <= self.bytes@.len() <= FRAME_BYTES - 14 && self.tuple.valid()
-            && codec::ipv4_value(self.bytes@).is_some() && codec::ipv4_value(self.bytes@).unwrap().total == self.bytes@.len()
-            && (self.tuple.proto == 6 ==> self.bytes@.len() >= 40)
-            && decoded(self.bytes@).is_some()
-            && decoded(self.bytes@).unwrap().0 == self.tuple
-            && decoded(self.bytes@).unwrap().1 == self.ttl
-            && decoded(self.bytes@).unwrap().2 == self.icmp
-            && decoded(self.bytes@).unwrap().3 == self.tcp
+        self.tuple.valid() && 20 <= self.transport <= 256 && self.transport + 8 <= self.bytes@.len() <= DATAGRAM_BYTES
+            && decoded(self.bytes@).is_some() && decoded(self.bytes@).unwrap().tuple == self.tuple
+            && decoded(self.bytes@).unwrap().total == self.bytes@.len()
+            && decoded(self.bytes@).unwrap().hop == self.ttl
+            && decoded(self.bytes@).unwrap().kind == self.icmp
+            && decoded(self.bytes@).unwrap().tcp == self.tcp
+            && decoded(self.bytes@).unwrap().header == self.transport
     }
 
-    /// Decode complete datagrams; unsupported headers/fragments never reach policy.
+    /// Validate supported protocol/family, extension bounds and checksums.
     pub(crate) fn parse(bytes: &'a [u8]) -> (packet: Option<Self>)
-        ensures packet.is_some() == (bytes@.len() <= FRAME_BYTES - 14 && decoded(bytes@).is_some()),
-            packet.is_some() ==> packet.unwrap().valid()
-            && packet.unwrap().bytes@ == bytes@.take(packet.unwrap().bytes@.len() as int),
+        ensures packet.is_some() == decoded(bytes@).is_some(),
+            packet.is_some() ==> packet.unwrap().valid(),
     {
-        if bytes.len() > FRAME_BYTES - 14 { return None; }
-        let ghost original = bytes@;
-        let ip = codec::ipv4(bytes)?;
-        if ip.version != 4 || ip.header != 20 || ip.fragments || ip.offset != 0 || !ip.checksum { return None; }
-        let bytes = &bytes[..usize::from(ip.total)];
-        let data = &bytes[20..];
-        proof {
-            assert(bytes@.subrange(20, ip.total as int) =~= original.subrange(20, ip.total as int));
-            assert(decoded(bytes@) == decoded(original));
-        }
-        let mut tuple = Tuple { src: ip.source, dst: ip.destination, sport: 0, dport: 0, proto: ip.protocol };
-        let mut tcp = Tcp::empty();
-        let mut icmp = 0;
-        match ip.protocol {
-            6 => {
-                let p = codec::tcp(data, ip.source, ip.destination)?;
-                if p.header < 20 || !p.checksum || p.source == 0 || p.destination == 0 || (p.control.syn && (p.control.fin || p.control.rst)) { return None; }
-                tuple.sport = p.source; tuple.dport = p.destination; tcp = p.control;
+        if bytes.len() > DATAGRAM_BYTES { return None; }
+        let data = codec::datagram(bytes)?;
+        if data.tuple.src.version() != data.tuple.dst.version() { return None; }
+        if !data.header_checksum || !data.checksum || data.fragmented || data.fragment_headers > 1 || data.extensions > 8 || data.routing || data.authenticated { return None; }
+        if data.options.iter().any(|kind: &u8| -> (reject: bool) ensures reject == (*kind >= 64), { *kind >= 64 }) { return None; }
+        let family = data.tuple.src.version();
+        if (family == 4 && data.header != 20) || (family == 6 && (data.header < 40 || data.header > 256)) { return None; }
+        if data.header + 8 > data.total { return None; }
+        if data.tuple.proto == 17 && (data.udp_length != data.total - data.header || family == 6 && data.udp_checksum == 0) { return None; }
+        match data.tuple.proto {
+            6 | 17 => { if data.tuple.sport == 0 || data.tuple.dport == 0 { return None; } }
+            1 if family == 4 => {
+                if !(((data.kind == 0 || data.kind == 8) && data.code == 0) || matches!(data.kind, 3 | 11 | 12)) { return None; }
             }
-            17 => {
-                let p = codec::udp(data, ip.source, ip.destination)?;
-                if usize::from(p.length) != data.len() || !p.checksum || p.source == 0 || p.destination == 0 { return None; }
-                tuple.sport = p.source; tuple.dport = p.destination;
-            }
-            1 => {
-                let p = codec::icmp(data)?;
-                if !p.checksum { return None; }
-                icmp = p.kind;
-                match p.kind {
-                    0 | 8 => { if p.code != 0 { return None; } tuple.sport = p.identifier; },
-                    3 | 11 | 12 => (),
-                    _ => return None,
-                }
+            58 if family == 6 => {
+                if !((matches!(data.kind, 128 | 129 | 135 | 136) && data.code == 0) || (1..=4).contains(&data.kind)) { return None; }
             }
             _ => return None,
         }
-        Some(Self { bytes, tuple, ttl: ip.ttl, icmp, tcp })
+        if data.tuple.proto == 6 && (data.header + 20 > data.total || data.tcp.syn && (data.tcp.fin || data.tcp.rst)) { return None; }
+        proof { assert(acceptable(data)); }
+        let bytes = &bytes[..data.total];
+        Some(Self { bytes, tuple: data.tuple, ttl: data.hop, icmp: data.kind, tcp: data.tcp, transport: data.header })
     }
 
-    /// NAT a validated datagram and decrement its TTL exactly once.
+    /// Rewrite one accepted same-family packet and decrement its hop count once.
     pub(crate) fn translate(&self, tuple: Tuple) -> (bytes: Option<Vec<u8>>)
         requires self.valid(), tuple.valid(), tuple.proto == self.tuple.proto,
-            tuple.proto == 1 ==> self.icmp == 0 || self.icmp == 8,
+            tuple.src.family() == self.tuple.src.family(),
+            tuple.proto == 1 || tuple.proto == 58 ==> self.icmp == if tuple.proto == 1 { 0u8 } else { 129u8 }
+                || self.icmp == if tuple.proto == 1 { 8u8 } else { 128u8 },
         ensures bytes.is_some() == (self.ttl > 1),
-            bytes.is_some() ==> bytes.unwrap()@.len() == self.bytes@.len()
-                && decoded(bytes.unwrap()@).is_some()
-                && decoded(bytes.unwrap()@).unwrap().0 == tuple
-                && decoded(bytes.unwrap()@).unwrap().1 == self.ttl - 1
-                && decoded(bytes.unwrap()@).unwrap().2 == self.icmp
-                && decoded(bytes.unwrap()@).unwrap().3 == self.tcp
-                && decoded(bytes.unwrap()@).unwrap().4 == decoded(self.bytes@).unwrap().4,
+            bytes.is_some() ==> decoded(bytes.unwrap()@).is_some()
+                && decoded(bytes.unwrap()@).unwrap().tuple == tuple
+                && decoded(bytes.unwrap()@).unwrap().hop == self.ttl - 1
+                && bytes.unwrap()@.len() == self.bytes@.len(),
     {
         if self.ttl <= 1 { return None; }
         let mut bytes = slice_to_vec(self.bytes);
-        let ghost initial = bytes@;
-        proof {
-            assert(self.bytes@.subrange(20, self.bytes@.len() as int) == self.bytes@.skip(20));
-        }
-        match tuple.proto {
-            6 => codec::tcp_ports(&mut bytes.as_mut_slice()[20..], self.tuple, tuple),
-            17 => codec::udp_ports(&mut bytes.as_mut_slice()[20..], self.tuple, tuple),
-            1 => codec::echo_identifier(&mut bytes.as_mut_slice()[20..], tuple.sport),
-            _ => return None,
-        }
-        proof { codec::fixed_header(initial, bytes@); }
-        codec::route_header(bytes.as_mut_slice(), tuple.src, tuple.dst, self.ttl - 1);
+        codec::rewrite(bytes.as_mut_slice(), self.tuple, tuple, self.ttl - 1);
         Some(bytes)
     }
 }
 
-/// Return a checked Ethernet envelope; multicast/broadcast eligibility is
-/// decided by ARP handling rather than accepted as an IPv4 routing shortcut.
+/// Ethernet interpretation stays in smoltcp and never supplies client authority.
 pub(crate) fn ethernet(bytes: &[u8]) -> (frame: Option<codec::Ethernet>)
     ensures frame.is_some() ==> 14 <= bytes@.len() <= FRAME_BYTES,
 {
@@ -237,7 +225,7 @@ pub(crate) fn ethernet(bytes: &[u8]) -> (frame: Option<codec::Ethernet>)
     codec::ethernet(bytes)
 }
 
-/// Wrap one bounded datagram in exactly the supplied native Ethernet fields.
+/// Emit only frames that fit the configured link MTU.
 pub(crate) fn frame(src: [u8; 6], dst: [u8; 6], protocol: u16, payload: &[u8]) -> (frame: Option<Vec<u8>>)
     ensures frame.is_some() == (payload@.len() <= crate::MTU),
         frame.is_some() ==> frame.unwrap()@.len() == 14 + payload@.len() <= crate::MTU + 14,
@@ -248,7 +236,7 @@ pub(crate) fn frame(src: [u8; 6], dst: [u8; 6], protocol: u16, payload: &[u8]) -
     Some(bytes)
 }
 
-/// Emit one bounded native IPv4 envelope around an already emitted transport.
+/// Existing IPv4 resolver/ARP traffic retains the same library encoding path.
 pub(crate) fn ipv4(src: [u8; 4], dst: [u8; 4], proto: u8, payload: &[u8], ttl: u8) -> (packet: Option<Vec<u8>>)
     ensures packet.is_some() == (payload@.len() <= crate::MTU - 20 && ttl > 0),
         packet.is_some() ==> packet.unwrap()@.len() == 20 + payload@.len() <= crate::MTU,
@@ -259,90 +247,179 @@ pub(crate) fn ipv4(src: [u8; 4], dst: [u8; 4], proto: u8, payload: &[u8], ttl: u
     Some(bytes)
 }
 
-/// Emit a bounded router error, quoting only IPv4 plus eight transport bytes.
-pub(crate) fn error(packet: &Packet<'_>, router: [u8; 4], kind: u8, code: u8) -> (error: Option<Vec<u8>>)
-    requires packet.valid(),
-    ensures error.is_some() ==> error.unwrap()@.len() <= 56,
+/// Emit a same-family native IP envelope, excluding IPv6 jumbograms.
+pub(crate) fn ip(src: Ip, dst: Ip, proto: u8, payload: &[u8], hop: u8) -> (packet: Option<Vec<u8>>)
+    requires src.valid(), dst.valid(), src.family() == dst.family(),
+    ensures packet.is_some() ==> packet.unwrap()@.len() <= crate::MTU,
+{ envelope(src, dst, proto, payload, hop, crate::MTU) }
+
+/// Build an owned IP envelope within the caller's explicit ordinary-IP budget.
+/// Large envelopes are used only for replies to already reassembled IPv6 input.
+fn envelope(src: Ip, dst: Ip, proto: u8, payload: &[u8], hop: u8, limit: usize) -> (packet: Option<Vec<u8>>)
+    requires src.valid(), dst.valid(), src.family() == dst.family(), limit <= DATAGRAM_BYTES,
+    ensures packet.is_some() ==> packet.unwrap()@.len() <= limit,
 {
-    if !unicast(packet.tuple.src) || !unicast(packet.tuple.dst)
-        || (packet.tuple.proto == 1 && packet.icmp != 8) { return None; }
-    let quote = &packet.bytes[..packet.bytes.len().min(28)];
-    let mut payload = vec![0; 8 + quote.len()];
-    payload.as_mut_slice()[8..].copy_from_slice(quote);
-    if kind == 3 && code == 4 {
-        payload.as_mut_slice()[6..8].copy_from_slice(&codec::word_bytes(crate::MTU as u16));
-    }
-    codec::emit_icmp(payload.as_mut_slice(), kind, code);
-    ipv4(router, packet.tuple.src, 1, &payload, 64)
+    let header = if src.version() == 4 { 20usize } else { 40usize };
+    let maximum = if src.version() == 4 { 65_515usize } else { 65_535usize };
+    if hop == 0 || limit < header || payload.len() > maximum || payload.len() > limit - header { return None; }
+    let mut bytes = vec![0; header + payload.len()];
+    codec::emit_ip(bytes.as_mut_slice(), src, dst, proto, payload, hop);
+    Some(bytes)
 }
 
-/// Public IPv4 unicast shape; local/client/address-subnet exclusions are policy.
-pub(crate) fn unicast(ip: [u8; 4]) -> bool {
-    ip[0] != 0 && ip[0] != 127 && ip[0] < 224 && ip != [255; 4]
+/// Answer an admitted local echo request, retaining its identifier and payload.
+/// The caller can reserve a larger response only for originally fragmented IPv6.
+pub(crate) fn echo_reply(packet: &Packet<'_>, limit: usize) -> (reply: Option<Vec<u8>>)
+    requires packet.valid(), packet.tuple.is_icmp(), packet.icmp == packet.tuple.request_kind(), limit <= DATAGRAM_BYTES,
+    ensures reply.is_some() ==> reply.unwrap()@.len() <= limit,
+{
+    let mut payload = slice_to_vec(&packet.bytes[packet.transport..]);
+    if !codec::emit_icmp(payload.as_mut_slice(), packet.tuple.dst, packet.tuple.src, packet.tuple.reply(), 0, None) { return None; }
+    envelope(packet.tuple.dst, packet.tuple.src, packet.tuple.proto, &payload, 64, limit)
 }
 
-/// Validate a link sender; an Ethernet address never authorizes an IP source.
+/// Scoped address eligibility comes from the standard library, without another address parser.
+pub(crate) fn unicast(ip: Ip) -> bool
+    requires ip.valid(),
+{ codec::unicast(ip) }
+
+/// Validate a link sender; MAC data still cannot authorize an IP source.
 pub(crate) fn mac_unicast(mac: [u8; 6]) -> bool { mac != [0; 6] && mac[0] & 1 == 0 }
 
-/// Read an error's truncated original header without requiring the missing
-/// payload. The library header validator is supplied a private zero-extended
-/// buffer; only the received 28-byte prefix may be used as related evidence.
-pub(crate) fn quote(bytes: &[u8]) -> (quote: Option<(Tuple, Vec<u8>)>)
-    ensures quote.is_some() ==> 28 <= quote.unwrap().1@.len() <= crate::MTU
-        && quote.unwrap().1@ == bytes@ && codec::quoted_header_value(bytes@).is_some()
-        && codec::quoted_header_value(bytes@).unwrap().header == 20
-        && (quote.unwrap().0.proto == 1 || quote.unwrap().0.proto == 6 || quote.unwrap().0.proto == 17),
+/// Generate only bounded, checksum-complete same-family router errors.
+pub(crate) fn error(packet: &Packet<'_>, router: Ip, kind: u8, code: u8) -> Option<Vec<u8>>
+    requires packet.valid(), router.valid(), router.family() == packet.tuple.src.family(),
 {
-    if bytes.len() < 28 || bytes.len() > crate::MTU { return None; }
-    let ip = codec::quoted_header(bytes)?;
-    if ip.version != 4 || ip.header != 20 || ip.total < 28 || usize::from(ip.total) < bytes.len()
-        || ip.fragments || ip.offset != 0 || !ip.checksum { return None; }
-    let proto = ip.protocol;
-    let mut tuple = Tuple { src: ip.source, dst: ip.destination, sport: 0, dport: 0, proto };
-    match proto {
-        6 | 17 => { let ports = codec::quote_ports(&bytes[20..], proto); tuple.sport = ports.0; tuple.dport = ports.1; }
-        1 => {
-            let icmp = codec::icmp(&bytes[20..])?;
-            if !matches!(icmp.kind, 0 | 8) || icmp.code != 0 { return None; }
-            tuple.sport = icmp.identifier;
-        }
+    if !unicast(packet.tuple.src) || !unicast(packet.tuple.dst)
+        || (packet.tuple.icmp() && packet.icmp != packet.tuple.request()) { return None; }
+    let length = if router.version() == 6 { packet.bytes.len().min(1232) }
+        else { packet.transport + 8 };
+    let size = 8 + length;
+    let mut payload: Vec<u8> = Vec::with_capacity(size);
+    payload.extend_from_slice(&[0u8; 8]);
+    payload.extend_from_slice(&packet.bytes[..length]);
+    let too_big = router.version() == 6 && kind == 2 || router.version() == 4 && kind == 3 && code == 4;
+    let mtu = if too_big { Some(crate::MTU as u32) } else { None };
+    if !codec::emit_icmp(payload.as_mut_slice(), router, packet.tuple.src, kind, code, mtu) { return None; }
+    let protocol = if router.version() == 6 { 58u8 } else { 1u8 };
+    ip(router, packet.tuple.src, protocol, &payload, 64)
+}
+
+/// Decode a truncated ICMP quote using the libraries' header-only views.
+pub(crate) fn quote(bytes: &[u8]) -> (quote: Option<(Tuple, Vec<u8>)>)
+    ensures quote.is_some() ==> quote.unwrap().0.valid() && quote.unwrap().1@.len() <= crate::MTU,
+{
+    if bytes.len() > crate::MTU { return None; }
+    let header = codec::quote_header(bytes)?;
+    if (header.fragmented && header.fragment_offset != 0) || header.fragment_headers > 1 || header.routing || header.authenticated || header.extensions > 8
+        || !header.header_checksum || header.header + 8 > bytes.len()
+        || header.total < header.header + 8
+        || header.tuple.src.version() != header.tuple.dst.version()
+        || header.options.iter().any(|kind: &u8| -> (reject: bool) ensures reject == (*kind >= 64), { *kind >= 64 }) { return None; }
+    let tuple = header.tuple;
+    match tuple.proto {
+        6 | 17 => if tuple.sport == 0 || tuple.dport == 0 || tuple.proto == 17 && tuple.src.version() == 6 && header.udp_checksum == 0 { return None; },
+        1 if tuple.src.version() == 4 => if header.code != 0 || !matches!(header.kind, 0 | 8) { return None; },
+        58 if tuple.src.version() == 6 => if header.code != 0 || !matches!(header.kind, 128 | 129) { return None; },
         _ => return None,
     }
     Some((tuple, slice_to_vec(bytes)))
 }
 
-/// Undo NAT inside an ICMP quote. RFC 1624 updates come from the checksum crate;
-/// truncated TCP checksums are touched only when their field is actually quoted.
-pub(crate) fn untranslate_quote(mut bytes: Vec<u8>, old: Tuple, new: Tuple) -> (quote: Option<Vec<u8>>)
-    requires 28 <= bytes@.len() <= crate::MTU, codec::quoted_header_value(bytes@).is_some(),
-        codec::quoted_header_value(bytes@).unwrap().header == 20,
-        old.proto == 1 || old.proto == 6 || old.proto == 17, new.proto == old.proto,
+/// Incrementally repair only actually quoted checksums and fields.
+pub(crate) fn untranslate_quote(bytes: Vec<u8>, original: Tuple, new: Tuple) -> (quote: Option<Vec<u8>>)
+    requires original.valid(), new.valid(), original.proto == new.proto, original.src.family() == new.src.family(),
     ensures quote.is_some() ==> quote.unwrap()@.len() == bytes@.len(),
 {
-    if bytes.len() < 28 { return None; }
-    let ghost initial = bytes@;
-    let checksum_offset = match old.proto { 17 => Some(26), 6 if bytes.len() >= 38 => Some(36), 1 => Some(22), _ => None };
-    if let Some(offset) = checksum_offset {
-        let mut current = [0; 2];
-        current.copy_from_slice(&bytes[offset..offset+2]);
-        if old.proto != 17 || current != [0; 2] {
-            let mut checksum = current;
-            if old.proto != 1 {
-                checksum = internet_checksum::update(checksum, &old.src, &new.src);
-                checksum = internet_checksum::update(checksum, &old.dst, &new.dst);
-                checksum = internet_checksum::update(checksum, &codec::word_bytes(old.dport), &codec::word_bytes(new.dport));
+    let mut bytes = bytes;
+    let header = codec::quote_header(&bytes)?;
+    let start = header.header;
+    if header.tuple != original || start + 8 > bytes.len() { return None; }
+    let offset = match original.proto {
+        17 => Some(start + 6),
+        6 if bytes.len() >= start + 18 => Some(start + 16),
+        1 | 58 => Some(start + 2),
+        _ => None,
+    };
+    if let Some(offset) = offset {
+        // An omitted IPv4 UDP checksum stays omitted. IPv6 zero checksums were
+        // rejected before flow admission and cannot identify an emitted packet.
+        if original.proto != 17 || bytes[offset] != 0 || bytes[offset + 1] != 0 {
+            if original.proto != 1 {
+                codec::quote_address_checksum(bytes.as_mut_slice(), offset, original.src, new.src);
+                codec::quote_address_checksum(bytes.as_mut_slice(), offset, original.dst, new.dst);
+                if original.proto != 58 { codec::quote_word_checksum(bytes.as_mut_slice(), offset, original.dport, new.dport); }
             }
-            checksum = internet_checksum::update(checksum, &codec::word_bytes(old.sport), &codec::word_bytes(new.sport));
-            if old.proto == 17 && checksum == [0; 2] { checksum = [255; 2]; }
-            bytes.as_mut_slice()[offset..offset+2].copy_from_slice(&checksum);
+            codec::quote_word_checksum(bytes.as_mut_slice(), offset, original.sport, new.sport);
+            if original.proto == 17 && bytes[offset] == 0 && bytes[offset + 1] == 0 {
+                bytes[offset] = 255; bytes[offset + 1] = 255;
+            }
         }
     }
-    proof { assert(bytes@.take(20) =~= initial.take(20)); }
-    if old.proto == 1 { bytes.as_mut_slice()[24..26].copy_from_slice(&codec::word_bytes(new.sport)); }
-    else { bytes.as_mut_slice()[20..22].copy_from_slice(&codec::word_bytes(new.sport)); bytes.as_mut_slice()[22..24].copy_from_slice(&codec::word_bytes(new.dport)); }
-    proof { assert(bytes@.take(20) =~= initial.take(20)); codec::fixed_quote_header(initial, bytes@); }
-    codec::quoted_addresses(bytes.as_mut_slice(), new.src, new.dst);
+    codec::quote_ports(bytes.as_mut_slice(), start, new);
+    if !codec::quote_addresses(bytes.as_mut_slice(), new.src, new.dst) { return None; }
     Some(bytes)
+}
+
+/// Only protocol-defined error messages can consult existing related flows.
+pub(crate) fn is_error(protocol: u8, kind: u8) -> bool {
+    protocol == 1 && matches!(kind, 3 | 11 | 12) || protocol == 58 && (1..=4).contains(&kind)
+}
+
+/// Family-correct Time Exceeded or Packet Too Big/fragmentation-needed response.
+pub(crate) fn failure(family: u8, expired: bool) -> (u8, u8) {
+    if family == 6 { if expired { (3, 0) } else { (2, 0) } }
+    else if expired { (11, 0) } else { (3, 4) }
+}
+
+/// Match the actual quoted echo type without inventing a complete transport header.
+pub(crate) fn quoted_echo(bytes: &[u8], kind: u8) -> bool {
+    let Some(header) = codec::quote_header(bytes) else { return false; };
+    if header.header + 8 > bytes.len() { return false; }
+    codec::echo_kind(&bytes[header.header..], header.tuple.src.version()) == Some(kind)
+}
+
+/// Emit a router-owned neighbor solicitation to only the target's multicast group.
+pub(crate) fn solicit(mac: [u8; 6], source: Ip, target: Ip) -> (output: Option<Vec<u8>>)
+    requires source.valid(), target.valid(), source.family() == 6, target.family() == 6,
+    ensures output.is_some() ==> 14 <= output.unwrap()@.len() <= crate::MTU + 14,
+{
+    let (destination, hardware) = solicited_node(target);
+    let payload = codec::emit_ndp(mac, source, destination, target, false, false)?;
+    let bytes = ip(source, destination, 58, &payload, 255)?;
+    frame(mac, hardware, 0x86dd, &bytes)
+}
+
+/// RFC 4291's fixed solicited-node mapping. smoltcp's corresponding address
+/// helper is crate-private; this transformation supplies only the missing API.
+fn solicited_node(target: Ip) -> (group: (Ip, [u8; 6]))
+    requires target.valid(), target.family() == 6,
+    ensures group.0.valid(), group.0.family() == 6,
+{
+    let words = target.ipv6().unwrap();
+    let low = words[6] & 255;
+    let destination = Ip::from_ipv6([0xff02, 0, 0, 0, 0, 1, 0xff00 | low, words[7]]);
+    (destination, [0x33, 0x33, 0xff, low as u8, (words[7] >> 8) as u8, words[7] as u8])
+}
+
+/// Compare the complete solicited-node destination, never only a suffix.
+pub(crate) fn solicited_for(destination: Ip, target: Ip) -> bool
+    requires destination.valid(), target.valid(), target.family() == 6,
+{ destination == solicited_node(target).0 }
+
+/// Check the corresponding multicast Ethernet destination on this link.
+pub(crate) fn solicited_mac(destination: [u8; 6], target: Ip) -> bool
+    requires target.valid(), target.family() == 6,
+{ destination == solicited_node(target).1 }
+
+/// Emit a solicited unicast advertisement for the caller's own configured address.
+pub(crate) fn advertise(mac: [u8; 6], recipient: [u8; 6], source: Ip, destination: Ip, router: bool) -> (output: Option<Vec<u8>>)
+    requires source.valid(), destination.valid(), source.family() == 6, destination.family() == 6,
+    ensures output.is_some() ==> 14 <= output.unwrap()@.len() <= crate::MTU + 14,
+{
+    let payload = codec::emit_ndp(mac, source, destination, source, true, router)?;
+    let bytes = ip(source, destination, 58, &payload, 255)?;
+    frame(mac, recipient, 0x86dd, &bytes)
 }
 
 }

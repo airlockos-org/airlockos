@@ -1,13 +1,15 @@
 //! One bounded upstream resolver, independent of client-created NAT mappings.
 //! Positive results are tied to the exact complete policy revision. A failed,
-//! truncated, oversized or incomplete answer leaves the entire source blocked.
+//! oversized or incomplete answer leaves the entire source blocked. Truncated
+//! UDP answers use the maintained TCP endpoint before publishing any policy.
 //!
 //! Dependency contracts: domain parses complete DNS sections, rejects invalid
 //! name lengths/pointer loops, compares names without case, and emits canonical
 //! uncompressed names/messages within DNS wire bounds. Only checked IN-class A,
 //! AAAA and CNAME records from the answer section populate policy. DNS server
 //! authenticity is the existing configured upstream network's assumption; DNSSEC
-//! is not claimed. UDP truncation has no TCP fallback in this IPv4 experiment.
+//! is not claimed. A matched truncated response starts one bounded smoltcp TCP
+//! exchange; addresses remain unpublished until its complete DNS reply validates.
 //! Cache/query/alias/TTL and exact pending-policy checks are Airlock decisions.
 
 use crate::wire::codec as packet_codec;
@@ -17,7 +19,7 @@ use airlock_qubes_network::{
     projection::View,
     resolution::{NameAnswers, Resolved},
 };
-use alloc::{collections::VecDeque, vec, vec::Vec};
+use alloc::{boxed::Box, collections::VecDeque, vec, vec::Vec};
 use rand_core::RngCore;
 
 use vstd::prelude::*;
@@ -26,6 +28,7 @@ use vstd::slice::slice_to_vec;
 use vstd::view::View as ValueView;
 
 mod codec;
+mod tcp;
 
 verus! {
 
@@ -70,6 +73,42 @@ impl Entry {
     pub(crate) open spec fn key(&self) -> ([u8; 4], Seq<u8>, u8) { (self.server, self.name@, self.family) }
 }
 
+/// Largest retained DNS TCP message, excluding its two-byte length prefix.
+/// Record/name limits still apply independently after domain decodes the message.
+pub(crate) const TCP_BYTES: usize = 16_384;
+
+/// One bounded DNS stream exchange, using smoltcp for transport state.
+pub(crate) struct Stream {
+    /// Actual maintained TCP endpoint, without native send authority.
+    connection: Box<tcp::Connection>,
+    /// One complete length-prefixed question.
+    query: Vec<u8>,
+    /// Question bytes already accepted by the TCP endpoint.
+    sent: usize,
+    /// Ordered response prefix; never larger than the fixed DNS message budget.
+    received: Vec<u8>,
+}
+
+/// The single request's legal transport states; fallback occurs at most once.
+pub(crate) enum Transport {
+    /// Initial UDP query, with no stream resources allocated.
+    Datagram,
+    /// A matched truncated answer caused one bounded TCP exchange.
+    Stream(/// Original endpoint and ordered query/response progress.
+        Stream),
+}
+
+impl Transport {
+    /// Each state retains at most one question and one bounded response.
+    pub(crate) closed spec fn valid(&self) -> bool {
+        match self {
+            Self::Datagram => true,
+            Self::Stream(stream) => 2 <= stream.query@.len() <= 273
+                && stream.sent <= stream.query@.len() && stream.received@.len() <= TCP_BYTES + 2,
+        }
+    }
+}
+
 /// Exactly one outstanding request, with independent port and transaction ID.
 pub(crate) struct Pending {
     /// Captured policy revision; any mutation cancels this completion.
@@ -82,22 +121,26 @@ pub(crate) struct Pending {
     pub(crate) server: [u8; 4],
     /// Masquerade address captured before emitting the request.
     pub(crate) local: [u8; 4],
-    /// Dynamic UDP port disjoint from client NAT leases.
+    /// Dynamic UDP/TCP port disjoint from client NAT leases.
     pub(crate) port: u16,
     /// Independent DNS transaction identifier.
     pub(crate) transaction: u16,
-    /// Absolute request expiry; responses never extend it.
+    /// Independent seed for the maintained TCP endpoint's sequence allocator.
+    pub(crate) seed: u64,
+    /// Explicit UDP or single-fallback TCP state.
+    pub(crate) transport: Transport,
+    /// Absolute request expiry; TCP fallback gets one separately bounded period.
     pub(crate) deadline: u64,
 }
 
 impl Pending {
     /// One original policy and bounded question in the resolver-only namespace.
     pub(crate) open spec fn valid(&self) -> bool {
-        self.source.valid() && self.revision > 0 && 0 < self.name@.len() <= 255 && 32768 <= self.port < 49152
+        self.source.valid() && self.revision > 0 && 0 < self.name@.len() <= 255 && 32768 <= self.port < 49152 && self.transport.valid()
     }
 }
 
-/// Resolver work and cache; no sockets, timers or VM effects are owned here.
+/// Resolver cache and one explicit UDP/TCP exchange, without VM effects.
 pub(crate) struct Resolver {
     /// FIFO eviction avoids unbounded access timestamps or a custom cache.
     pub(crate) cache: VecDeque<Entry>,
@@ -124,8 +167,11 @@ impl Resolver {
 
     /// Whether a datagram belongs to the original outstanding resolver endpoint.
     pub(crate) open spec fn expecting(&self, tuple: wire::Tuple) -> bool {
-        self.pending.is_some() && tuple.proto == 17 && tuple.dst == self.pending.unwrap().local
-            && tuple.src == self.pending.unwrap().server && tuple.dport == self.pending.unwrap().port && tuple.sport == 53
+        self.pending.is_some()
+            && (tuple.proto == 17 && self.pending.unwrap().transport is Datagram
+                || tuple.proto == 6 && self.pending.unwrap().transport is Stream)
+            && tuple.dst == Ip::v4_value(self.pending.unwrap().local)
+            && tuple.src == Ip::v4_value(self.pending.unwrap().server) && tuple.dport == self.pending.unwrap().port && tuple.sport == 53
     }
 
     /// Begin without cached policy data or query authorization.
@@ -149,7 +195,10 @@ impl Resolver {
                 let Some(pending) = self.pending.take() else { return (None, None); };
                 self.insert(Entry { server: pending.server, name: pending.name, family: pending.source.version(),
                     addresses: Vec::new(), expires: now.saturating_add(5 * SECOND) });
-            } else { return (None, None); }
+            } else {
+                if matches!(pending.transport, Transport::Stream(_)) { return (self.stream_turn(view, now), None); }
+                return (None, None);
+            }
         }
         if now < self.next { return (None, None); }
         let Some(config) = view.config() else { return (None, None); };
@@ -161,7 +210,7 @@ impl Resolver {
         let Some(local) = config.address().ipv4() else { return (None, None); };
         let server_index = ((now / (5 * SECOND)) % 2) as usize;
         let Some(server) = config.dns()[server_index].ipv4() else { return (None, None); };
-        if !crate::policy::remote(view, server) { return (None, None); }
+        if !crate::policy::remote(view, Ip::from_ipv4(server)) { return (None, None); }
         let mut names: Vec<Vec<u8>> = Vec::new();
         let mut answers: Vec<NameAnswers> = Vec::new();
         let rules = snapshot.rules();
@@ -206,7 +255,7 @@ impl Resolver {
                 let mut udp = vec![0; 8 + dns.len()];
                 packet_codec::emit_udp(udp.as_mut_slice(), local, server, port, 53, &dns);
                 self.pending = Some(Pending { revision, source, name, server, local,
-                    port, transaction, deadline: now.saturating_add(2 * SECOND) });
+                    port, transaction, seed: random.next_u64(), transport: Transport::Datagram, deadline: now.saturating_add(2 * SECOND) });
                 self.next = now.saturating_add(SECOND / 10);
                 return (wire::ipv4(local, server, 17, &udp, 64), None);
             }
@@ -226,14 +275,71 @@ impl Resolver {
             consumed ==> old(self).expecting(packet.tuple),
     {
         let Some(pending) = &self.pending else { return false; };
-        if packet.tuple.proto != 17 || packet.tuple.dst != pending.local || packet.tuple.dport != pending.port
-            || packet.tuple.src != pending.server || packet.tuple.sport != 53 { return false; }
+        let protocol = match pending.transport { Transport::Datagram => 17u8, Transport::Stream(_) => 6u8 };
+        if packet.tuple.proto != protocol || packet.tuple.dst != Ip::from_ipv4(pending.local) || packet.tuple.dport != pending.port
+            || packet.tuple.src != Ip::from_ipv4(pending.server) || packet.tuple.sport != 53 { return false; }
         if now >= pending.deadline || pending.revision != view.generation() { self.pending = None; return true; }
-        let Some((addresses, ttl)) = response(&packet.bytes[28..], pending) else { return true; };
+        if protocol == 6 {
+            if packet.bytes.len() > crate::MTU { return true; }
+            let Some(Pending { transport: Transport::Stream(stream), .. }) = &mut self.pending else { return true; };
+            tcp::input(&mut stream.connection, packet.bytes);
+            return true;
+        }
+        let payload = &packet.bytes[packet.transport + 8..];
+        if truncated(payload, pending) {
+            let Some(query) = codec::query(&pending.name, pending.source.version(), pending.transaction) else { return true; };
+            let Some(connection) = tcp::open(pending.local, pending.server, pending.port, pending.seed, now) else { return true; };
+            let mut framed = Vec::new();
+            framed.extend_from_slice(&airlock_qubes_network::network_bytes(query.len() as u16)); framed.extend_from_slice(&query);
+            if let Some(pending) = &mut self.pending {
+                pending.transport = Transport::Stream(Stream { connection: Box::new(connection), query: framed, sent: 0, received: Vec::new() });
+                pending.deadline = now.saturating_add(10 * SECOND);
+            }
+            return true;
+        }
+        let Some((addresses, ttl)) = response(&packet.bytes[packet.transport + 8..], pending) else { return true; };
         let Some(pending) = self.pending.take() else { return true; };
         self.insert(Entry { server: pending.server, name: pending.name, family: pending.source.version(),
             addresses, expires: now.saturating_add(u64::from(ttl.min(300)) * SECOND) });
         true
+    }
+
+    /// Drive one finite stream exchange. The library owns TCP sequencing; this
+    /// state machine admits only the original framed DNS message and revision.
+    fn stream_turn(&mut self, view: &View, now: u64) -> (packet: Option<Vec<u8>>)
+        requires old(self).valid(), view.valid(),
+        ensures final(self).valid(), packet.is_some() ==> packet.unwrap()@.len() <= crate::MTU && view.revision() > 0,
+    {
+        let mut pending = self.pending.take()?;
+        if pending.revision != view.generation() || pending.deadline <= now { return None; }
+        let Transport::Stream(stream) = &mut pending.transport else { self.pending = Some(pending); return None; };
+        let sent = tcp::write(&mut stream.connection, &stream.query[stream.sent..]);
+        stream.sent += sent;
+        let mut output = tcp::poll(&mut stream.connection, now);
+        let received = tcp::read(&mut stream.connection, TCP_BYTES + 2 - stream.received.len());
+        stream.received.extend_from_slice(&received);
+        if stream.received.len() < 2 { self.pending = Some(pending); return output; }
+        let length = usize::from(airlock_qubes_network::network_word([stream.received[0], stream.received[1]]));
+        if !(12..=TCP_BYTES).contains(&length) {
+            pending.deadline = now; self.pending = Some(pending); return output;
+        }
+        if stream.received.len() < length + 2 { self.pending = Some(pending); return output; }
+        if stream.received.len() != length + 2 || stream.sent != stream.query.len() {
+            pending.deadline = now; self.pending = Some(pending); return output;
+        }
+        let message = slice_to_vec(&stream.received[2..]);
+        // This one-shot endpoint has consumed its complete response. Emit a
+        // library TCP reset so a remote server does not retain an idle socket.
+        tcp::abort(&mut stream.connection);
+        if let Some(reset) = tcp::poll(&mut stream.connection, now) { output = Some(reset); }
+        if let Some((addresses, ttl)) = response(&message, &pending) {
+            self.insert(Entry { server: pending.server, name: pending.name, family: pending.source.version(),
+                addresses, expires: now.saturating_add(u64::from(ttl.min(300)) * SECOND) });
+        } else {
+            self.insert(Entry { server: pending.server, name: pending.name, family: pending.source.version(),
+                addresses: Vec::new(), expires: now.saturating_add(5 * SECOND) });
+        }
+        output
     }
 
     /// Insert only bounded entries, evicting one old observation at capacity.
@@ -262,6 +368,19 @@ impl Resolver {
     }
 }
 
+/// A truncation flag requests fallback only for the exact outstanding question.
+fn truncated(bytes: &[u8], pending: &Pending) -> bool
+    requires pending.valid(),
+{
+    let Some(header) = codec::header(bytes) else { return false; };
+    if header.id != pending.transaction || header.opcode != 0 || !header.response || !header.truncated
+        || header.rcode != 0 || header.questions != 1 { return false; }
+    let Some(question) = codec::question(bytes) else { return false; };
+    question.name == pending.name && question.class == 1
+        && question.kind == if pending.source.version() == 4 { 1u16 } else { 28u16 }
+}
+
+
 /// Accept only complete positive answers for the original outstanding question.
 /// Library parsing and CNAME traversal are supplied by codec; every admission,
 /// ambiguity, address-family and TTL decision remains in this production body.
@@ -272,7 +391,7 @@ fn response(bytes: &[u8], pending: &Pending) -> (answer: Option<(Vec<Ip>, u32)>)
         && (forall|i: int| 0 <= i < answer.unwrap().0@.len() ==> answer.unwrap().0@[i].valid()
             && answer.unwrap().0@[i].family() == pending.source.family()),
 {
-    if bytes.len() > crate::MTU - 28 { return None; }
+    if bytes.len() > TCP_BYTES { return None; }
     let h = codec::header(bytes)?;
     if h.id != pending.transaction || h.opcode != 0 || !h.response || h.truncated || h.rcode != 0 || h.questions != 1 { return None; }
     let count = usize::from(h.answers) + usize::from(h.authority) + usize::from(h.additional);

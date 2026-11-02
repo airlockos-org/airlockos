@@ -15,7 +15,7 @@ and native Hermit archive. Link the production firewall with that archive, then 
 `--vif mac=00:16:3e:00:00:99,script=/etc/xen/scripts/true`, the boot argument
 `--cmdline ' -- airlock.boot=12345678-1234-4234-8234-123456789abc'`, and
 `--peer-expect AIRLOCK_FIREWALL_LAB_PASS`. The application `--expect` marker is
-`AIRLOCK_FIREWALL_EXECUTING scope=ipv4-experiment forwarding=per-client-gated`.
+`AIRLOCK_FIREWALL_EXECUTING scope=dual-stack-experiment forwarding=per-client-gated`.
 The fixture checks an explicit IPv4 scope; it does not establish full replacement
 compatibility or migrate production clients. The existing lab retains console,
 XenStore, toolstack, peer results and QEMU shutdown evidence in its run directory.

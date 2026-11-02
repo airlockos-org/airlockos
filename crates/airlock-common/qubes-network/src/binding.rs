@@ -100,6 +100,19 @@ impl Assigned {
         Some(assigned)
     }
 
+    /// Choose a stable accounting key regardless of XenStore address order.
+    /// Dual-stack links use their IPv4 address for both families; IPv6-only
+    /// assignments use their sole address. This value carries no native authority.
+    pub fn primary(&self) -> (address: Ip)
+        requires self.valid(),
+        ensures address.valid(), self.addresses().contains(address),
+            (exists|i: int| 0 <= i < self.addresses().len() && self.addresses()[i].family() == 4)
+                ==> address.family() == 4,
+    {
+        if self.addresses[0].version() == 4 { return self.addresses[0]; }
+        if self.addresses.len() == 2 { self.addresses[1] } else { self.addresses[0] }
+    }
+
     /// Borrow the exact assigned address set for current membership/policy checks.
     pub fn all(&self) -> (addresses: &[Ip])
         requires self.valid(), ensures addresses@ == self.addresses(),

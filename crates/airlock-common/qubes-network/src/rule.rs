@@ -291,7 +291,7 @@ impl Network {
     /// Prefix length to use unchanged during matching.
     pub fn bits(&self) -> (prefix: u8)
         requires self.valid(), ensures prefix == self.prefix(),
-            self.address().family() == 4 ==> prefix <= 32,
+            prefix <= if self.address().family() == 4 { 32u8 } else { 128u8 },
     { self.prefix }
 }
 

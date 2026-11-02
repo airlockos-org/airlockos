@@ -1,4 +1,4 @@
-//! Ordered Qubes policy over a normalized IPv4 tuple. Missing DNS data rejects
+//! Ordered Qubes policy over a normalized same-family tuple. Missing DNS data rejects
 //! the whole source, including when the unresolved rule would have dropped.
 
 use crate::wire::codec;
@@ -24,23 +24,6 @@ broadcast use { vstd::std_specs::iter::group_iter_axioms, crate::library::byte_a
     vstd::set::group_set_lemmas, vstd::seq_lib::group_filter_ensures, vstd::seq::group_seq_lemmas, vstd::seq_lib::group_seq_properties,
     vstd::seq::Seq::lemma_as_ref_index, vstd::slice::group_slice_axioms };
 
-/// A native normalized network condition delegates its prefix interpretation
-/// to the same smoltcp model used by the wire boundary.
-closed spec fn prefix_matches(ip: Ip, prefix: u8, destination: [u8; 4]) -> bool {
-    exists|bytes: [u8; 4]| ip == Ip::v4_value(bytes) && codec::prefix_matches(bytes, prefix, destination)
-}
-
-/// Normalization is injective, so a decoded network has one prefix meaning.
-proof fn prefix_equivalent(ip: Ip, bytes: [u8; 4], prefix: u8, destination: [u8; 4])
-    requires ip == Ip::v4_value(bytes),
-    ensures prefix_matches(ip, prefix, destination) == codec::prefix_matches(bytes, prefix, destination),
-{
-    if prefix_matches(ip, prefix, destination) {
-        let other = choose|other: [u8; 4]| ip == Ip::v4_value(other) && codec::prefix_matches(other, prefix, destination);
-        Ip::v4_injective(bytes, other);
-    }
-}
-
 /// Whole-source DNS must be complete even for a hostname in a later drop rule.
 closed spec fn ready(view: View, snapshot: airlock_qubes_network::policy::Snapshot, now: u64) -> bool {
     !snapshot.unresolved_value() || exists|answers: airlock_qubes_network::resolution::Resolved|
@@ -52,16 +35,16 @@ closed spec fn rule_matches(view: View, rule: Rule, tuple: Tuple, icmp: u8, now:
     !(rule.dns_value() && rule.ports_value().is_some()
         && (rule.ports_value().unwrap().low() != 53 || rule.ports_value().unwrap().high() != 53))
         && match rule.protocol() { Protocol::Any => true, Protocol::Tcp => tuple.proto == 6,
-            Protocol::Udp => tuple.proto == 17, Protocol::Icmp => tuple.proto == 1 }
-        && match rule.network_value() { None => true, Some(network) => prefix_matches(network.address(), network.prefix(), tuple.dst) }
+            Protocol::Udp => tuple.proto == 17, Protocol::Icmp => tuple.icmp() }
+        && match rule.network_value() { None => true, Some(network) => codec::prefix_matches(network.address(), network.prefix(), tuple.dst) }
         && match rule.host_value() { None => true, Some(name) => exists|answers: airlock_qubes_network::resolution::Resolved|
-            view.resolved_for(Ip::v4_value(tuple.src), answers) && answers.contains(name.bytes(), Ip::v4_value(tuple.dst), now) }
+            view.resolved_for(tuple.src, answers) && answers.contains(name.bytes(), tuple.dst, now) }
         && match rule.ports_value() { None => true, Some(ports) => (tuple.proto == 6 || tuple.proto == 17)
             && ports.low() <= tuple.dport <= ports.high() }
-        && match rule.icmp_value() { None => true, Some(kind) => tuple.proto == 1 && icmp == kind }
+        && match rule.icmp_value() { None => true, Some(kind) => tuple.icmp() && icmp == kind }
         && (!rule.dns_value() || ((tuple.proto == 6 || tuple.proto == 17) && tuple.dport == 53
             && view.configuration_value().is_some()
-            && view.configuration_value().unwrap().dns_value().contains(Ip::v4_value(tuple.dst))))
+            && view.configuration_value().unwrap().dns_value().contains(tuple.dst)))
 }
 
 /// The first matching rule wins; only an entirely unmatched list uses default.
@@ -77,14 +60,14 @@ closed spec fn snapshot_decision(view: View, snapshot: Snapshot, tuple: Tuple, i
 /// A source is usable only under its complete, fresh current publication.
 pub(crate) closed spec fn decision(view: View, tuple: Tuple, icmp: u8, now: u64) -> bool {
     view.configuration_value().is_some() && exists|snapshot: Snapshot|
-        view.complete_for(Ip::v4_value(tuple.src), snapshot) && ready(view, snapshot, now)
+        view.complete_for(tuple.src, snapshot) && ready(view, snapshot, now)
             && snapshot_decision(view, snapshot, tuple, icmp, now)
 }
 
 /// A matching rule with no earlier match is the unique policy decision.
 proof fn first_decision(view: View, snapshot: Snapshot, tuple: Tuple, icmp: u8, now: u64, index: int)
-    requires view.configuration_value().is_some(), view.complete_for(Ip::v4_value(tuple.src), snapshot),
-        forall|other: Snapshot| view.complete_for(Ip::v4_value(tuple.src), other) ==> other == snapshot,
+    requires view.configuration_value().is_some(), view.complete_for(tuple.src, snapshot),
+        forall|other: Snapshot| view.complete_for(tuple.src, other) ==> other == snapshot,
         ready(view, snapshot, now), 0 <= index < snapshot.rules_value().len(),
         rule_matches(view, snapshot.rules_value()[index].rule(), tuple, icmp, now),
         forall|j: int| 0 <= j < index ==> !rule_matches(view, snapshot.rules_value()[j].rule(), tuple, icmp, now),
@@ -96,7 +79,7 @@ proof fn first_decision(view: View, snapshot: Snapshot, tuple: Tuple, icmp: u8, 
             && rules[i].rule().action() == Action::Accept
             && (forall|j: int| 0 <= j < i ==> !rule_matches(view, rules[j].rule(), tuple, icmp, now)));
         assert(snapshot_decision(view, snapshot, tuple, icmp, now));
-        assert(exists|candidate: Snapshot| view.complete_for(Ip::v4_value(tuple.src), candidate)
+        assert(exists|candidate: Snapshot| view.complete_for(tuple.src, candidate)
             && ready(view, candidate, now) && snapshot_decision(view, candidate, tuple, icmp, now));
         assert(decision(view, tuple, icmp, now));
     } else {
@@ -116,7 +99,7 @@ pub(crate) fn allows(view: &View, tuple: Tuple, icmp: u8, now: u64) -> (allowed:
     requires view.valid(), tuple.valid(),
     ensures allowed == decision(*view, tuple, icmp, now),
 {
-    let source = Ip::from_ipv4(tuple.src);
+    let source = tuple.src;
     let Some(snapshot) = view.policy(&source) else { return false; };
     let Some(_config) = view.config() else { return false; };
     if snapshot.unresolved() && !view.resolution(&source).is_some_and(|dns: &Resolved| -> (fresh: bool)
@@ -126,11 +109,11 @@ pub(crate) fn allows(view: &View, tuple: Tuple, icmp: u8, now: u64) -> (allowed:
     let mut index = 0;
     while index < rules.len()
         invariant view.valid(), snapshot.valid(), tuple.valid(),
-            view.complete_for(source, *snapshot), source == Ip::v4_value(tuple.src),
+            view.complete_for(source, *snapshot), source == tuple.src,
             rules@ == snapshot.rules_value(), index <= rules@.len() <= airlock_qubes_network::policy::MAX_RULES,
             ready(*view, *snapshot, now), view.configuration_value().is_some(),
             forall|j: int| 0 <= j < rules@.len() ==> rules@[j].rule().valid()
-                && rules@[j].rule().family_value() == 4,
+                && rules@[j].rule().family_value() == tuple.src.family(),
             forall|j: int| 0 <= j < index ==> !rule_matches(*view, rules@[j].rule(), tuple, icmp, now),
             forall|other: Snapshot| view.complete_for(source, other) ==> other == *snapshot,
         decreases rules.len() - index,
@@ -152,28 +135,27 @@ pub(crate) fn allows(view: &View, tuple: Tuple, icmp: u8, now: u64) -> (allowed:
 /// Evaluate every retained condition of one rule. This function grants no flow
 /// authority; its exact result is consumed by the ordered first-match traversal.
 fn matches_rule(view: &View, rule: &Rule, tuple: Tuple, icmp: u8, now: u64) -> (matches: bool)
-    requires view.valid(), rule.valid(), rule.family_value() == 4, tuple.valid(),
+    requires view.valid(), rule.valid(), rule.family_value() == tuple.src.family(), tuple.valid(),
     ensures matches == rule_matches(*view, *rule, tuple, icmp, now),
 {
     if rule.matches_none() { return false; }
     let transport = match rule.transport() {
         Protocol::Any => true, Protocol::Tcp => tuple.proto == 6,
-        Protocol::Udp => tuple.proto == 17, Protocol::Icmp => tuple.proto == 1,
+        Protocol::Udp => tuple.proto == 17, Protocol::Icmp => tuple.icmp(),
     };
     if !transport { return false; }
-    if let Some(network) = rule.network() {
-        let Some(ip) = network.ip().ipv4() else { return false; };
-        proof { prefix_equivalent(network.address(), ip, network.prefix(), tuple.dst); }
-        if !codec::contains(ip, network.bits(), tuple.dst) { return false; }
+    match rule.network() {
+        Some(network) if !codec::contains(*network.ip(), network.bits(), tuple.dst) => return false,
+        _ => (),
     }
     if let Some(name) = rule.host() {
-        let source = Ip::from_ipv4(tuple.src);
+        let source = tuple.src;
         let Some(dns) = view.resolution(&source) else { return false; };
         let Some(addresses) = dns.addresses(name.name(), now) else {
-            proof { assert(!dns.contains(name.bytes(), Ip::v4_value(tuple.dst), now)); }
+            proof { assert(!dns.contains(name.bytes(), tuple.dst, now)); }
             return false;
         };
-        let destination = Ip::from_ipv4(tuple.dst);
+        let destination = tuple.dst;
         if !addresses.iter().any(|ip: &Ip| -> (same: bool)
             requires ip.valid(), ensures same == (*ip == destination),
         { ip.same(&destination) }) {
@@ -195,12 +177,12 @@ fn matches_rule(view: &View, rule: &Rule, tuple: Tuple, icmp: u8, now: u64) -> (
         if !matches!(tuple.proto, 6 | 17) || !(low..=high).contains(&tuple.dport) { return false; }
     }
     if rule.icmp_type().is_some_and(|kind: u8| -> (mismatch: bool)
-        ensures mismatch == (tuple.proto != 1 || icmp != kind),
-    { tuple.proto != 1 || icmp != kind }) { return false; }
+        ensures mismatch == (!tuple.icmp() || icmp != kind),
+    { !tuple.icmp() || icmp != kind }) { return false; }
     if rule.dns_target() {
         if !matches!(tuple.proto, 6 | 17) || tuple.dport != 53 { return false; }
         let Some(config) = view.config() else { return false; };
-        let destination = Ip::from_ipv4(tuple.dst);
+        let destination = tuple.dst;
         if !config.dns().iter().any(|ip: &Ip| -> (same: bool)
             requires ip.valid(), ensures same == (*ip == destination),
         { ip.same(&destination) }) { return false; }
@@ -211,13 +193,19 @@ fn matches_rule(view: &View, rule: &Rule, tuple: Tuple, icmp: u8, now: u64) -> (
 
 /// Destination restrictions independent of the user's outbound allow rules.
 /// Clients cannot reach another client or local service through a NAT shortcut.
-pub(crate) fn remote(view: &View, destination: [u8; 4]) -> bool
-    requires view.valid(),
+pub(crate) fn remote(view: &View, destination: Ip) -> bool
+    requires view.valid(), destination.valid(),
 {
     let Some(config) = view.config() else { return false; };
-    if !unicast(destination) || config.contains(&Ip::from_ipv4(destination))
-        || config.address().ipv4() == Some(destination)
-        || config.provided_gateway().ipv4() == Some(destination) { return false; }
+    if !unicast(destination) || config.contains(&destination)
+        || *config.address() == destination || *config.provided_gateway() == destination { return false; }
+    if destination.version() == 6 {
+        if codec::link_local(destination) { return false; }
+        let Some(upstream) = config.ipv6() else { return false; };
+        let Some(router) = config.provided_ipv6() else { return false; };
+        return *upstream.address() != destination && *router != destination;
+    }
+    let Some(destination) = destination.ipv4() else { return false; };
     let networks = [(config.address(), config.prefix()), (config.provided_gateway(), config.provided_prefix())];
     for &(address, prefix) in networks.iter()
         invariant forall|i: int| 0 <= i < 2 ==> networks@[i].0.valid() && networks@[i].1 <= 32,
@@ -226,6 +214,62 @@ pub(crate) fn remote(view: &View, destination: [u8; 4]) -> bool
         if prefix < 31 && (codec::broadcast(ip, prefix) == Some(destination) || codec::network(ip, prefix) == destination) { return false; }
     }
     true
+}
+
+/// Select the existing configured source-NAT address for the packet's family.
+pub(crate) fn external(config: &airlock_qubes_network::config::Config, family: u8) -> (address: Option<Ip>)
+    requires config.valid(),
+    ensures address.is_some() ==> address.unwrap().valid() && address.unwrap().family() == family,
+{
+    let address = match family {
+        4 => Some(*config.address()),
+        6 => config.ipv6().map(|ip: &airlock_qubes_network::config::Ipv6| -> (address: Ip)
+            requires ip.valid(), ensures address.valid() && address.family() == 6,
+        { *ip.address() }),
+        _ => None,
+    };
+    match address {
+        Some(ip) if family == 6 && (!unicast(ip) || codec::link_local(ip)) => None,
+        _ => address,
+    }
+}
+
+/// Select only the authoritative upstream gateway for this family.
+pub(crate) fn gateway(config: &airlock_qubes_network::config::Config, family: u8) -> (address: Option<Ip>)
+    requires config.valid(),
+    ensures address.is_some() ==> address.unwrap().valid() && address.unwrap().family() == family,
+{
+    match family {
+        4 => Some(*config.gateway()),
+        6 => config.ipv6().map(|ip: &airlock_qubes_network::config::Ipv6| -> (address: Ip)
+            requires ip.valid(), ensures address.valid() && address.family() == 6,
+        { *ip.gateway() }),
+        _ => None,
+    }
+}
+
+/// Select the router identity presented on an already authorized client link.
+pub(crate) fn router(config: &airlock_qubes_network::config::Config, family: u8) -> (address: Option<Ip>)
+    requires config.valid(),
+    ensures address.is_some() ==> address.unwrap().valid() && address.unwrap().family() == family,
+{
+    match family {
+        4 => Some(*config.provided_gateway()),
+        6 => config.provided_ipv6().copied(),
+        _ => None,
+    }
+}
+
+/// An upstream router's link-local ICMPv6 source belongs to that upstream
+/// link. Present the translated error from our configured client-side router
+/// instead of forwarding a foreign link-local identity across interfaces.
+pub(crate) fn error_sender(view: &View, source: Ip) -> (sender: Option<Ip>)
+    requires view.valid(), source.valid(),
+    ensures sender.is_some() ==> sender.unwrap().valid() && sender.unwrap().family() == source.family(),
+{
+    if source.version() == 6 && codec::link_local(source) {
+        router(view.config()?, 6)
+    } else { Some(source) }
 }
 
 /// Redirect only native provider DNS addresses, keeping normal DNS destinations
@@ -240,9 +284,13 @@ pub(crate) fn redirect(view: &View, tuple: Tuple) -> (redirect: Option<Tuple>)
     let index = if matches!(tuple.proto, 6 | 17) && tuple.dport == 53 {
         config.provided_dns().iter().position(|provided: &Ip| -> (same: bool)
             requires provided.valid(),
-        { provided.ipv4() == Some(tuple.dst) })
+        { *provided == tuple.dst })
     } else { None };
-    if let Some(index) = index { redirected.dst = config.dns()[index].ipv4()?; }
+    if let Some(index) = index {
+        let destination = config.dns()[index];
+        if destination.version() != tuple.src.version() { return None; }
+        redirected.dst = destination;
+    }
     remote(view, redirected.dst).then_some(redirected)
 }
 

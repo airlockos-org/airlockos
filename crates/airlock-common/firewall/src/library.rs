@@ -27,6 +27,42 @@ pub(crate) broadcast proof fn byte_array_equality<const N: usize>(left: [u8; N],
     }
 }
 
+/// Derive exact deletion accounting from vstd's sequence/filter laws. This
+/// proof describes std collection removal; it adds no runtime collection code.
+pub(crate) proof fn filter_remove<T>(before: Seq<T>, index: int, predicate: spec_fn(T) -> bool)
+    requires 0 <= index < before.len(),
+    ensures before.remove(index).filter(predicate).len()
+        + if predicate(before[index]) { 1int } else { 0int } == before.filter(predicate).len(),
+{
+    before.remove_ensures(index);
+    let left = before.subrange(0, index);
+    let right = before.subrange(index + 1, before.len() as int);
+    assert(before =~= left + seq![before[index]] + right);
+    Seq::<T>::filter_distributes_over_add(left, seq![before[index]], predicate);
+    Seq::<T>::filter_distributes_over_add(left + seq![before[index]], right, predicate);
+    Seq::<T>::filter_distributes_over_add(left, right, predicate);
+    assert(seq![before[index]].filter(predicate).len() == if predicate(before[index]) { 1int } else { 0int }) by {
+        reveal_with_fuel(Seq::filter, 2);
+    }
+}
+
+/// Relate vstd's index-based iterator selection to value-based quota counts.
+/// This proves cardinality using its supplied filter definitions, without
+/// replacing std's iterator or counting implementation.
+pub(crate) proof fn filter_count<T, U>(values: Seq<T>, decisions: spec_fn(int) -> bool, originals: Seq<U>, predicate: spec_fn(U) -> bool)
+    requires values.len() == originals.len(),
+        forall|i: int| 0 <= i < originals.len() ==> #[trigger] decisions(i) == predicate(originals[i]),
+    ensures values.filter_index(decisions).len() == originals.filter(predicate).len(),
+    decreases values.len(),
+{
+    broadcast use vstd::seq_lib::group_seq_properties;
+    reveal(Seq::filter_index);
+    reveal(Seq::filter);
+    if values.len() > 0 {
+        filter_count(values.drop_last(), decisions, originals.drop_last(), predicate);
+    }
+}
+
 /// The actual upstream generator; no first-party random-number implementation.
 #[cfg(verus_keep_ghost)]
 #[verifier::external_type_specification]
@@ -91,10 +127,12 @@ pub assume_specification<T>[ bool::then_some ](condition: bool, value: T) -> (re
     ensures result == if condition { Some(value) } else { None },
 ;
 
-/// Counting a finite standard filter consumes exactly its remaining values.
+/// Counting a finite standard filter consumes through None; the result covers
+/// the complete input rather than a prophetic prefix of predicate decisions.
 pub assume_specification<I: Iterator, P: FnMut(&I::Item) -> bool>[ <core::iter::Filter<I, P> as Iterator>::count ](iter: core::iter::Filter<I, P>) -> (count: usize)
-    requires IteratorSpec::obeys_prophetic_iter_laws(&iter), IteratorSpec::remaining(&iter).len() <= usize::MAX,
-    ensures count == IteratorSpec::remaining(&iter).len(),
+    requires IteratorSpec::obeys_prophetic_iter_laws(&iter), IteratorSpec::decrease(&iter).is_some(),
+        IteratorSpec::remaining(&iter).len() <= usize::MAX,
+    ensures IteratorSpec::will_return_none(&iter), count == IteratorSpec::remaining(&iter).len(),
 ;
 
 /// Mathematical subset inspected and selected by the standard map's filter.

@@ -51,12 +51,20 @@ pub broadcast proof fn token_cut(address: Ip, bytes: Seq<u8>, index: int, delimi
 
 /// A complete parsed IP observation with no mutable or unchecked constructor.
 /// IPv4 occupies its first two words; IPv6 uses all eight, in network order.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Ip {
     /// Wire address family, exactly 4 or 6 after successful construction.
     family: u8,
     /// Expanded network-order words; IPv4 padding is always zero.
     words: [u16; 8],
+}
+
+/// Compiler-derived equality retains the family and every normalized address word.
+#[cfg(verus_keep_ghost)]
+impl vstd::std_specs::cmp::PartialEqSpecImpl for Ip {
+    open spec fn obeys_eq_spec() -> bool { true }
+
+    open spec fn eq_spec(&self, other: &Self) -> bool { *self == *other }
 }
 
 impl Ip {
@@ -142,10 +150,26 @@ impl Ip {
             crate::library::network_word([bytes[2], bytes[3]]), 0, 0, 0, 0, 0, 0] }
     }
 
+    /// Mathematical normalized IPv6 representation used by packet contracts.
+    pub closed spec fn v6_value(words: [u16; 8]) -> Self {
+        Self { family: 6, words }
+    }
+
     /// Construct normalized IPv6 data from standard-library network-order words.
     pub fn from_ipv6(words: [u16; 8]) -> (address: Self)
         ensures address.valid(), address.family() == 6, address.words() == words@,
+            address == Self::v6_value(words),
     { Self { family: 6, words } }
+
+    /// Return IPv6 segments without formatting and reparsing the address.
+    pub fn ipv6(&self) -> (words: Option<[u16; 8]>)
+        requires self.valid(),
+        ensures words.is_some() == (self.family() == 6),
+            words.is_some() ==> *self == Self::v6_value(words.unwrap()),
+    {
+        if self.family != 6 { return None; }
+        Some(self.words)
+    }
 
     /// Return IPv4 octets without formatting and reparsing the address.
     pub fn ipv4(&self) -> (bytes: Option<[u8; 4]>)

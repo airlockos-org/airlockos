@@ -37,6 +37,10 @@ pub const READY_PATH: &'static str = "/airlock-network-control-ready";
 
 mod library;
 
+// Share the existing standard-library bridges without duplicating their Verus
+// array-signature workaround in packet consumers.
+pub use library::{network_bytes, network_word};
+
 pub mod address;
 pub mod backend;
 pub mod binding;
