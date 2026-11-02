@@ -31,7 +31,18 @@ pub fn network_contract(
         artifact.application.networking(),
         "artifact is not a network provider"
     );
-    let topology: Topology = crate::state::immutable_configuration(Path::new(generation))?;
+    // Boot publishes a root-owned snapshot under /run; deployment and rollback
+    // may likewise use protected generation records outside the Nix store.
+    // A feature names the generation but cannot make its contents trustworthy.
+    // Retain the stronger immutable-content checks for store-backed inputs;
+    // other records must pass the existing no-symlink, root-only writer boundary.
+    let path = Path::new(generation);
+    let topology: Topology = if fs::canonicalize(path)?.starts_with("/nix/store") {
+        crate::state::immutable_configuration(path)?
+    } else {
+        crate::state::trusted(path)?;
+        crate::state::read(path)?
+    };
     topology.validate()?;
     let name = name.parse()?;
     let domain = topology
