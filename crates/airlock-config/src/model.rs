@@ -1302,13 +1302,19 @@ impl Machine {
                 });
             }
 
-            if matches!(definition.backend, GuestBackend::Hermit { .. })
+            if let GuestBackend::Hermit { application, .. } = definition.backend
                 && (initial.0 != maximum.0
                     || !(16..=256).contains(&initial.0)
                     || settings.vcpus != 1
                     || settings.root_image.0 != 0
                     || !definition.modules.borrow().is_empty()
-                    || !definition.features.borrow().is_empty()
+                    // Only the network application advertises Qubes' canonical
+                    // IPv6 flag; Linux service and transport features stay closed.
+                    || definition.features.borrow().iter().any(|(name, value)| {
+                        !(application.networking()
+                            && name == "ipv6"
+                            && ["", "1"].contains(&value.as_str()))
+                    })
                     || definition.gui.borrow().is_some())
             {
                 return Err(AuthoringError::InvalidResources {

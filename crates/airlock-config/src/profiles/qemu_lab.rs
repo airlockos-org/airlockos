@@ -15,10 +15,14 @@ pub fn machine() -> Result<MachineSnapshot, AuthoringError> {
     let mut machine = Machine::default();
     let network = Vm::network("sys-net", GiB(2))?;
     network.set_memory(Memory::Fixed(MiB(512)));
+    network.set_feature("ipv6", "1")?;
+    network.add_module(network_diagnostics());
     machine.add(&network)?;
 
     let firewall = Vm::firewall("sys-firewall", &network)?;
     firewall.set_memory(Memory::Fixed(MiB(256)));
+    firewall.set_feature("ipv6", "1")?;
+    firewall.add_module(network_diagnostics());
     machine.add(&firewall)?;
 
     // Explicit experimental paths coexist with the Linux defaults. Starting a
@@ -26,16 +30,21 @@ pub fn machine() -> Result<MachineSnapshot, AuthoringError> {
     // never changes these clients' netvm reference to a different firewall.
     let native_firewall = Vm::hermit_firewall("sys-firewall-hermit", &network)?;
     native_firewall.set_autostart(false);
+    native_firewall.set_feature("ipv6", "1")?;
     machine.add(&native_firewall)?;
     for name in ["usr-firewall-a", "usr-firewall-b"] {
         let client = Vm::command(name, &native_firewall, GiB(1))?;
         client.set_memory(Memory::Fixed(MiB(512)));
         client.set_autostart(false);
+        client.set_feature("ipv6", "1")?;
+        client.add_module(network_diagnostics());
         machine.add(&client)?;
     }
 
     let home = Vm::personal("usr-home", &firewall, GiB(4))?;
     home.set_memory(Memory::Fixed(MiB(1536)));
+    home.set_feature("ipv6", "1")?;
+    home.add_module(network_diagnostics());
     home.add_module(application_session());
     machine.add(&home)?;
 
@@ -82,6 +91,31 @@ pub fn machine() -> Result<MachineSnapshot, AuthoringError> {
     crate::components::diagnostics::enable(&mut machine, &assistant);
     machine.set_host(&gui, &firewall, &controller);
     machine.finish()
+}
+
+/// Install ordinary network tools and allow dom0-selected shell users only in
+/// disposable QEMU guests, so live probes do not require modifying guest images.
+fn network_diagnostics() -> NixosModule {
+    NixosModule::with_arguments([] as [&str; 0], |context| {
+        ModuleBody::new(nix_record! {
+            "airlock": nix_record! {
+                "qubeGuest": nix_record! {
+                    "allowQrexecUserSelection": true,
+                },
+            },
+            "environment": nix_record! {
+                "systemPackages": rusix::interop::raw::NixValue::list([
+                    context.pkgs.clone().select("dnsmasq"),
+                    context.pkgs.clone().select("nmap"),
+                    context.pkgs.clone().select("socat"),
+                    context.pkgs.clone().select("tcpdump"),
+                    context.pkgs.clone().select("thc-ipv6"),
+                    context.pkgs.clone().select("python3"),
+                    context.pkgs.select("bind").select("dnsutils"),
+                ]),
+            },
+        })
+    })
 }
 
 /// Match the virtual display and include the standard X11 clipboard client for local inspection.

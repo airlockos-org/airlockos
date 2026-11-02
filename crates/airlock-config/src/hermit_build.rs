@@ -153,6 +153,7 @@ pub(crate) fn constructor(
             "memory",
             "vcpus",
             "autostart",
+            "ipv6",
             "clipboardAuthority",
             "scratchMiB",
         ],
@@ -224,7 +225,8 @@ pub(crate) fn constructor(
                     },
                     "features": nix_record! {
                         "airlock-managed": "1", "airlock-backend": "hermit", "airlock-role": NixValue::if_else(network.clone(), "firewall", "service"), "qrexec": "", "gui": "",
-                    }.merge_attrs(NixValue::if_else(request.clone().select("clipboardAuthority").equals(NixValue::null()), nix_record! {}, nix_record! { "airlock-clipboard-authority": request.clone().select("clipboardAuthority") })),
+                    }.merge_attrs(NixValue::if_else(network.clone().and(request.clone().select("ipv6")), nix_record! { "ipv6": "1" }, nix_record! {}))
+                        .merge_attrs(NixValue::if_else(request.clone().select("clipboardAuthority").equals(NixValue::null()), nix_record! {}, nix_record! { "airlock-clipboard-authority": request.clone().select("clipboardAuthority") })),
                     "services": nix_record! {}, "devices": nix_record! {},
                     "backend": nix_record! { "type": "hermit", "system": nix_record! { "source": image.to_text() }, "artifact": artifact,
                         "scratch": NixValue::if_else(request.clone().select("scratchMiB").equals(NixValue::null()), NixValue::null(), nix_record! { "bytes": NixValue::builtin("mul").call(request.clone().select("scratchMiB")).call(1024_i64*1024) }),
@@ -254,9 +256,13 @@ pub(crate) fn constructor(
                             .equals(NixValue::null()),
                     )
                     .and(request.clone().select("memory").equals(256_i64)),
-                request.clone().select("upstream").equals(NixValue::null()),
+                request
+                    .clone()
+                    .select("upstream")
+                    .equals(NixValue::null())
+                    .and(request.clone().select("ipv6").equals(false)),
             );
-            (vec![("application", "clipboard".into()), ("upstream", NixValue::null()), ("autostart", false.into()), ("clipboardAuthority", NixValue::null()), ("scratchMiB", NixValue::null())],
+            (vec![("application", "clipboard".into()), ("upstream", NixValue::null()), ("autostart", false.into()), ("ipv6", false.into()), ("clipboardAuthority", NixValue::null()), ("scratchMiB", NixValue::null())],
             NixValue::if_else(pinned.and(capabilities), output, NixValue::builtin("throw").call("Hermit requires the reviewed integration, source identity and application capabilities")))
         },
     )
