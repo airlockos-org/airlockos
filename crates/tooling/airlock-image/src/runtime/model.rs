@@ -130,6 +130,9 @@ pub(crate) fn kernelopts(domain: &Domain) -> Result<String> {
     Ok(words.join(" "))
 }
 
+/// Check offline Qubes property/storage mapping after `BootInputs` has validated
+/// the unchanged declaration's application capabilities and provider graph.
+/// Keep those shared checks authoritative for both initial images and deployment.
 pub(crate) fn validate(topology: &Topology) -> Result<()> {
     for key in topology.prefs.keys() {
         ensure!(
@@ -165,10 +168,6 @@ pub(crate) fn validate(topology: &Topology) -> Result<()> {
             ensure!(
                 domain.class == "HermitVM",
                 "Hermit backend requires HermitVM"
-            );
-            ensure!(
-                domain.netvm == VmReference::Disabled,
-                "Hermit has no network provider"
             );
             continue;
         }
