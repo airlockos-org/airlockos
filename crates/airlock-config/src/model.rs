@@ -736,7 +736,7 @@ impl Vm {
         ))
     }
 
-    /// Declare the bounded native IPv4 firewall with one explicit upstream.
+    /// Declare the bounded native dual-stack firewall with one explicit upstream.
     /// It supplies a typed network provider without granting Linux or clipboard APIs.
     pub fn hermit_firewall<R: ProvidesNetwork, B>(
         name: &str,
