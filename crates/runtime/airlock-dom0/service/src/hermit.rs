@@ -318,7 +318,7 @@ pub fn ready(name: &str, artifact: &Descriptor, xid: u32) -> Result<()> {
     let mut output = String::new();
     file.take(256 * 1024).read_to_string(&mut output)?;
     if artifact.application.networking() {
-        use airlock_qubes_network::status::{Report, State};
+        use airlock_qubes_network::status::{Report, State, classify};
         // The app republishes at least once per second. A live Xen domain with
         // an old ready line is insufficient evidence of a progressing service.
         ensure!(
@@ -345,9 +345,8 @@ pub fn ready(name: &str, artifact: &Descriptor, xid: u32) -> Result<()> {
                 && execution.network.is_some()
                 && status.revision > 0
                 && status.state == State::Ready
-                && status.expected <= 4
-                && status.interfaces == status.expected
-                && status.admitted == status.interfaces,
+                && classify(true, status.expected, status.interfaces, status.admitted)
+                    == State::Ready,
             "firewall configuration, policies or native devices are not ready"
         );
         return Ok(());

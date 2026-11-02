@@ -9,6 +9,7 @@ use xen_transport::hermit::{
     endpoint,
     netback::{Netback, Status},
     netfront::Netfront,
+    poweroff::Poweroff,
     store,
 };
 
@@ -87,6 +88,7 @@ pub fn run(challenge: Challenge, seed: [u8; 32]) -> Result<(), Error> {
         .map_err(|_| Error::State)?
         .to_owned();
     let mut control = Session::open(challenge)?;
+    let mut poweroff = Poweroff::new(endpoint::now_ns().saturating_add(CONTROL_TIMEOUT_NS))?;
     let mut scratch = [0; 4096];
     let deadline = endpoint::now_ns().saturating_add(5_000_000_000);
     let length = store::value("device/vif/0/backend-id", &mut scratch, deadline)?;
@@ -110,6 +112,13 @@ pub fn run(challenge: Challenge, seed: [u8; 32]) -> Result<(), Error> {
     loop {
         // Capture the event generation before work to avoid a lost wakeup.
         let observed = endpoint::generation();
+        if poweroff.requested(endpoint::now_ns().saturating_add(CONTROL_TIMEOUT_NS))? {
+            // All firewall state is volatile. Stop admitting packets now; Xen
+            // owns final grant/device teardown when the application exits.
+            println!("AIRLOCK_FIREWALL_STOP reason=ToolstackPoweroff boot={boot}");
+            return Ok(());
+        }
+
         for _ in 0..16 {
             let event = control.poll()?;
             let now = endpoint::now_ns();
@@ -298,7 +307,7 @@ fn network_status(
     }
     let Some(observation) = control.observation()? else {
         return Ok(Snapshot {
-            state: classify(false, 0, clients.len(), admitted, false),
+            state: classify(false, 0, clients.len(), admitted),
             revision,
             expected: 0,
             interfaces: clients.len(),
@@ -317,24 +326,11 @@ fn network_status(
     let expected = config
         .and_then(|config| config.clients(4))
         .map_or(0, |sources| sources.len());
-    let policies = config
-        .and_then(|config| config.clients(4))
-        .is_some_and(|sources| {
-            sources.iter().all(|source| {
-                view.policy(source).is_some()
-                    && view
-                        .resolution(source)
-                        .is_none_or(|answers| answers.fresh(now))
-            })
-        });
+    // A current Permit already requires complete policy for that exact live
+    // interface's assigned sources. Halted VMs need no device or policy before
+    // their provider can start; DNS reachability is not isolation authority.
     Ok(Snapshot {
-        state: classify(
-            config.is_some(),
-            expected,
-            clients.len(),
-            admitted,
-            policies,
-        ),
+        state: classify(config.is_some(), expected, clients.len(), admitted),
         revision: view.generation(),
         expected,
         interfaces: clients.len(),

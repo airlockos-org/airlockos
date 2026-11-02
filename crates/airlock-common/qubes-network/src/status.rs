@@ -15,23 +15,25 @@ verus! {
 pub enum State {
     /// Configuration synchronization or a complete current view is unavailable.
     Configuration,
-    /// Declared clients lack usable devices, complete policy or fresh admission.
+    /// An active interface lacks usable devices, complete policy or fresh admission.
     Clients,
-    /// All configured IPv4 clients have usable, policy-bound devices.
+    /// Every active interface has a usable device and current policy admission.
     Ready,
     /// Impossible counts require terminating the native application.
     Fault,
 }
 
 /// Classify only supplied current observations, never cached readiness. The
-/// selected Qubes profile assigns one IPv4 address to each frontend interface.
-pub fn classify(configured: bool, expected: usize, interfaces: usize, admitted: usize, policies: bool) -> (state: State)
+/// selected Qubes profile assigns one IPv4 address to each frontend interface,
+/// but its configured address list also includes halted VMs. Waiting for those
+/// VMs would prevent dependency-ordered startup of their provider.
+pub fn classify(configured: bool, expected: usize, interfaces: usize, admitted: usize) -> (state: State)
     ensures (state is Fault) == (expected > 4 || interfaces > 4 || admitted > interfaces),
-        (state is Ready) == (expected <= 4 && interfaces <= 4 && admitted <= interfaces && configured && policies && expected == interfaces && admitted == interfaces),
+        (state is Ready) == (expected <= 4 && interfaces <= expected && configured && admitted == interfaces),
 {
     if expected > 4 || interfaces > 4 || admitted > interfaces { State::Fault }
     else if !configured { State::Configuration }
-    else if !policies || expected != interfaces || admitted != interfaces { State::Clients }
+    else if interfaces > expected || admitted != interfaces { State::Clients }
     else { State::Ready }
 }
 
@@ -46,7 +48,7 @@ pub struct Snapshot {
     pub state: State,
     /// Current control view revision; older policy views cannot authorize forwarding.
     pub revision: u64,
-    /// IPv4 clients named by current QubesDB configuration, at most four.
+    /// Configured IPv4 clients, including halted VMs; at most four.
     pub expected: usize,
     /// Native interface owners including pending admission, at most four.
     pub interfaces: usize,

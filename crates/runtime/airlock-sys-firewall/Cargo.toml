@@ -18,7 +18,7 @@ serde_json = { version = "1", default-features = false, features = ["alloc"] }
 
 [target.'cfg(target_os = "hermit")'.dependencies]
 hermit = { git = "https://github.com/hermit-os/hermit-rs", rev = "e9dc6784ad1a2dc6d18c6819ee51198cab9fb78a", default-features = false, features = ["pvh", "fsgsbase", "kernel-stack"] }
-xen-transport = { git = "https://github.com/airlockos-org/hermit-xen", rev = "df2230ba6defef37b4be4557ca57fe094fbaf9d6", features = ["hermit"] }
+xen-transport = { git = "https://github.com/airlockos-org/hermit-xen", rev = "09d90ea081c7a98d406820733758d19efa3e7f6d", features = ["hermit"] }
 
 [[bin]]
 name = "sys-firewall"
