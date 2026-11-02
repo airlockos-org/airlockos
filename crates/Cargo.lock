@@ -4949,7 +4949,7 @@ checksum = "213b7324336b53d2414b2db8537e56544d981803139155afa84f76eeebb7a546"
 [[package]]
 name = "xen-transport"
 version = "0.1.0"
-source = "git+https://github.com/airlockos-org/hermit-xen?rev=09d90ea081c7a98d406820733758d19efa3e7f6d#09d90ea081c7a98d406820733758d19efa3e7f6d"
+source = "git+https://github.com/airlockos-org/hermit-xen?rev=8a1c1cddfe883b3e4dce81bfd1be17be6a91be23#8a1c1cddfe883b3e4dce81bfd1be17be6a91be23"
 dependencies = [
  "libc",
 ]

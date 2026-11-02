@@ -39,7 +39,7 @@ airlock-deployment-core = { path = "../airlock-common/deployment" }
 airlock-clipboard-core = { path = "../airlock-common/clipboard" }
 airlock-sys-clipboard = { path = "../runtime/airlock-sys-clipboard" }
 airlock-machine-core = { path = "../airlock-common/machine" }
-xen-transport = { git = "https://github.com/airlockos-org/hermit-xen", rev = "09d90ea081c7a98d406820733758d19efa3e7f6d", features = ["linux"] }
+xen-transport = { git = "https://github.com/airlockos-org/hermit-xen", rev = "8a1c1cddfe883b3e4dce81bfd1be17be6a91be23", features = ["linux"] }
 
 [dev-dependencies]
 png = "0.18"

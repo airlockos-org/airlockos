@@ -95,7 +95,7 @@ impl Workspace {
                 // importCargoLock's Git fetch includes the upstream kernel submodule.
                 // The Hermit executable builder separately selects our patched kernel.
                 "hermit-0.13.2": "sha256-Doox+f2DRDn/J+PBLoiNAMoB9XgW3U3gqysw+mk61lw=",
-                "xen-transport-0.1.0": "sha256-1qxvV4pFpTguV+9JzUcd8A7nAHP1azj/dO6gg7aKrSc=",
+                "xen-transport-0.1.0": "sha256-9BjPBxaMBZPfnqM4vLCWa6Qe6Gxw5ZRr/gWe/iB5COY=",
             },
         }
     }
