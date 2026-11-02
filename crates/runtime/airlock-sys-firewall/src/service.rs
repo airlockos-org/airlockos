@@ -83,6 +83,9 @@ struct Client {
 /// Progress requires cooperative native scheduling, reciprocal XenStore records,
 /// grant revocation and a monotonic clock. No dynamic service authority is added.
 pub fn run(challenge: Challenge, seed: [u8; 32]) -> Result<(), Error> {
+    let boot = core::str::from_utf8(challenge.as_bytes())
+        .map_err(|_| Error::State)?
+        .to_owned();
     let mut control = Session::open(challenge)?;
     let mut scratch = [0; 4096];
     let deadline = endpoint::now_ns().saturating_add(5_000_000_000);
@@ -103,6 +106,7 @@ pub fn run(challenge: Challenge, seed: [u8; 32]) -> Result<(), Error> {
     let mut engine = Engine::new(seed);
     let mut discovery_at = 0;
     let mut announced = false;
+    let mut status_at = 0;
     loop {
         // Capture the event generation before work to avoid a lost wakeup.
         let observed = endpoint::generation();
@@ -248,6 +252,22 @@ pub fn run(challenge: Challenge, seed: [u8; 32]) -> Result<(), Error> {
                 return Err(Error::State);
             }
         }
+        let status = network_status(&mut control, &mut clients, &engine)?;
+        if status.state == airlock_qubes_network::status::State::Fault {
+            return Err(Error::State);
+        }
+        let now = endpoint::now_ns();
+        // One bounded heartbeat per second, even when control updates arrive
+        // continuously. Packet traffic cannot turn status logging into a flood.
+        if now >= status_at {
+            let report = airlock_qubes_network::status::Report {
+                boot: boot.clone(),
+                snapshot: status,
+            };
+            let report = serde_json::to_string(&report).map_err(|_| Error::State)?;
+            println!("AIRLOCK_FIREWALL_STATUS {report}");
+            status_at = now.saturating_add(1_000_000_000);
+        }
         // Maintenance wakeups also drive grant revocation and deadlines when a
         // peer stops producing events. The event counter makes this race safe.
         match endpoint::wait(observed, endpoint::now_ns().saturating_add(1_000_000)) {
@@ -255,6 +275,72 @@ pub fn run(challenge: Challenge, seed: [u8; 32]) -> Result<(), Error> {
             Err(error) => return Err(error.into()),
         }
     }
+}
+
+/// Observe exact native permits and a final drained control view. These facts
+/// are diagnostics only; the packet path independently holds its consuming permit.
+fn network_status(
+    control: &mut Session,
+    clients: &mut [Client],
+    engine: &Engine,
+) -> Result<airlock_qubes_network::status::Snapshot, Error> {
+    use airlock_qubes_network::status::{Snapshot, classify};
+    let revision = control.projection().generation();
+    let mut admitted = 0;
+    for client in clients.iter_mut() {
+        if let Admission::Ready(certificate) = &client.admission {
+            admitted += usize::from(
+                control
+                    .permit(&mut client.interface, certificate)?
+                    .is_some(),
+            );
+        }
+    }
+    let Some(observation) = control.observation()? else {
+        return Ok(Snapshot {
+            state: classify(false, 0, clients.len(), admitted, false),
+            revision,
+            expected: 0,
+            interfaces: clients.len(),
+            admitted,
+            gateway_reachable: false,
+        });
+    };
+    let view = observation.projection();
+    // A permit observed before another policy publication cannot count as a
+    // current-view admission. The next fair service iteration will retry it.
+    if view.generation() != revision {
+        admitted = 0;
+    }
+    let now = endpoint::now_ns();
+    let config = view.config();
+    let expected = config
+        .and_then(|config| config.clients(4))
+        .map_or(0, |sources| sources.len());
+    let policies = config
+        .and_then(|config| config.clients(4))
+        .is_some_and(|sources| {
+            sources.iter().all(|source| {
+                view.policy(source).is_some()
+                    && view
+                        .resolution(source)
+                        .is_none_or(|answers| answers.fresh(now))
+            })
+        });
+    Ok(Snapshot {
+        state: classify(
+            config.is_some(),
+            expected,
+            clients.len(),
+            admitted,
+            policies,
+        ),
+        revision: view.generation(),
+        expected,
+        interfaces: clients.len(),
+        admitted,
+        gateway_reachable: engine.gateway_reachable(view, now),
+    })
 }
 
 /// Transmit only while holding either the exact client Permit or an upstream-only

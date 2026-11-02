@@ -266,7 +266,8 @@ fn wait(
                         GuestState::Ready,
                         &domain.parse()?,
                         &format!(
-                            "{domain} executes {expected}; clipboard authority {authority:?}",
+                            "{domain} executes {expected}; application {application:?}, authority {authority:?}",
+                            application = artifact.application,
                             authority = artifact.authority
                         ),
                     );

@@ -56,6 +56,7 @@ fn descriptor(bytes: &[u8]) -> Descriptor {
         integration_revision: "b".repeat(40).parse().unwrap(),
         build_lock: "c".repeat(64).parse().unwrap(),
         authority: AuthorityMode::Disconnected,
+        application: Application::Clipboard,
     }
 }
 

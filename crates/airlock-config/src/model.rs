@@ -18,6 +18,9 @@ mod type_constraints;
 
 pub use error::AuthoringError;
 
+/// Reviewed native application profile shared with artifact admission.
+pub use airlock_nix_core::hermit_artifact::Application as HermitApplication;
+
 use std::{
     cell::{Cell, OnceCell, RefCell},
     marker::PhantomData,
@@ -171,13 +174,6 @@ pub enum GuestBackend {
         /// Optional bounded scratch capacity; its Qubes volume is encrypted and reset at every start.
         scratch: Option<MiB>,
     },
-}
-
-/// Reviewed Hermit application selection; arbitrary build features cannot grant authority.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HermitApplication {
-    /// Clipboard implementation, connected only through a typed GUI relationship.
-    Clipboard,
 }
 
 /// A NixOS contribution that keeps desktop capabilities and diagnostic sources beside configuration.
@@ -691,20 +687,37 @@ impl Vm {
         memory: MiB,
         application: HermitApplication,
     ) -> Result<VmHandle<Service, Hermit>, AuthoringError> {
-        let mut vm = Self::nixos(name, memory)?;
+        Ok(Self::hermit_definition(
+            Self::nixos(name, memory)?,
+            memory,
+            application,
+            None,
+        ))
+    }
+
+    /// Convert only a fresh declaration, before references can clone its definition.
+    /// Both native profiles keep Linux volumes, modules and display capabilities absent.
+    fn hermit_definition<R>(
+        mut vm: VmHandle<R>,
+        memory: MiB,
+        application: HermitApplication,
+        scratch: Option<MiB>,
+    ) -> VmHandle<R, Hermit> {
         let definition =
             Rc::get_mut(&mut vm.reference.definition).expect("new declaration has no clones");
         definition.backend = GuestBackend::Hermit {
             application,
-            scratch: None,
+            scratch,
         };
         let mut settings = definition.settings.get();
         settings.root_image = MiB(0);
+        settings.memory = Memory::Fixed(memory);
+        settings.vcpus = 1;
         definition.settings.set(settings);
-        Ok(VmHandle {
+        VmHandle {
             reference: vm.reference,
             role: PhantomData,
-        })
+        }
     }
 
     /// Declare a Hermit service with one encrypted, nonpersistent scratch disk.
@@ -715,14 +728,26 @@ impl Vm {
         application: HermitApplication,
         scratch: MiB,
     ) -> Result<VmHandle<Service, Hermit>, AuthoringError> {
-        let mut vm = Self::hermit(name, memory, application)?;
-        let definition =
-            Rc::get_mut(&mut vm.reference.definition).expect("new declaration has no clones");
-        definition.backend = GuestBackend::Hermit {
+        Ok(Self::hermit_definition(
+            Self::nixos(name, memory)?,
+            memory,
             application,
-            scratch: Some(scratch),
-        };
-        Ok(vm)
+            Some(scratch),
+        ))
+    }
+
+    /// Declare the bounded native IPv4 firewall with one explicit upstream.
+    /// It supplies a typed network provider without granting Linux or clipboard APIs.
+    pub fn hermit_firewall<R: ProvidesNetwork, B>(
+        name: &str,
+        uplink: &VmHandle<R, B>,
+    ) -> Result<VmHandle<Firewall, Hermit>, AuthoringError> {
+        Ok(Self::hermit_definition(
+            Self::firewall(name, uplink)?,
+            MiB(256),
+            HermitApplication::Firewall,
+            None,
+        ))
     }
 
     /// Creates shared configuration without claiming membership in any machine.
@@ -813,9 +838,9 @@ impl Vm {
     /// Autostarts in the background, after the default assistant when present.
     /// Uses fixed memory and a larger boot filesystem.
     /// Rejects invalid names; registration checks the uplink's machine membership.
-    pub fn controller<R: ProvidesNetwork>(
+    pub fn controller<R: ProvidesNetwork, B>(
         name: &str,
-        uplink: &VmHandle<R>,
+        uplink: &VmHandle<R, B>,
         private_volume: GiB,
     ) -> Result<VmHandle<Controller>, AuthoringError> {
         let uplink = uplink.reference.clone();
@@ -838,9 +863,9 @@ impl Vm {
     /// Declares an interactive development VM with persistent workspace storage.
     /// Uses fixed memory for its development workload and the supplied provider.
     /// Rejects invalid names; registration checks the provider's machine membership.
-    pub fn assistant<R: ProvidesNetwork>(
+    pub fn assistant<R: ProvidesNetwork, B>(
         name: &str,
-        uplink: &VmHandle<R>,
+        uplink: &VmHandle<R, B>,
         private_volume: GiB,
     ) -> Result<VmHandle<Assistant>, AuthoringError> {
         let uplink = uplink.reference.clone();
@@ -861,9 +886,9 @@ impl Vm {
     /// Declares a command-line VM with persistent files and the supplied uplink.
     /// Lowering preserves the bootstrap role's choice to leave this VM stopped at boot.
     /// Rejects invalid names; registration checks the uplink's machine membership.
-    pub fn command<R: ProvidesNetwork>(
+    pub fn command<R: ProvidesNetwork, B>(
         name: &str,
-        uplink: &VmHandle<R>,
+        uplink: &VmHandle<R, B>,
         private_volume: GiB,
     ) -> Result<VmHandle<Command>, AuthoringError> {
         let uplink = uplink.reference.clone();
@@ -915,9 +940,9 @@ impl Vm {
     /// Declares a firewall downstream of a network driver or another firewall.
     /// Rejects invalid names. The returned handle can supply other VMs; registration
     /// requires its provider to have been added to the same machine first.
-    pub fn firewall<R: ProvidesNetwork>(
+    pub fn firewall<R: ProvidesNetwork, B>(
         name: &str,
-        uplink: &VmHandle<R>,
+        uplink: &VmHandle<R, B>,
     ) -> Result<VmHandle<Firewall>, AuthoringError> {
         let uplink = uplink.reference.clone();
         Self::declare(
@@ -939,9 +964,9 @@ impl Vm {
     /// Declares a personal VM with persistent files and the supplied uplink.
     /// Its handle can also select the GUI's default application. Rejects invalid
     /// names; registration checks the uplink's machine membership.
-    pub fn personal<R: ProvidesNetwork>(
+    pub fn personal<R: ProvidesNetwork, B>(
         name: &str,
-        uplink: &VmHandle<R>,
+        uplink: &VmHandle<R, B>,
         private_volume: GiB,
     ) -> Result<VmHandle<Personal>, AuthoringError> {
         let uplink = uplink.reference.clone();
@@ -1247,6 +1272,36 @@ impl Machine {
                 });
             }
 
+            if let GuestBackend::Hermit {
+                application,
+                scratch,
+            } = definition.backend
+                && {
+                    let clients =
+                        self.vms
+                            .iter()
+                            .filter(|client| {
+                                client.definition.role.uplink().is_some_and(|uplink| {
+                                    Rc::ptr_eq(&uplink.definition, definition)
+                                })
+                            })
+                            .count();
+                    !application.valid_memory(u64::from(initial.0))
+                        || !application.valid_links(
+                            definition.role.uplink().is_some(),
+                            matches!(definition.role, Role::Firewall { .. }),
+                            clients,
+                        )
+                        || (application.networking() && scratch.is_some())
+                        || (!application.networking() && !matches!(definition.role, Role::Service))
+                }
+            {
+                return Err(AuthoringError::InvalidResources {
+                    vm: vm.name().to_owned(),
+                    reason: "Hermit application capabilities do not match its memory, network role, clients or scratch storage",
+                });
+            }
+
             if matches!(definition.backend, GuestBackend::Hermit { .. })
                 && (initial.0 != maximum.0
                     || !(16..=256).contains(&initial.0)
@@ -1254,7 +1309,6 @@ impl Machine {
                     || settings.root_image.0 != 0
                     || !definition.modules.borrow().is_empty()
                     || !definition.features.borrow().is_empty()
-                    || !matches!(definition.role, Role::Service)
                     || definition.gui.borrow().is_some())
             {
                 return Err(AuthoringError::InvalidResources {

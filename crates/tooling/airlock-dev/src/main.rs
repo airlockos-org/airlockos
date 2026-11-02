@@ -15,6 +15,8 @@ mod support;
 
 mod verification;
 
+mod hermit_locks;
+
 mod environment;
 
 mod gc;
@@ -65,6 +67,12 @@ enum Action {
     },
     /// Operate a persistent Airlock desktop in the QEMU lab.
     QemuLab(nested::qemu_lab::Args),
+    /// Regenerate native application locks with Cargo, retaining pinned source versions.
+    HermitLocks {
+        /// Clean committed integration checkout supplying the kernel and stdlib lock.
+        #[arg(long)]
+        integration: PathBuf,
+    },
     /// Run a workstation build with one physical core excluded from its CPU affinity.
     BuildBudget {
         /// Build command and literal arguments, inherited by all its child processes.
@@ -145,6 +153,7 @@ fn execute(args: Args) -> Result<u8> {
         Action::UsbInstallLog { arguments } => install_log::run(&root, &arguments),
         Action::BuildPhase { stage, arguments } => install_log::phase(&stage, &arguments),
         Action::QemuLab(args) => nested::qemu_lab::execute(&root, args),
+        Action::HermitLocks { integration } => hermit_locks::run(&root, &integration),
         Action::BuildBudget { arguments } => build_budget::run(&root, &arguments),
         Action::Nested { command } => nested::execute(&root, command),
         Action::WithEnvironment { arguments } => {

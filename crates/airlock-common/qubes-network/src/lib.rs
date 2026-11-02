@@ -51,6 +51,9 @@ pub mod config;
 pub mod control;
 pub mod resolution;
 
+/// Payload-free network readiness reports; observations grant no control authority.
+pub mod status;
+
 pub mod cache;
 
 pub mod policy;

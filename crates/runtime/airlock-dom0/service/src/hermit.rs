@@ -1,7 +1,7 @@
 //! Authenticate a Hermit executable at admission and immediately before Xen loads it.
 //! These checks supply evidence; only the existing deployment plan grants start authority.
 
-use airlock_nix_core::hermit_artifact::{AuthorityMode, Descriptor, Image};
+use airlock_nix_core::hermit_artifact::{AuthorityMode, Descriptor, Image, NetworkAttachment};
 use anyhow::{Context, Result, ensure};
 use std::{fs, io::Read, os::unix::fs::MetadataExt, path::Path};
 
@@ -9,6 +9,47 @@ use std::{fs, io::Read, os::unix::fs::MetadataExt, path::Path};
 /// Reading is bounded by the descriptor, including one byte to detect concurrent growth.
 pub fn verify(artifact: &Descriptor, memory_mib: u64) -> Result<Image> {
     verify_owned(artifact, memory_mib, 0)
+}
+
+/// Declared relationships read from the same immutable generation as the artifact.
+/// These observations do not grant permission to start or attach a guest.
+pub struct NetworkContract {
+    /// Explicit reviewed upstream network provider.
+    pub provider: airlock_nix_core::identity::GuestName,
+    /// Exact bounded downstream VM names in the reviewed topology.
+    pub clients: Vec<airlock_nix_core::identity::GuestName>,
+}
+
+/// Resolve network capabilities from protected source, never from guest QubesDB values.
+pub fn network_contract(
+    name: &str,
+    artifact: &Descriptor,
+    generation: &str,
+) -> Result<NetworkContract> {
+    use airlock_machine_core::model::{Topology, VmReference};
+    ensure!(
+        artifact.application.networking(),
+        "artifact is not a network provider"
+    );
+    let topology: Topology = crate::state::immutable_configuration(Path::new(generation))?;
+    topology.validate()?;
+    let name = name.parse()?;
+    let domain = topology
+        .domains
+        .get(&name)
+        .context("firewall is outside its generation")?;
+    ensure!(
+        domain.backend.hermit() == Some(artifact),
+        "network artifact differs from reviewed generation"
+    );
+    let VmReference::Named(provider) = &domain.netvm else {
+        anyhow::bail!("firewall has no declared upstream");
+    };
+    let clients = topology.domains.iter().filter(|(_, client)| matches!(&client.netvm, VmReference::Named(target) if target == name.as_vm_name())).map(|(name, _)| name.clone()).collect();
+    Ok(NetworkContract {
+        provider: provider.clone().try_into()?,
+        clients,
+    })
 }
 
 /// Authenticate build outputs owned by root or the current unprivileged Nix builder.
@@ -21,7 +62,7 @@ pub(crate) fn verify_image(artifact: &Descriptor, memory_mib: u64) -> Result<Ima
 fn verify_owned(artifact: &Descriptor, memory_mib: u64, owner: u32) -> Result<Image> {
     artifact.validate(false)?;
     ensure!(
-        (16..=256).contains(&memory_mib)
+        artifact.application.valid_memory(memory_mib)
             && (artifact.authority != AuthorityMode::Normal || memory_mib >= 24),
         "invalid Hermit memory allocation"
     );
@@ -78,6 +119,9 @@ struct Execution {
     /// Current GUI domain allowed to receive the production control offer.
     #[serde(default)]
     authority: Option<u16>,
+    /// Captured upstream relationship; clipboard records always leave it absent.
+    #[serde(default)]
+    network: Option<NetworkAttachment>,
 }
 
 /// Fixed protected runtime record, addressed only with a validated VM name.
@@ -102,6 +146,32 @@ pub fn preparing_with_authority(
     generation: &str,
     authority: Option<u16>,
 ) -> Result<String> {
+    preparing_context(name, artifact, generation, authority, None)
+}
+
+/// Capture the declared upstream with the same protected boot and console boundary.
+pub fn preparing_with_network(
+    name: &str,
+    artifact: &Descriptor,
+    generation: &str,
+    network: NetworkAttachment,
+) -> Result<String> {
+    preparing_context(name, artifact, generation, None, Some(network))
+}
+
+/// Bind application-specific relationships without relaxing the clipboard boundary.
+fn preparing_context(
+    name: &str,
+    artifact: &Descriptor,
+    generation: &str,
+    authority: Option<u16>,
+    network: Option<NetworkAttachment>,
+) -> Result<String> {
+    artifact.validate(false)?;
+    ensure!(
+        artifact.application.networking() == network.is_some(),
+        "Hermit network capability differs from its captured upstream"
+    );
     ensure!(
         (artifact.authority == AuthorityMode::Normal) == authority.is_some(),
         "Hermit authority does not match artifact"
@@ -132,6 +202,7 @@ pub fn preparing_with_authority(
             inode: metadata.as_ref().map(MetadataExt::ino),
             offset: metadata.as_ref().map_or(0, fs::Metadata::len),
             authority,
+            network,
         },
     )?;
     Ok(nonce)
@@ -185,6 +256,21 @@ pub fn control_boot_matches(
         && execution.nonce.as_bytes() == challenge)
 }
 
+/// Recheck the original upstream incarnation immediately before XML rendering.
+pub fn network_boot_matches(
+    name: &str,
+    artifact: &Descriptor,
+    nonce: &str,
+    network: &NetworkAttachment,
+) -> Result<bool> {
+    let path = record(&name.parse()?);
+    crate::state::trusted(&path)?;
+    let execution: Execution = crate::state::read(&path)?;
+    Ok(execution.boot_id == crate::state::boot_id()?.to_string()
+        && execution.artifact == *artifact
+        && execution.nonce == nonce
+        && execution.network.as_ref() == Some(network))
+}
 /// Require execution evidence from this boot and this Xen domain, independently of process state.
 /// The isolated readiness marker means the service is executing with IPC disabled.
 pub fn ready(name: &str, artifact: &Descriptor, xid: u32) -> Result<()> {
@@ -210,9 +296,51 @@ pub fn ready(name: &str, artifact: &Descriptor, xid: u32) -> Result<()> {
             && execution.inode.is_none_or(|inode| inode == metadata.ino()),
         "Hermit console rotated during startup"
     );
-    file.seek(SeekFrom::Start(execution.offset))?;
+    let start = if artifact.application.networking() {
+        execution
+            .offset
+            .max(metadata.len().saturating_sub(64 * 1024))
+    } else {
+        execution.offset
+    };
+    file.seek(SeekFrom::Start(start))?;
     let mut output = String::new();
     file.take(256 * 1024).read_to_string(&mut output)?;
+    if artifact.application.networking() {
+        use airlock_qubes_network::status::{Report, State};
+        // The app republishes at least once per second. A live Xen domain with
+        // an old ready line is insufficient evidence of a progressing service.
+        ensure!(
+            metadata.modified()?.elapsed()?.as_secs() <= 10,
+            "firewall status has expired"
+        );
+        let latest = output
+            .lines()
+            .rev()
+            .map(console_line)
+            .find(|line| {
+                line.starts_with("AIRLOCK_FIREWALL_STATUS ")
+                    || line.starts_with("AIRLOCK_FIREWALL_STOP")
+            })
+            .context("firewall has not published current-boot status")?;
+        let json = latest
+            .strip_prefix("AIRLOCK_FIREWALL_STATUS ")
+            .context("firewall stopped")?;
+        ensure!(json.len() <= 1024, "oversized firewall status");
+        let report: Report = serde_json::from_str(json)?;
+        let status = report.snapshot;
+        ensure!(
+            report.boot == execution.nonce
+                && execution.network.is_some()
+                && status.revision > 0
+                && status.state == State::Ready
+                && status.expected <= 4
+                && status.interfaces == status.expected
+                && status.admitted == status.interfaces,
+            "firewall configuration, policies or native devices are not ready"
+        );
+        return Ok(());
+    }
     let mode = match artifact.authority {
         AuthorityMode::Disconnected => "authority=disconnected readiness=isolated",
         AuthorityMode::Normal => "authority=normal readiness=connected",
@@ -379,6 +507,49 @@ pub fn boot_xml_with_scratch(
         &airlock_nix_core::identity::GuestName,
     )>,
 ) -> Result<String> {
+    boot_xml_context(xml, artifact, memory, nonce, authority, scratch, None)
+}
+
+/// Admit the one standard Qubes upstream vif belonging to this captured relationship.
+pub fn boot_xml_with_network(
+    xml: &str,
+    artifact: &Descriptor,
+    memory: u64,
+    nonce: &str,
+    network: &NetworkAttachment,
+) -> Result<String> {
+    boot_xml_context(xml, artifact, memory, nonce, None, None, Some(network))
+}
+
+/// Keep both profiles on the existing bounded XML reader/writer and loader checks.
+fn boot_xml_context(
+    xml: &str,
+    artifact: &Descriptor,
+    memory: u64,
+    nonce: &str,
+    authority: Option<u16>,
+    scratch: Option<(
+        &airlock_nix_core::hermit_artifact::ScratchDisk,
+        &airlock_nix_core::identity::GuestName,
+    )>,
+    network: Option<&NetworkAttachment>,
+) -> Result<String> {
+    artifact.validate(false)?;
+    ensure!(
+        artifact.application.networking() == network.is_some()
+            && !(network.is_some() && scratch.is_some()),
+        "undeclared Hermit network or scratch device"
+    );
+    if let Some(network) = network {
+        ensure!(
+            network.xid > 0
+                && network.xid < 0x7ff0
+                && network.mac.len() == 17
+                && !network.address.is_unspecified()
+                && !network.address.is_multicast(),
+            "invalid captured Qubes upstream"
+        );
+    }
     if let Some((disk, _)) = scratch {
         disk.validate()?;
     }
@@ -421,6 +592,8 @@ pub fn boot_xml_with_scratch(
     let mut cpus = 0;
     let mut disks = 0;
     let mut disk_fields = 0_u8;
+    let mut interfaces = 0;
+    let mut network_fields = 0_u8;
     loop {
         let event = reader.read_event()?;
         match &event {
@@ -430,7 +603,6 @@ pub fn boot_xml_with_scratch(
                     !matches!(
                         name.as_str(),
                         "initrd"
-                            | "interface"
                             | "hostdev"
                             | "cmdline"
                             | "loader"
@@ -459,6 +631,33 @@ pub fn boot_xml_with_scratch(
                         ))
                     })
                     .collect::<Result<std::collections::BTreeMap<_, _>>>()?;
+                if path == ["domain", "devices", "interface"] {
+                    let network = network.context("undeclared network interface")?;
+                    let address = network.address.to_string();
+                    let address6 = network.address6.map(|address| address.to_string());
+                    let (bit, key, expected) = match name.as_str() {
+                        "mac" => (1, "address", network.mac.as_str()),
+                        "backenddomain" => (2, "name", network.provider.as_str()),
+                        "script" => (4, "path", "vif-route-qubes"),
+                        "ip" if attributes.get("family").map(String::as_str) == Some("ipv6") => (
+                            16,
+                            "address",
+                            address6.as_deref().context("undeclared IPv6 attachment")?,
+                        ),
+                        "ip" => (8, "address", address.as_str()),
+                        _ => anyhow::bail!("unsupported Hermit network option"),
+                    };
+                    ensure!(
+                        matches!(event, Event::Empty(_))
+                            && network_fields & bit == 0
+                            && attributes.len() == (if bit == 16 { 2 } else { 1 })
+                            && attributes.get(key).map(String::as_str) == Some(expected),
+                        "network interface differs from captured Qubes relationship"
+                    );
+                    network_fields |= bit;
+                } else if path.iter().any(|part| part == "interface") {
+                    anyhow::bail!("nested Hermit network option");
+                }
                 if path == ["domain", "devices", "disk"] {
                     let (bit, key, expected) = match name.as_str() {
                         "driver" => (1, "name", "phy"),
@@ -483,6 +682,18 @@ pub fn boot_xml_with_scratch(
                     anyhow::bail!("nested Hermit disk option");
                 }
                 match name.as_str() {
+                    "interface" => {
+                        ensure!(
+                            network.is_some()
+                                && path == ["domain", "devices"]
+                                && interfaces == 0
+                                && matches!(event, Event::Start(_))
+                                && attributes.len() == 1
+                                && attributes.get("type").map(String::as_str) == Some("ethernet"),
+                            "undeclared Hermit interface"
+                        );
+                        interfaces += 1;
+                    }
                     "disk" => {
                         ensure!(
                             disk_source.is_some()
@@ -540,6 +751,10 @@ pub fn boot_xml_with_scratch(
             Event::Text(text) => {
                 let text = text.decode()?;
                 if !text.trim().is_empty() {
+                    ensure!(
+                        !path.iter().any(|part| part == "interface"),
+                        "unexpected network interface text"
+                    );
                     ensure!(
                         !path.iter().any(|part| part == "disk"),
                         "unexpected Hermit disk text"
@@ -603,6 +818,13 @@ pub fn boot_xml_with_scratch(
             && cpus == 1
             && disks == usize::from(disk_source.is_some())
             && (disk_source.is_none() || disk_fields == 15)
+            && interfaces == usize::from(network.is_some())
+            && network_fields
+                == network.map_or(0, |network| if network.address6.is_some() {
+                    31
+                } else {
+                    15
+                })
             && path.is_empty(),
         "incomplete Hermit XML"
     );

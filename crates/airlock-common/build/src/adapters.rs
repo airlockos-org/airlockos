@@ -40,6 +40,8 @@ pub fn qubes(pkgs: &NixValue, workspace: &Workspace) -> Package {
             airlock-closure = airlock_qubes:ClosurePool
             [qubes.vm]
             HermitVM = airlock_qubes:HermitVM
+            [qubes.ext]
+            airlock-hermit-network = airlock_qubes:HermitNetworking
             ENTRY_POINTS
             runHook postInstall
         "#, site_packages = pkgs.clone().select("python3.sitePackages"),

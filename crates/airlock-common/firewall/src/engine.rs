@@ -282,6 +282,35 @@ impl Engine {
     /// Last control revision applied to mappings and queued decisions.
     pub closed spec fn revision_value(&self) -> u64 { self.revision }
 
+    /// A configured gateway has a positive, unexpired solicited ARP cache entry.
+    pub closed spec fn gateway_known(&self, view: View, now: u64) -> bool {
+        match view.configuration_value() {
+            Some(config) => exists|i: int| 0 <= i < self.neighbors@.len()
+                && Ip::v4_value(self.neighbors@[i].ip) == config.gateway_value()
+                && self.neighbors@[i].mac.is_some() && self.neighbors@[i].expires > now,
+            None => false,
+        }
+    }
+
+    /// Report a still-fresh solicited gateway answer without treating it as
+    /// permission or proof of internet reachability. An unknown gateway does
+    /// not imply that the client's isolation boundary has failed.
+    pub fn gateway_reachable(&self, view: &View, now: u64) -> (reachable: bool)
+        requires self.valid(), view.valid(),
+        ensures reachable == self.gateway_known(*view, now),
+    {
+        let Some(config) = view.config() else { return false; };
+        let Some(gateway) = config.gateway().ipv4() else { return false; };
+        proof {
+            assert forall|other: [u8; 4]| Ip::v4_value(other) == Ip::v4_value(gateway) implies other == gateway by {
+                Ip::v4_injective(other, gateway);
+            }
+        }
+        self.neighbors.iter().any(|entry: &Neighbor| -> (known: bool)
+            ensures known == (Ip::v4_value(entry.ip) == config.gateway_value() && entry.mac.is_some() && entry.expires > now),
+        { entry.ip == gateway && entry.mac.is_some() && entry.expires > now })
+    }
+
     /// Whether queue reservations belong to these exact native lifetime labels.
     pub closed spec fn owns(&self, labels: (u32, u32, u16)) -> bool {
         exists|i: int| 0 <= i < self.links@.len() && self.links@[i].owner.labels() == labels

@@ -10,6 +10,9 @@ pub mod desktop;
 
 pub mod adapters;
 
+/// Shared production Hermit source projections and locked dependency catalogs.
+pub mod hermit;
+
 pub mod tools;
 
 pub mod upstream;

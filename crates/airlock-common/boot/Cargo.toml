@@ -8,6 +8,7 @@ license = "MIT"
 description = "Validated startup challenges shared by Hermit services"
 
 [dependencies]
+serde = { version = "1", default-features = false, features = ["derive"] }
 uuid = { version = "1.28", default-features = false }
 vstd = { version = "=0.0.0-2026-10-18-0147", default-features = false, features = ["alloc"] }
 

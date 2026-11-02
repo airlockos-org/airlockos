@@ -10,6 +10,8 @@ use pyo3::{
     types::{PyDict, PyTuple},
 };
 
+mod network;
+
 /// Decode the exact image identity retained in the VM's approved configuration.
 fn artifact(vm: &Bound<'_, PyAny>) -> PyResult<Descriptor> {
     let value = vm
@@ -52,7 +54,7 @@ fn prepare_scratch(
         let volume = volumes.get_item("volatile")?;
         let current = volume.getattr("size")?.extract::<u64>()?;
         if disk.is_none_or(|disk| disk.bytes != current) {
-            let name = vm
+            let name: airlock_nix_core::identity::GuestName = vm
                 .getattr("name")?
                 .extract::<String>()?
                 .parse()
@@ -184,6 +186,52 @@ fn authority(vm: &Bound<'_, PyAny>, image: &Descriptor) -> PyResult<Option<u16>>
     Ok(Some(domain))
 }
 
+/// Bind one boot to the live relationships appropriate to its application.
+/// Qubes 4.3.44 starts netvm between pre-start and pre-spawn, so a network
+/// application captures its upstream only at pre-spawn. Clipboard keeps its
+/// existing earlier authority/scratch preparation ordering.
+fn prepare_boot(vm: &Bound<'_, PyAny>, image: &Descriptor) -> PyResult<()> {
+    let py = vm.py();
+    let name = vm.getattr("name")?.extract::<String>()?;
+    let generation = vm
+        .getattr("features")?
+        .get_item("airlock-hermit-generation")?
+        .extract::<String>()?;
+    let authority = authority(vm, image)?;
+    let upstream = network::attachment(vm, image)?;
+    let nonce = py
+        .detach(|| {
+            if let Some(upstream) = upstream {
+                airlock_dom0_service::hermit::preparing_with_network(
+                    &name,
+                    image,
+                    &generation,
+                    upstream,
+                )
+            } else {
+                airlock_dom0_service::hermit::preparing_with_authority(
+                    &name,
+                    image,
+                    &generation,
+                    authority,
+                )
+            }
+        })
+        .map_err(|error| crate::exception(py, "QubesException", error))?;
+    vm.setattr("_airlock_hermit_nonce", nonce)?;
+    vm.setattr("_airlock_hermit_authority", authority)?;
+    vm.getattr("log")?.call_method1(
+        "info",
+        (
+            "airlock-hermit state=verified artifact=%s source=%s generation=%s",
+            image.sha256.as_str(),
+            image.source_revision.as_str(),
+            generation,
+        ),
+    )?;
+    Ok(())
+}
+
 /// Complete the native control startup handoff on Qubes' own event loop.
 /// Guest readiness selects no clients or rules: the protected boot record and
 /// current upstream NetVM relationships determine the normal policy rewrites.
@@ -191,7 +239,8 @@ fn authority(vm: &Bound<'_, PyAny>, image: &Descriptor) -> PyResult<Option<u16>>
 /// within a boot. A qubesd restart may safely repeat the upstream replacement.
 fn refresh_control_policies(vm: &Bound<'_, PyAny>) -> PyResult<()> {
     let py = vm.py();
-    if !vm.getattr("provides_network")?.is_truthy()?
+    if !artifact(vm)?.application.networking()
+        || !vm.getattr("provides_network")?.is_truthy()?
         || !vm.call_method0("is_running")?.is_truthy()?
     {
         return Ok(());
@@ -285,12 +334,15 @@ fn invoke(
             vm.setattr("_airlock_hermit_scratch", "")?;
             vm.setattr("_airlock_hermit_control_refreshed", py.None())?;
             let image = artifact(&vm)?;
+            network::validate_provider(&vm, &image)?;
             let memory = vm.getattr("memory")?.extract::<u64>()?;
             let valid = vm.getattr("virt_mode")?.extract::<String>()? == "pvh"
                 && vm.getattr("vcpus")?.extract::<u64>()? == 1
                 && vm.getattr("maxmem")?.extract::<u64>()? == memory
                 && vm.getattr("kernel")?.extract::<String>()?.is_empty()
-                && vm.getattr("netvm")?.is_none()
+                && (image.application.networking() != vm.getattr("netvm")?.is_none())
+                && (image.application.networking()
+                    == vm.getattr("provides_network")?.is_truthy()?)
                 && vm.getattr("guivm")?.is_none()
                 && vm.getattr("audiovm")?.is_none()
                 && !vm
@@ -317,33 +369,16 @@ fn invoke(
                 serde_json::to_string(&disk)
                     .map_err(|e| crate::exception(py, "QubesException", e))?,
             )?;
-            let name = vm.getattr("name")?.extract::<String>()?;
-            let generation = vm
-                .getattr("features")?
-                .get_item("airlock-hermit-generation")?
-                .extract::<String>()?;
-            let authority = authority(&vm, &image)?;
-            let nonce = py
-                .detach(|| {
-                    airlock_dom0_service::hermit::preparing_with_authority(
-                        &name,
-                        &image,
-                        &generation,
-                        authority,
-                    )
-                })
-                .map_err(|error| crate::exception(py, "QubesException", error))?;
-            vm.setattr("_airlock_hermit_nonce", nonce)?;
-            vm.setattr("_airlock_hermit_authority", authority)?;
-            vm.getattr("log")?.call_method1(
-                "info",
-                (
-                    "airlock-hermit state=verified artifact=%s source=%s generation=%s",
-                    image.sha256.as_str(),
-                    image.source_revision.as_str(),
-                    generation,
-                ),
-            )?;
+            vm.setattr("_airlock_hermit_nonce", "")?;
+            if !image.application.networking() {
+                prepare_boot(&vm, &image)?;
+            }
+        }
+        "on_pre_spawn" => {
+            let image = artifact(&vm)?;
+            if image.application.networking() {
+                prepare_boot(&vm, &image)?;
+            }
         }
         "create_config_file" => {
             let disk = scratch(&vm)?;
@@ -379,19 +414,40 @@ fn invoke(
                     "clipboard authority restarted during boot",
                 ));
             }
-            let name = vm
+            let name: airlock_nix_core::identity::GuestName = vm
                 .getattr("name")?
                 .extract::<String>()?
                 .parse()
                 .map_err(|e| crate::exception(py, "QubesException", e))?;
-            let xml = airlock_dom0_service::hermit::boot_xml_with_scratch(
-                &xml,
-                &image,
-                memory,
-                &nonce,
-                authority,
-                disk.as_ref().map(|disk| (disk, &name)),
-            )
+            let upstream = network::attachment(&vm, &image)?;
+            let xml = if let Some(upstream) = upstream {
+                if !airlock_dom0_service::hermit::network_boot_matches(
+                    name.as_str(),
+                    &image,
+                    &nonce,
+                    &upstream,
+                )
+                .map_err(|error| crate::exception(py, "QubesException", error))?
+                {
+                    return Err(crate::exception(
+                        py,
+                        "QubesException",
+                        "upstream changed during firewall startup",
+                    ));
+                }
+                airlock_dom0_service::hermit::boot_xml_with_network(
+                    &xml, &image, memory, &nonce, &upstream,
+                )
+            } else {
+                airlock_dom0_service::hermit::boot_xml_with_scratch(
+                    &xml,
+                    &image,
+                    memory,
+                    &nonce,
+                    authority,
+                    disk.as_ref().map(|disk| (disk, &name)),
+                )
+            }
             .map_err(|error| crate::exception(py, "QubesException", error))?;
             return Ok(xml.into_pyobject(py)?.into_any().unbind());
         }
@@ -463,6 +519,7 @@ pub(super) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     let ready_event = format!("domain-qdb-change:{READY_PATH}");
     for (name, events) in [
         ("on_pre_start", vec!["domain-pre-start"]),
+        ("on_pre_spawn", vec!["domain-pre-spawn"]),
         ("on_started", vec!["domain-start"]),
         ("on_stopped", vec!["domain-stopped"]),
         ("on_start_failed", vec!["domain-start-failed"]),
@@ -490,4 +547,9 @@ pub(super) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
         descriptor::subclass(py, "HermitVM", base, &namespace)?,
     )?;
     Ok(())
+}
+
+/// Register only the readonly network relationship guards on upstream Qubes events.
+pub(super) fn register_network(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    network::register(module)
 }

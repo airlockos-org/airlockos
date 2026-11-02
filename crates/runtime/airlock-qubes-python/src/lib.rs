@@ -67,6 +67,11 @@ fn __getattr__(py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
         hermit::register(&module)?;
         return Ok(module.getattr(name)?.unbind());
     }
+    if name == "HermitNetworking" {
+        let module = py.import("airlock_qubes")?;
+        hermit::register_network(&module)?;
+        return Ok(module.getattr(name)?.unbind());
+    }
     if name != "AMDVBIOS" {
         return Err(pyo3::exceptions::PyAttributeError::new_err(name.to_owned()));
     }

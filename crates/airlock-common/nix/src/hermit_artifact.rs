@@ -11,6 +11,13 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub use airlock_boot_core::application::Application;
+
+/// Old admitted descriptors predate network capabilities and remain clipboard-only.
+fn legacy_application() -> Application {
+    Application::Clipboard
+}
+
 /// Largest executable accepted, including debugging information.
 pub const MAX_EXECUTABLE_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -22,6 +29,23 @@ pub const MAX_EXECUTABLE_BYTES: u64 = 64 * 1024 * 1024;
 pub struct ScratchDisk {
     /// Capacity in bytes: a whole MiB between 1 and 256 MiB.
     pub bytes: u64,
+}
+
+/// Exact upstream observed through Qubes after resolving the reviewed VM relationship.
+/// It describes a device; only the admitted lifecycle may request its creation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkAttachment {
+    /// Declared upstream VM, never selected by packet data or a guest message.
+    pub provider: crate::identity::GuestName,
+    /// Provider's current Xen incarnation, rechecked before rendering boot XML.
+    pub xid: u16,
+    /// Qubes' already validated canonical MAC property, compared exactly in XML.
+    pub mac: String,
+    /// IPv4 address assigned by the existing upstream Qubes NetVM.
+    pub address: std::net::Ipv4Addr,
+    /// Optional ordinary Qubes IPv6 attachment metadata; the initial app blocks IPv6.
+    pub address6: Option<std::net::Ipv6Addr>,
 }
 
 impl ScratchDisk {
@@ -81,6 +105,9 @@ pub struct Descriptor {
     pub build_lock: LockHash,
     /// Whether the executable contains the controlled test authority.
     pub authority: AuthorityMode,
+    /// Reviewed executable capability profile; omission never grants networking.
+    #[serde(default = "legacy_application")]
+    pub application: Application,
 }
 
 /// Image validation failed before the executable could be selected for boot.
@@ -110,6 +137,10 @@ impl Descriptor {
         require(
             laboratory || self.authority != AuthorityMode::Laboratory,
             "laboratory authority",
+        )?;
+        require(
+            !self.application.networking() || self.authority == AuthorityMode::Disconnected,
+            "network provider cannot acquire clipboard authority",
         )
     }
 

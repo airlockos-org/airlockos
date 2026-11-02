@@ -324,11 +324,42 @@ impl Topology {
                     "{name}: executable is outside its system object"
                 );
                 ensure!(
-                    d.class_name == "HermitVM"
-                        && d.template == VmReference::Disabled
-                        && d.netvm == VmReference::Disabled,
-                    "{name}: Hermit requires an isolated, template-free domain"
+                    d.class_name == "HermitVM" && d.template == VmReference::Disabled,
+                    "{name}: Hermit requires a template-free HermitVM"
                 );
+                let clients = self.domains.values().filter(|client| matches!(&client.netvm, VmReference::Named(provider) if provider == name.as_vm_name())).count();
+                let upstream = match &d.netvm {
+                    VmReference::Named(provider) => {
+                        provider != name.as_vm_name()
+                            && self.domains.iter().any(|(name, domain)| {
+                                name.as_vm_name() == provider
+                                    && domain.prefs.get("provides_network")
+                                        == Some(&Value::Bool(true))
+                            })
+                    }
+                    _ => false,
+                };
+                ensure!(
+                    artifact.application.valid_links(
+                        upstream,
+                        d.prefs.get("provides_network") == Some(&Value::Bool(true)),
+                        clients
+                    ),
+                    "{name}: undeclared Hermit networking capabilities"
+                );
+                if artifact.application.networking() {
+                    ensure!(
+                        d.backend.hermit_scratch().is_none()
+                            && self.prefs.get("default_netvm").and_then(Value::as_str)
+                                != Some(name.as_str()),
+                        "{name}: experimental firewall has no scratch disk or inherited default clients"
+                    );
+                } else {
+                    ensure!(
+                        d.netvm == VmReference::Disabled,
+                        "{name}: clipboard networking is disabled"
+                    );
+                }
                 ensure!(
                     d.prefs.get("virt_mode") == Some(&Value::from("pvh"))
                         && d.prefs.get("kernel") == Some(&Value::from(""))
@@ -339,7 +370,7 @@ impl Topology {
                 );
                 let memory = d.prefs.get("memory").and_then(Value::as_u64).unwrap_or(0);
                 ensure!(
-                    (16..=256).contains(&memory)
+                    artifact.application.valid_memory(memory)
                         && d.prefs.get("maxmem").and_then(Value::as_u64) == Some(memory),
                     "{name}: invalid Hermit memory"
                 );

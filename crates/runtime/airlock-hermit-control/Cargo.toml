@@ -13,4 +13,4 @@ airlock-qubes-network = { path = "../../airlock-common/qubes-network" }
 
 [target.'cfg(target_os = "hermit")'.dependencies]
 # Native control transport and interface-lifetime support; machine adoption is separate.
-xen-transport = { git = "https://github.com/airlockos-org/hermit-xen", rev = "7f54bfa8a15aa450f928e4edcf3970c9dcef5721", features = ["hermit"] }
+xen-transport = { git = "https://github.com/airlockos-org/hermit-xen", rev = "df2230ba6defef37b4be4557ca57fe094fbaf9d6", features = ["hermit"] }

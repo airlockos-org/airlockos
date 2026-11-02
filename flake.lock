@@ -195,16 +195,16 @@
         "rust-overlay": "rust-overlay"
       },
       "locked": {
-        "lastModified": 1793286597,
-        "narHash": "sha256-mKXXAoMr+MWFy+Wu1yHNWANll0xalgHDyBie6zupl44=",
-        "rev": "909d25eff50a13dfc64e0a5d56a1c9dac16795e4",
-        "revCount": 7,
+        "lastModified": 1793621884,
+        "narHash": "sha256-gWRYg0WN3gNG3skFDGWu7drGJ/7q9E/EWPzqhDvKEmg=",
+        "rev": "df2230ba6defef37b4be4557ca57fe094fbaf9d6",
+        "revCount": 25,
         "submodules": true,
         "type": "git",
         "url": "https://github.com/airlockos-org/hermit-xen"
       },
       "original": {
-        "rev": "909d25eff50a13dfc64e0a5d56a1c9dac16795e4",
+        "rev": "df2230ba6defef37b4be4557ca57fe094fbaf9d6",
         "submodules": true,
         "type": "git",
         "url": "https://github.com/airlockos-org/hermit-xen"

@@ -7,6 +7,9 @@
 
 use vstd::prelude::*;
 
+/// Reviewed application capabilities shared by authoring, admission and startup.
+pub mod application;
+
 verus! {
 
 /// Deployment's canonical, printable UUID challenge; never an authorization token.

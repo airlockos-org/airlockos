@@ -50,6 +50,7 @@ dependencies = [
 name = "airlock-boot-core"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "uuid",
  "vstd",
 ]
@@ -137,6 +138,7 @@ version = "0.1.0"
 name = "airlock-dev"
 version = "0.1.0"
 dependencies = [
+ "airlock-build",
  "airlock-config",
  "airlock-image",
  "airlock-nix-core",
@@ -177,6 +179,7 @@ dependencies = [
  "airlock-machine-planning",
  "airlock-nix-core",
  "airlock-qubes",
+ "airlock-qubes-network",
  "anyhow",
  "clap",
  "flate2",
@@ -213,7 +216,7 @@ version = "0.1.0"
 dependencies = [
  "airlock-boot-core",
  "airlock-qubes-network",
- "xen-transport 0.1.0 (git+https://github.com/airlockos-org/hermit-xen?rev=7f54bfa8a15aa450f928e4edcf3970c9dcef5721)",
+ "xen-transport",
 ]
 
 [[package]]
@@ -264,6 +267,7 @@ dependencies = [
 name = "airlock-nix-core"
 version = "0.1.0"
 dependencies = [
+ "airlock-boot-core",
  "airlock-machine-planning",
  "airlock-store-packer",
  "anyhow",
@@ -342,7 +346,7 @@ dependencies = [
  "airlock-bounded-heap",
  "airlock-clipboard-core",
  "hermit",
- "xen-transport 0.1.0 (git+https://github.com/airlockos-org/hermit-xen?rev=909d25eff50a13dfc64e0a5d56a1c9dac16795e4)",
+ "xen-transport",
 ]
 
 [[package]]
@@ -390,7 +394,8 @@ dependencies = [
  "airlock-qubes-network",
  "getrandom 0.3.4",
  "hermit",
- "xen-transport 0.1.0 (git+https://github.com/airlockos-org/hermit-xen?rev=7f54bfa8a15aa450f928e4edcf3970c9dcef5721)",
+ "serde_json",
+ "xen-transport",
 ]
 
 [[package]]
@@ -450,7 +455,7 @@ dependencies = [
  "tar",
  "tempfile",
  "x11rb",
- "xen-transport 0.1.0 (git+https://github.com/airlockos-org/hermit-xen?rev=909d25eff50a13dfc64e0a5d56a1c9dac16795e4)",
+ "xen-transport",
 ]
 
 [[package]]
@@ -484,7 +489,7 @@ dependencies = [
  "tar",
  "tempfile",
  "x11rb",
- "xen-transport 0.1.0 (git+https://github.com/airlockos-org/hermit-xen?rev=909d25eff50a13dfc64e0a5d56a1c9dac16795e4)",
+ "xen-transport",
 ]
 
 [[package]]
@@ -4944,12 +4949,7 @@ checksum = "213b7324336b53d2414b2db8537e56544d981803139155afa84f76eeebb7a546"
 [[package]]
 name = "xen-transport"
 version = "0.1.0"
-source = "git+https://github.com/airlockos-org/hermit-xen?rev=7f54bfa8a15aa450f928e4edcf3970c9dcef5721#7f54bfa8a15aa450f928e4edcf3970c9dcef5721"
-
-[[package]]
-name = "xen-transport"
-version = "0.1.0"
-source = "git+https://github.com/airlockos-org/hermit-xen?rev=909d25eff50a13dfc64e0a5d56a1c9dac16795e4#909d25eff50a13dfc64e0a5d56a1c9dac16795e4"
+source = "git+https://github.com/airlockos-org/hermit-xen?rev=df2230ba6defef37b4be4557ca57fe094fbaf9d6#df2230ba6defef37b4be4557ca57fe094fbaf9d6"
 dependencies = [
  "libc",
 ]

@@ -13,6 +13,7 @@ name = "airlock-dev"
 path = "src/main.rs"
 
 [dependencies]
+airlock-build = { path = "../../airlock-common/build" }
 airlock-config = { path = "../../airlock-config" }
 airlock-image = { path = "../airlock-image", default-features = false }
 airlock-nix-core = { path = "../../airlock-common/nix", features = ["runtime", "artifacts"] }

@@ -303,6 +303,10 @@ impl Schema<'_> {
     fn hermit_artifact(&self) -> NixValue {
         let mut fields = vec![
             (
+                "application",
+                self.option(self.enumeration(&["clipboard", "firewall"]), Some("clipboard".into()), "Reviewed executable capability profile; legacy descriptors remain clipboard-only."),
+            ),
+            (
                 "schema",
                 self.option(
                     self.enumeration(&["airlock.hermit-pvh.v1"]),

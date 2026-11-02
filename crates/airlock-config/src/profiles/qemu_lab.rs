@@ -21,6 +21,19 @@ pub fn machine() -> Result<MachineSnapshot, AuthoringError> {
     firewall.set_memory(Memory::Fixed(MiB(256)));
     machine.add(&firewall)?;
 
+    // Explicit experimental paths coexist with the Linux defaults. Starting a
+    // client follows ordinary provider dependencies; stopping the native provider
+    // never changes these clients' netvm reference to a different firewall.
+    let native_firewall = Vm::hermit_firewall("sys-firewall-hermit", &network)?;
+    native_firewall.set_autostart(false);
+    machine.add(&native_firewall)?;
+    for name in ["usr-firewall-a", "usr-firewall-b"] {
+        let client = Vm::command(name, &native_firewall, GiB(1))?;
+        client.set_memory(Memory::Fixed(MiB(512)));
+        client.set_autostart(false);
+        machine.add(&client)?;
+    }
+
     let home = Vm::personal("usr-home", &firewall, GiB(4))?;
     home.set_memory(Memory::Fixed(MiB(1536)));
     home.add_module(application_session());

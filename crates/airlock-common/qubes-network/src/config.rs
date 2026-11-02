@@ -20,7 +20,7 @@ verus! {
 broadcast use { vstd::seq::group_seq_lemmas, vstd::seq_lib::group_seq_properties, vstd::seq::Seq::lemma_as_ref_index, crate::address::cut_unique, Ip::unique, crate::address::token_cut };
 
 /// Matches the current native backend's bound, rather than an input-driven heap size.
-pub const MAX_CLIENTS: usize = 4;
+pub const MAX_CLIENTS: usize = airlock_boot_core::application::NETWORK_CLIENTS;
 
 /// One byte-exact MAC observation from the native `/qubes-mac` key.
 pub struct Mac {

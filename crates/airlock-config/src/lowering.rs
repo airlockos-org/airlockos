@@ -102,9 +102,11 @@ pub(crate) fn builders(machine: &MachineSnapshot) -> PackageFunction {
                             .mk_nix_native_domain()
                             .try_call(domain(&inputs, vm))
                             .expect("statically structured domain arguments"),
-                        crate::model::GuestBackend::Hermit { scratch, .. } => {
+                        crate::model::GuestBackend::Hermit { application, scratch } => {
                             builders.mk_hermit_domain().call(nix_record! {
                                 "name": vm.name.as_str(),
+                                "application": match application { crate::model::HermitApplication::Clipboard => "clipboard", crate::model::HermitApplication::Firewall => "firewall" },
+                                "upstream": vm.role.uplink().map_or_else(NixValue::null, |upstream| upstream.as_str().into()),
                                 "memory": i64::from(vm.settings.memory.bounds().0.0),
                                 "vcpus": i64::from(vm.settings.vcpus),
                                 "autostart": vm.settings.autostart.unwrap_or(false),

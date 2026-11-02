@@ -23,6 +23,7 @@ default = ["qubes"]
 qubes = ["dep:airlock-qubes"]
 
 [dependencies]
+airlock-qubes-network = { path = "../../../airlock-common/qubes-network" }
 airlock-deployment-core = { path = "../../../airlock-common/deployment" }
 airlock-machine-planning = { path = "../../../airlock-common/machine-planning", features = ["wire"] }
 airlock-qubes = { path = "../../../airlock-common/qubes", optional = true }
