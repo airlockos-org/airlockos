@@ -12,6 +12,11 @@ use xen_transport::hermit::{
     store,
 };
 
+/// Match the native network driver's bounded XenStore exchange budget. Watch
+/// polling can issue an actual round trip to drain queued events; its deadline
+/// must allow daemon scheduling independently of the maintenance wake interval.
+const CONTROL_TIMEOUT_NS: u64 = 500_000_000;
+
 /// Fatal errors preserve uncertain native resources until VM teardown. No
 /// failure path fabricates a replacement connection or retries ambiguous closes.
 #[derive(Debug)]
@@ -85,7 +90,9 @@ pub fn run(challenge: Challenge, seed: [u8; 32]) -> Result<(), Error> {
     let upstream_peer = core::str::from_utf8(&scratch[..length])
         .ok()
         .and_then(|text| text.parse::<u16>().ok())
-        .filter(|peer| *peer > 0 && *peer < 0x7ff0)
+        // Xen permits dom0 as a network backend. This toolstack-owned upstream
+        // identity is separate from admission of untrusted downstream clients.
+        .filter(|peer| *peer < 0x7ff0)
         .ok_or(Error::Discovery)?;
     let mut upstream = Netfront::open(upstream_peer)?;
     let mut watch = store::Watch::new(
@@ -146,7 +153,7 @@ pub fn run(challenge: Challenge, seed: [u8; 32]) -> Result<(), Error> {
         }
         // Watch hints are not peer identities. Periodic rereads cover coalescing
         // and failed client startup without spinning on absent native records.
-        let hint = watch.changed(now.saturating_add(1_000_000))?;
+        let hint = watch.changed(endpoint::now_ns().saturating_add(CONTROL_TIMEOUT_NS))?;
         if hint || now >= discovery_at {
             discover(&mut clients, &mut engine, &mut scratch, now)?;
             discovery_at = now.saturating_add(1_000_000_000);
@@ -243,7 +250,10 @@ pub fn run(challenge: Challenge, seed: [u8; 32]) -> Result<(), Error> {
         }
         // Maintenance wakeups also drive grant revocation and deadlines when a
         // peer stops producing events. The event counter makes this race safe.
-        endpoint::wait(observed, endpoint::now_ns().saturating_add(1_000_000))?;
+        match endpoint::wait(observed, endpoint::now_ns().saturating_add(1_000_000)) {
+            Ok(()) | Err(xen_transport::Error::Timeout) => (),
+            Err(error) => return Err(error.into()),
+        }
     }
 }
 
@@ -316,13 +326,13 @@ fn discover(
     scratch: &mut [u8; 4096],
     now: u64,
 ) -> Result<(), Error> {
-    let deadline = now.saturating_add(10_000_000);
+    let deadline = endpoint::now_ns().saturating_add(CONTROL_TIMEOUT_NS);
     let length = match store::directory("backend/vif", scratch, deadline) {
         Ok(length) => length,
         Err(xen_transport::Error::Platform(-2)) => 0,
         Err(error) => return Err(error.into()),
     };
-    let peers =
+    let mut peers =
         airlock_qubes_network::backend::peers(&scratch[..length]).ok_or(Error::Discovery)?;
     let mut index = 0;
     while index < clients.len() {
@@ -332,10 +342,15 @@ fn discover(
             if let Some(owner) = client.owner {
                 engine.retire(owner, now);
             }
+            let retired_peer = client.interface.peer();
             // A Closed native owner has already consumed its handle in progress.
             if !closed {
                 client.interface.close()?;
             }
+            // A native close can remove this backend node after the directory
+            // read above. Do not immediately reopen it from that stale hint;
+            // a later discovery can observe any replacement incarnation.
+            peers.retain(|peer| *peer != retired_peer);
         } else {
             index += 1;
         }
@@ -343,6 +358,19 @@ fn discover(
     for peer in peers {
         if clients.iter().any(|client| client.interface.peer() == peer) {
             continue;
+        }
+        // libxl may retain an empty peer parent after vif/0 is removed. This
+        // hint prevents reserving a new native slot for an absent/offline vif;
+        // attach still rechecks reciprocal links and establishes the real owner.
+        let online = format!("backend/vif/{peer}/0/online");
+        match store::value(
+            &online,
+            scratch,
+            endpoint::now_ns().saturating_add(CONTROL_TIMEOUT_NS),
+        ) {
+            Ok(1) if scratch[0] == b'1' => (),
+            Ok(_) | Err(xen_transport::Error::Platform(-2)) => continue,
+            Err(error) => return Err(error.into()),
         }
         if clients.len() >= MAX_CLIENTS {
             return Err(Error::Discovery);

@@ -26,6 +26,13 @@ pub enum Error {
         /// Original native failure code, without control payloads.
         XenError,
     ),
+    /// A native interface operation failed or its completion is uncertain.
+    Interface {
+        /// Fixed adapter operation, never copied from a peer's data.
+        operation: &'static str,
+        /// Original native failure code, without addresses or packet payloads.
+        source: XenError,
+    },
     /// Framing, sequencing, clock, deadline or a bounded control capacity failed.
     Protocol,
     /// The original server closed its native connection.
@@ -197,7 +204,12 @@ impl Session {
     pub fn prepare(&mut self, interface: &mut Netback) -> Result<Option<Pending>, Error> {
         self.alive()?;
         let mut bytes = [0; 128];
-        let observation = interface.assignment(&mut bytes).map_err(Error::Transport)?;
+        let observation = interface
+            .assignment(&mut bytes)
+            .map_err(|source| Error::Interface {
+                operation: "prepare assignment",
+                source,
+            })?;
         let Some(lease) = observation.lease() else {
             return Err(Error::Lease);
         };
@@ -222,7 +234,12 @@ impl Session {
     ) -> Result<Option<Certificate>, Error> {
         self.alive()?;
         let mut bytes = [0; 128];
-        let observation = interface.assignment(&mut bytes).map_err(Error::Transport)?;
+        let observation = interface
+            .assignment(&mut bytes)
+            .map_err(|source| Error::Interface {
+                operation: "admit assignment",
+                source,
+            })?;
         let Some(lease) = observation.lease() else {
             return Err(Error::Lease);
         };
@@ -252,7 +269,11 @@ impl Session {
         if !self.drained()? {
             return Ok(None);
         }
-        if interface.progress().map_err(Error::Transport)? != Status::Ready {
+        if interface.progress().map_err(|source| Error::Interface {
+            operation: "progress",
+            source,
+        })? != Status::Ready
+        {
             return Ok(None);
         }
         let Some(lease) = interface.handle() else {
@@ -379,7 +400,12 @@ impl<'a> Permit<'a> {
     /// Consume a current effect permission for a core-approved output frame.
     /// The application rechecks queued packet revision and destination owner first.
     pub fn send(self, bytes: &[u8]) -> Result<bool, Error> {
-        self.interface.try_send(bytes).map_err(Error::Transport)
+        self.interface
+            .try_send(bytes)
+            .map_err(|source| Error::Interface {
+                operation: "send",
+                source,
+            })
     }
 
     /// Actual source-address authority for packet anti-spoofing decisions.
@@ -396,7 +422,13 @@ impl<'a> Permit<'a> {
     /// This alone is not a packet allow decision; forwarding consumers must apply
     /// source checks and the current ordered snapshot before any output effect.
     pub fn receive(self, output: &'a mut [u8; 4096]) -> Result<Option<Received<'a>>, Error> {
-        match self.interface.receive(output).map_err(Error::Transport)? {
+        match self
+            .interface
+            .receive(output)
+            .map_err(|source| Error::Interface {
+                operation: "receive",
+                source,
+            })? {
             Some(length) => Ok(Some(Received {
                 context: self,
                 bytes: &output[..length],
