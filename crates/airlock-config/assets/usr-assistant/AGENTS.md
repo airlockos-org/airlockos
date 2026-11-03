@@ -12,8 +12,11 @@ asking for permission; apply a deployment when the user's request authorizes it.
 - `usr-assistant` is the user's configuration and administration VM. Its Console,
   Codex, checkout, and private data live here; sys-gui displays its windows.
 - `sys-gui` owns GNOME and forwards application windows. `usr-home` owns the
-  user's applications and files. Both usr-home and usr-assistant connect through
-  `sys-firewall`; `sys-net` owns the network device.
+  user's applications and files. Read each VM's actual `netvm`; the global
+  default does not override explicit assignments. In the Hermit cutover profile,
+  `usr-home` uses native `sys-firewall`, while `usr-assistant` and `sys-ctrl`
+  retain Linux `sys-firewall-old` for recovery. Both paths share `sys-net`,
+  which owns the network device.
 - `sys-ctrl` builds committed sources and submits validated artifacts. Dom0
   owns Xen, Qubes policy, VM configuration, and journalled deployment.
 - The editable machine checkout is `~/airlockos-machine`. Start
