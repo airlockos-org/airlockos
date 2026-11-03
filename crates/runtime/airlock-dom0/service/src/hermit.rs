@@ -56,7 +56,8 @@ pub fn network_contract(
     let VmReference::Named(provider) = &domain.netvm else {
         anyhow::bail!("firewall has no declared upstream");
     };
-    let clients = topology.domains.iter().filter(|(_, client)| matches!(&client.netvm, VmReference::Named(target) if target == name.as_vm_name())).map(|(name, _)| name.clone()).collect();
+    let clients = airlock_machine_core::relationships::Relationships::from(&topology)
+        .network_clients(&name)?;
     Ok(NetworkContract {
         provider: provider.clone().try_into()?,
         clients,

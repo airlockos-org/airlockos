@@ -327,7 +327,9 @@ impl Topology {
                     d.class_name == "HermitVM" && d.template == VmReference::Disabled,
                     "{name}: Hermit requires a template-free HermitVM"
                 );
-                let clients = self.domains.values().filter(|client| matches!(&client.netvm, VmReference::Named(provider) if provider == name.as_vm_name())).count();
+                let clients = crate::relationships::Relationships::from(self)
+                    .network_clients(name)?
+                    .len();
                 let upstream = match &d.netvm {
                     VmReference::Named(provider) => {
                         provider != name.as_vm_name()
@@ -349,10 +351,8 @@ impl Topology {
                 );
                 if artifact.application.networking() {
                     ensure!(
-                        d.backend.hermit_scratch().is_none()
-                            && self.prefs.get("default_netvm").and_then(Value::as_str)
-                                != Some(name.as_str()),
-                        "{name}: experimental firewall has no scratch disk or inherited default clients"
+                        d.backend.hermit_scratch().is_none(),
+                        "{name}: native firewall has no scratch disk"
                     );
                 } else {
                     ensure!(

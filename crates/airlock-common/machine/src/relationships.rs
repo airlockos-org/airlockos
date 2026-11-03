@@ -65,6 +65,28 @@ impl From<&Topology> for Relationships {
 }
 
 impl Relationships {
+    /// Select reviewed downstream clients using the same verified inheritance
+    /// interpreter as lifecycle planning. Explicit null/empty settings never inherit.
+    /// Wire projection and standard collection traversal remain adapter boundaries;
+    /// this observation does not authorize an undeclared or changed live relationship.
+    pub fn network_clients(&self, provider: &GuestName) -> Result<Vec<GuestName>> {
+        let default = self.defaults().netvm;
+        let mut clients = Vec::new();
+        for (name, domain) in &self.domains {
+            let target = airlock_machine_planning::topology::resolve(
+                &typed_reference(&domain.netvm),
+                &default,
+                name.as_str(),
+            )
+            .map_err(|error| relationship_error(name.as_str(), error))?;
+            if target.as_deref() == Some(provider.as_str()) {
+                clients.push(name.clone());
+            }
+        }
+
+        Ok(clients)
+    }
+
     /// Resolve all declared dependency kinds; optionally omit display-provider edges.
     /// References outside the declared set remain visible for lifecycle checks.
     pub fn dependencies(

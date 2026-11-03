@@ -28,6 +28,7 @@ pub fn machine() -> Result<MachineSnapshot, AuthoringError> {
     // Four reviewed clients share the native default. Management and build
     // traffic retain the Linux path, including when the native VM is stopped.
     let native_firewall = Vm::hermit_firewall("sys-firewall", &network)?;
+    native_firewall.set_autostart(true);
     native_firewall.set_feature("ipv6", "1")?;
     machine.add(&native_firewall)?;
     for name in ["usr-firewall-a", "usr-firewall-b"] {
