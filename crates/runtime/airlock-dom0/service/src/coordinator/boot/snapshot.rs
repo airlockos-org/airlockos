@@ -435,12 +435,55 @@ impl Coordinator {
             let mut artifacts = BTreeMap::new();
             match contract {
                 airlock_deployment_core::boot::artifacts::Guest::Hermit { executable, .. } => {
-                    // Hermit boots one authenticated executable and deliberately has no disks.
-                    // Track that file so cache reuse still detects missing or replaced artifacts.
+                    // Qubes may add the declared encrypted scratch volume only when a native
+                    // guest starts. Validate its serialized metadata before excluding volatile
+                    // state below, so that this lifecycle change does not invalidate the cache.
+                    let scratch = topology.domains[name].backend.hermit_scratch();
+                    let admitted_scratch = match (scratch, volumes.children.as_slice()) {
+                        (Some(disk), [volume]) => {
+                            let attrs = &volume.attrs;
+                            let pool = attrs.get("pool").and_then(|name| pools.get(name));
+                            volume.tag == "volume"
+                                && volume.children.is_empty()
+                                && attrs.get("name").is_some_and(|v| v == "volatile")
+                                && attrs.get("vid") == Some(&format!("appvms/{name}/volatile"))
+                                && pool
+                                    .is_some_and(|p| p.get("driver").is_some_and(|v| v == "file"))
+                                && attrs.get("size").and_then(|v| v.parse::<u64>().ok())
+                                    == Some(disk.bytes)
+                                && attrs.get("rw").is_some_and(|v| v == "True")
+                                && attrs.get("ephemeral").is_some_and(|v| v == "True")
+                                && attrs.get("revisions_to_keep").is_some_and(|v| v == "0")
+                                && ["save_on_stop", "snap_on_start"]
+                                    .iter()
+                                    .all(|key| attrs.get(*key).is_none_or(|v| v == "False"))
+                                && ["source", "domain"]
+                                    .iter()
+                                    .all(|key| attrs.get(*key).is_none_or(String::is_empty))
+                                && attrs.keys().all(|key| {
+                                    matches!(
+                                        key.as_str(),
+                                        "name"
+                                            | "pool"
+                                            | "vid"
+                                            | "size"
+                                            | "rw"
+                                            | "ephemeral"
+                                            | "revisions_to_keep"
+                                            | "save_on_stop"
+                                            | "snap_on_start"
+                                            | "source"
+                                            | "domain"
+                                    )
+                                })
+                        }
+                        _ => false,
+                    };
                     ensure!(
-                        volumes.children.is_empty(),
-                        "{name}: Hermit volumes must be empty"
+                        volumes.children.is_empty() || admitted_scratch,
+                        "{name}: Hermit volumes must be empty or match the declared encrypted scratch contract"
                     );
+                    // Persistent requirements still consist only of the authenticated executable.
                     let path = PathBuf::from(executable);
                     artifacts.insert(path.clone(), metadata(&path)?);
                 }
