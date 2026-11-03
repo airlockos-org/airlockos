@@ -117,7 +117,9 @@ Toolstack reload reconstructs intent only for authenticated running boots; it
 does not infer intent for an absent guest. Manual recovery remains available:
 wait for `sys-net` readiness, shut down a running `sys-firewall` with
 `qvm-shutdown --force --wait sys-firewall`, then use the normal start/readiness
-operation. No in-guest upstream reattachment or fallback to Linux is provided.
+operation. Upstream change detection compares Xen domain IDs; a restart reusing
+the same upstream ID within one Xen boot needs manual recovery. No in-guest
+upstream reattachment or fallback to Linux is provided.
 Use a fresh image or a reviewed whole-machine lifecycle plan for cutover;
 renaming an existing Linux domain does not convert it to Hermit. Retain the
 previous image and its offline artifacts for deliberate rollback. Tailnet
