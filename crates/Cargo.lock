@@ -314,6 +314,7 @@ name = "airlock-qubes-python"
 version = "0.1.0"
 dependencies = [
  "airlock-dom0-service",
+ "airlock-machine-planning",
  "airlock-nix-core",
  "airlock-qubes",
  "airlock-qubes-network",

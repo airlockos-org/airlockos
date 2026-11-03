@@ -12,6 +12,8 @@ use pyo3::{
 
 mod network;
 
+mod recovery;
+
 /// Decode the exact image identity retained in the VM's approved configuration.
 fn artifact(vm: &Bound<'_, PyAny>) -> PyResult<Descriptor> {
     let value = vm
@@ -309,6 +311,15 @@ fn invoke(
     let py = args.py();
     let vm = argument(args, 0)?;
     match name {
+        "shutdown" | "kill" => {
+            recovery::requested_stop(&vm)?;
+            return Ok(py
+                .import("qubes.vm.qubesvm")?
+                .getattr("QubesVM")?
+                .getattr(name)?
+                .call(args, kwargs)?
+                .unbind());
+        }
         "_prepare_scratch" => prepare_scratch(&vm, scratch(&vm)?, true)?,
         "__init__" => {
             vm.setattr("volume_config", PyDict::new(py))?;
@@ -330,6 +341,7 @@ fn invoke(
         }
         "initramfs_path" => return Ok(py.None()),
         "on_pre_start" => {
+            recovery::guard(&vm, true)?;
             // A failed preflight must not reuse a previous boot's cleanup authority.
             vm.setattr("_airlock_hermit_scratch", "")?;
             vm.setattr("_airlock_hermit_control_refreshed", py.None())?;
@@ -375,12 +387,14 @@ fn invoke(
             }
         }
         "on_pre_spawn" => {
+            recovery::guard(&vm, false)?;
             let image = artifact(&vm)?;
             if image.application.networking() {
                 prepare_boot(&vm, &image)?;
             }
         }
         "create_config_file" => {
+            recovery::guard(&vm, false)?;
             let disk = scratch(&vm)?;
             prepare_scratch(&vm, disk, false)?;
             let encoded = serde_json::to_string(&disk)
@@ -449,6 +463,7 @@ fn invoke(
                 )
             }
             .map_err(|error| crate::exception(py, "QubesException", error))?;
+            recovery::guard(&vm, false)?;
             return Ok(xml.into_pyobject(py)?.into_any().unbind());
         }
         "on_started" => {
@@ -456,6 +471,7 @@ fn invoke(
             let xid = vm.getattr("xid")?.extract::<u32>()?;
             airlock_dom0_service::hermit::started(&name, xid)
                 .map_err(|error| crate::exception(py, "QubesException", error))?;
+            recovery::observe_running(&vm, &artifact(&vm)?)?;
             vm.getattr("log")?
                 .call_method1("info", ("airlock-hermit state=started xid=%s", xid))?;
             // A fast guest can notify before domain-start records its xid. The
@@ -463,10 +479,14 @@ fn invoke(
             refresh_control_policies(&vm)?;
         }
         "on_control_ready" => refresh_control_policies(&vm)?,
+        "on_lifecycle_guard" => recovery::guard(&vm, false)?,
         "on_stopped" | "on_start_failed" => {
             let vm_name = vm.getattr("name")?.extract::<String>()?;
             airlock_dom0_service::hermit::stopped(&vm_name)
                 .map_err(|error| crate::exception(py, "QubesException", error))?;
+            if name == "on_stopped" {
+                recovery::check(&vm);
+            }
             vm.getattr("log")?.call_method1(
                 "info",
                 ("airlock-hermit state=stopped execution-evidence=removed",),
@@ -513,6 +533,12 @@ pub(super) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
         "create_config_file",
         descriptor::method(py, "create_config_file", invoke, false)?,
     )?;
+    for name in ["shutdown", "kill"] {
+        let method = descriptor::method(py, name, invoke, false)?;
+        py.import("inspect")?
+            .call_method1("markcoroutinefunction", (&method,))?;
+        namespace.set_item(name, method)?;
+    }
     for name in ["kernel_path", "initramfs_path"] {
         namespace.set_item(name, descriptor::property(py, name, invoke)?)?;
     }
@@ -521,6 +547,10 @@ pub(super) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
         ("on_pre_start", vec!["domain-pre-start"]),
         ("on_pre_spawn", vec!["domain-pre-spawn"]),
         ("on_started", vec!["domain-start"]),
+        (
+            "on_lifecycle_guard",
+            vec!["domain-pre-shutdown", "domain-pre-unpaused"],
+        ),
         ("on_stopped", vec!["domain-stopped"]),
         ("on_start_failed", vec!["domain-start-failed"]),
         (
@@ -549,7 +579,7 @@ pub(super) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
-/// Register only the readonly network relationship guards on upstream Qubes events.
+/// Register reviewed relationship guards and bounded network recovery on Qubes events.
 pub(super) fn register_network(module: &Bound<'_, PyModule>) -> PyResult<()> {
     network::register(module)
 }

@@ -6,7 +6,7 @@ use airlock_nix_core::hermit_artifact::{Descriptor, NetworkAttachment};
 use airlock_qubes::descriptor;
 use pyo3::{
     prelude::*,
-    types::{PyDict, PyTuple},
+    types::{PyDict, PyTuple, PyType},
 };
 
 /// Read the protected topology containing this exact executable descriptor.
@@ -129,10 +129,12 @@ pub(super) fn attachment(
 }
 
 /// Check an actual client before its upstream-controlled lifecycle creates a vif.
-fn validate_client(client: &Bound<'_, PyAny>, provider: &Bound<'_, PyAny>) -> PyResult<()> {
-    if provider.is_none()
-        || !provider.is_instance(&client.py().import("airlock_qubes")?.getattr("HermitVM")?)?
-    {
+fn validate_client(
+    client: &Bound<'_, PyAny>,
+    provider: &Bound<'_, PyAny>,
+    hermit_type: &Bound<'_, PyType>,
+) -> PyResult<()> {
+    if provider.is_none() || !provider.is_instance(hermit_type)? {
         return Ok(());
     }
     let image = artifact(provider)?;
@@ -162,15 +164,22 @@ fn invoke(
     let py = args.py();
     let extension = crate::argument(args, 0)?;
     let vm = crate::argument(args, 1)?;
+    let hermit_type = extension.getattr("_hermit_type")?.cast_into::<PyType>()?;
     if name == "on_load" {
         for (event, method) in [
             ("domain-pre-start", "on_start"),
             ("domain-pre-spawn", "on_start"),
             ("property-pre-set:netvm", "on_set"),
             ("property-pre-reset:netvm", "on_reset"),
+            ("domain-start", "on_upstream_started"),
         ] {
             vm.call_method1("add_handler", (event, extension.getattr(method)?))?;
         }
+        if vm.is_instance(&hermit_type)? && vm.call_method0("is_running")?.is_truthy()? {
+            super::recovery::observe_running(&vm, &artifact(&vm)?)?;
+        }
+    } else if name == "on_upstream_started" {
+        super::recovery::upstream_started(&vm, &hermit_type)?;
     } else {
         if name != "on_start" && vm.call_method0("is_halted")?.is_truthy()? {
             return Ok(py.None());
@@ -184,9 +193,7 @@ fn invoke(
                 .ok_or_else(|| pyo3::exceptions::PyTypeError::new_err("missing NetVM value"))?,
             _ => return Err(pyo3::exceptions::PyAttributeError::new_err(name.to_owned())),
         };
-        if name != "on_start"
-            && vm.is_instance(&py.import("airlock_qubes")?.getattr("HermitVM")?)?
-        {
+        if name != "on_start" && vm.is_instance(&hermit_type)? {
             let image = artifact(&vm)?;
             let valid = if image.application.networking() {
                 !provider.is_none()
@@ -203,17 +210,22 @@ fn invoke(
                 ));
             }
         }
-        validate_client(&vm, &provider)?;
+        validate_client(&vm, &provider, &hermit_type)?;
     }
     Ok(py.None())
 }
 
-/// Register a narrow Qubes extension: observation and rejection only, no effects.
+/// Register relationship guards and bounded native recovery on upstream Qubes events.
 pub(super) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = module.py();
     let extension = py.import("qubes.ext")?;
     let namespace = PyDict::new(py);
-    for name in ["on_start", "on_set", "on_reset"] {
+    // Retain the actual registered Python subclass, including for subclass checks.
+    namespace.set_item(
+        "_hermit_type",
+        module.getattr("HermitVM")?.cast_into::<PyType>()?,
+    )?;
+    for name in ["on_start", "on_set", "on_reset", "on_upstream_started"] {
         namespace.set_item(name, descriptor::method(py, name, invoke, false)?)?;
     }
     let method = descriptor::method(py, "on_load", invoke, false)?;

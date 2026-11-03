@@ -268,6 +268,48 @@ pub fn control_boot_matches(
         && execution.nonce.as_bytes() == challenge)
 }
 
+/// Original upstream and challenge from an authenticated running native boot.
+/// This observation grants no lifecycle effect; Qubes remains the VM authority.
+pub struct NetworkBoot {
+    /// Upstream Xen domain captured before the guest was spawned.
+    pub upstream: u16,
+    /// Original boot challenge, separating reuse of a numeric Xen domain ID.
+    pub challenge: String,
+}
+
+/// Recover a running boot's original upstream after qubesd reloads its objects.
+/// Halted guests cannot acquire inferred running intent from historical records.
+pub fn running_network_boot(
+    name: &str,
+    artifact: &Descriptor,
+    generation: &str,
+    xid: u32,
+) -> Result<Option<NetworkBoot>> {
+    if !artifact.application.networking() || xid == 0 {
+        return Ok(None);
+    }
+    let path = record(&name.parse()?);
+    if !path.try_exists()? {
+        return Ok(None);
+    }
+    crate::state::trusted(&path)?;
+    let execution: Execution = crate::state::read(&path)?;
+    if execution.boot_id != crate::state::boot_id()?.to_string()
+        || execution.xid != Some(xid)
+        || execution.artifact != *artifact
+        || execution.generation != generation
+    {
+        return Ok(None);
+    }
+    Ok(execution
+        .network
+        .filter(|network| network.xid > 0 && network.xid < 0x7ff0)
+        .map(|network| NetworkBoot {
+            upstream: network.xid,
+            challenge: execution.nonce,
+        }))
+}
+
 /// Recheck the original upstream incarnation immediately before XML rendering.
 pub fn network_boot_matches(
     name: &str,
