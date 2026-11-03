@@ -277,10 +277,10 @@ fn arm(vm: &Bound<'_, PyAny>, image: &Descriptor) -> PyResult<()> {
 
 /// Explicit shutdown/kill requests revoke intent; upstream's internal cleanup keeps its ticket.
 pub(super) fn requested_stop(vm: &Bound<'_, PyAny>) -> PyResult<()> {
-    if let Some(owner) = coordinator(vm)? {
-        if !own_task(&owner, vm.py())? {
-            owner.borrow_mut(vm.py()).state.cancel();
-        }
+    if let Some(owner) = coordinator(vm)?
+        && !own_task(&owner, vm.py())?
+    {
+        owner.borrow_mut(vm.py()).state.cancel();
     }
     Ok(())
 }
@@ -294,10 +294,10 @@ pub(super) fn check(vm: &Bound<'_, PyAny>) {
         }
         Ok(())
     })();
-    if let Err(error) = checked {
-        if let Err(logging) = report(vm, "blocked", error) {
-            logging.print(vm.py());
-        }
+    if let Err(error) = checked
+        && let Err(logging) = report(vm, "blocked", error)
+    {
+        logging.print(vm.py());
     }
 }
 
