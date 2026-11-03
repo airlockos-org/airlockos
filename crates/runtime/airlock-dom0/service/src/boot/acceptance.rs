@@ -5,7 +5,7 @@ use crate::{model::Topology, process::Runner};
 use airlock_deployment_core::boot::acceptance::{
     AcceptedBoot, GenerationReady, GuestReady, Instance, Requirement, Scope, Service, ServiceReady,
 };
-use airlock_nix_core::identity::GuestName;
+use airlock_nix_core::{hermit_artifact::Descriptor, identity::GuestName};
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 use std::{collections::BTreeSet, path::PathBuf, time::Duration};
@@ -81,8 +81,24 @@ fn instance(runner: &Runner, boot: &str, name: &str) -> Result<Instance> {
     })
 }
 
-/// Invoke only fixed read-only health commands through the existing Qubes transport.
-fn service(runner: &Runner, name: &str, kind: Service) -> Result<()> {
+/// Check native network execution or fixed Linux health commands on the observed guest.
+fn service(
+    runner: &Runner,
+    guest: &Instance,
+    kind: Service,
+    native: Option<&Descriptor>,
+) -> Result<()> {
+    if let Some(artifact) = native {
+        // Native firewalls have no qrexec daemon. Their protected, boot-bound status
+        // covers network readiness; it cannot stand in for Linux-only capabilities.
+        ensure!(
+            matches!(kind, Service::Network) && artifact.application.networking(),
+            "Hermit application cannot provide the required service"
+        );
+        return crate::hermit::ready(&guest.domain, artifact, guest.xid);
+    }
+
+    let name = guest.domain.as_str();
     match kind {
         Service::Input => crate::input::connect::check(runner, &name.parse()?)?,
         kind => {
@@ -185,7 +201,8 @@ pub(crate) fn observe(
     for name in &names {
         let wanted = requirement(topology, policy, name)?;
         let before = instance(&runner, boot, name.as_str())?;
-        let actual = if let Some(artifact) = topology.domains[name].backend.hermit() {
+        let native = topology.domains[name].backend.hermit();
+        let actual = if let Some(artifact) = native {
             crate::hermit::ready(name.as_str(), artifact, before.xid)?;
             topology.domains[name].backend.system.source.to_string()
         } else {
@@ -203,7 +220,7 @@ pub(crate) fn observe(
             (wanted.network, Service::Network),
         ] {
             if required {
-                service(&runner, name.as_str(), kind)?;
+                service(&runner, &before, kind, native)?;
                 checked_services.push(kind);
             }
         }
