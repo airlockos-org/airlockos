@@ -382,6 +382,16 @@ impl Release {
 
     /// Require the release directory and both metadata files to satisfy dom0 ownership constraints.
     pub fn trust(&self) -> Result<()> {
+        // Nix's store directory permits builders to create objects. Admission
+        // requires the release objects themselves to be root-owned and immutable,
+        // using the same boundary as other store-backed configuration inputs.
+        if self.path.starts_with("/nix/store") {
+            for name in ["release.json", "topology.json"] {
+                immutable_configuration::<Value>(&self.path.join(name))?;
+            }
+            return Ok(());
+        }
+
         trusted(&self.path)?;
         trusted(&self.path.join("release.json"))?;
         trusted(&self.path.join("topology.json"))
