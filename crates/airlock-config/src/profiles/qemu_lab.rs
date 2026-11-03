@@ -19,17 +19,15 @@ pub fn machine() -> Result<MachineSnapshot, AuthoringError> {
     network.add_module(network_diagnostics());
     machine.add(&network)?;
 
-    let firewall = Vm::firewall("sys-firewall", &network)?;
+    let firewall = Vm::firewall("sys-firewall-old", &network)?;
     firewall.set_memory(Memory::Fixed(MiB(256)));
     firewall.set_feature("ipv6", "1")?;
     firewall.add_module(network_diagnostics());
     machine.add(&firewall)?;
 
-    // Explicit experimental paths coexist with the Linux defaults. Starting a
-    // client follows ordinary provider dependencies; stopping the native provider
-    // never changes these clients' netvm reference to a different firewall.
-    let native_firewall = Vm::hermit_firewall("sys-firewall-hermit", &network)?;
-    native_firewall.set_autostart(false);
+    // Four reviewed clients share the native default. Management and build
+    // traffic retain the Linux path, including when the native VM is stopped.
+    let native_firewall = Vm::hermit_firewall("sys-firewall", &network)?;
     native_firewall.set_feature("ipv6", "1")?;
     machine.add(&native_firewall)?;
     for name in ["usr-firewall-a", "usr-firewall-b"] {
@@ -41,15 +39,17 @@ pub fn machine() -> Result<MachineSnapshot, AuthoringError> {
         machine.add(&client)?;
     }
 
-    let home = Vm::personal("usr-home", &firewall, GiB(4))?;
+    let home = Vm::personal("usr-home", &native_firewall, GiB(4))?;
     home.set_memory(Memory::Fixed(MiB(1536)));
     home.set_feature("ipv6", "1")?;
     home.add_module(network_diagnostics());
     home.add_module(application_session());
     machine.add(&home)?;
 
-    let work = Vm::personal("usr-work", &firewall, GiB(4))?;
+    let work = Vm::personal("usr-work", &native_firewall, GiB(4))?;
     work.set_memory(Memory::Fixed(MiB(1536)));
+    work.set_feature("ipv6", "1")?;
+    work.add_module(network_diagnostics());
     work.add_module(application_session());
     machine.add(&work)?;
 
@@ -76,6 +76,7 @@ pub fn machine() -> Result<MachineSnapshot, AuthoringError> {
 
     let assistant = Vm::assistant("usr-assistant", &firewall, GiB(16))?;
     assistant.set_memory(Memory::Fixed(MiB(2048)));
+    assistant.add_module(network_diagnostics());
     assistant.add_module(application_session());
     machine.add(&assistant)?;
 
@@ -89,7 +90,8 @@ pub fn machine() -> Result<MachineSnapshot, AuthoringError> {
     machine.add(&clipboard)?;
     crate::components::clipboard::connect(&gui, &clipboard);
     crate::components::diagnostics::enable(&mut machine, &assistant);
-    machine.set_host(&gui, &firewall, &controller);
+    machine.set_host(&gui, &native_firewall, &controller);
+    machine.set_updates_proxy(&firewall);
     machine.finish()
 }
 

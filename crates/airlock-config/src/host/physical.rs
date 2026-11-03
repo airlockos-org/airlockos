@@ -26,6 +26,10 @@ pub(crate) fn module(
     let [assistant] = assistants.as_slice() else {
         return Err("the physical USB host requires exactly one development VM".into());
     };
+    let assistant_network = assistant
+        .role
+        .uplink()
+        .ok_or("the development VM requires an explicit recovery network")?;
 
     Ok(ContextualModule::new(|inputs| {
         let force = |value: NixValue| inputs.lib.clone().select("mkForce").call(value);
@@ -77,7 +81,13 @@ pub(crate) fn module(
 
         let recovery = recovery::module(&inputs, build, source.clone());
         let graphics = graphics(&inputs);
-        let normal = normal(&inputs, host, machine, assistant.name.as_str());
+        let normal = normal(
+            &inputs,
+            host,
+            machine,
+            assistant.name.as_str(),
+            assistant_network.as_str(),
+        );
 
         let composition = nix_record! {
             "airlock": nix_record! {
@@ -259,6 +269,7 @@ fn normal(
     host: &HostSnapshot,
     machine: &MachineSnapshot,
     assistant: &str,
+    assistant_network: &str,
 ) -> NixValue {
     let force = |value: NixValue| inputs.lib.clone().select("mkForce").call(value);
     let mut targets = machine.vms().collect::<Vec<_>>();
@@ -274,7 +285,7 @@ fn normal(
     });
     let route = format!(
         "{assistant} provides Tailnet development access through {firewall}",
-        firewall = host.network.as_str(),
+        firewall = assistant_network,
     );
     let policy = inputs
         .pkgs
@@ -302,6 +313,11 @@ fn normal(
 
     nix_record! {
         "airlock": nix_record! {
+            "dom0": nix_record! {
+                "devModeNetworkProxy": nix_record! {
+                    "target": host.updates_proxy.as_ref().map_or("", |vm| vm.as_str()),
+                },
+            },
             "devDom0Terminal": nix_record! {
                 "host": nix_record! {
                     "enable": true,

@@ -68,6 +68,15 @@ pub(crate) fn modules(host: &HostSnapshot, machine: &MachineSnapshot) -> Package
                 &airlock_build::Workspace::new(inputs.airlock_apps()),
             )]),
             "airlock": nix_record! {
+                "dom0": nix_record! {
+                    "devModeNetworkProxy": nix_record! {
+                        "target": default(host.updates_proxy.as_ref().map_or("", |vm| vm.as_str()).into()),
+                    }.merge_attrs(if host.updates_proxy.is_none() {
+                        nix_record! { "enable": default(false.into()) }
+                    } else {
+                        nix_record! {}
+                    }),
+                },
                 "machineDeployment": nix_record! {
                     "enable": true,
                     "profile": "controller-lab",

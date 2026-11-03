@@ -20,6 +20,10 @@ const CONTROL_TIMEOUT_NS: u64 = 500_000_000;
 
 /// Fatal errors preserve uncertain native resources until VM teardown. No
 /// failure path fabricates a replacement connection or retries ambiguous closes.
+/// After an upstream restart, recovery is an operator-requested fresh Qubes VM
+/// start, once the upstream is ready. Existing connections are lost. This also
+/// supplies fresh transport mappings, boot authority and policy publication;
+/// automatic restart and in-guest upstream reattachment are not implemented.
 #[derive(Debug)]
 pub enum Error {
     /// Existing native control adapter rejected the original session.

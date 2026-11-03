@@ -1002,6 +1002,8 @@ pub struct HostSnapshot {
     pub network: VmName,
     /// Validated pool-admission caller identity.
     pub controller: VmName,
+    /// Linux service VM serving the development qrexec proxy, independently of the default NetVM.
+    pub updates_proxy: Option<VmName>,
 }
 
 /// Host environment whose boot and deployment configuration accompanies the VMs.
@@ -1132,6 +1134,8 @@ pub struct Machine {
     vms: Vec<VmReference>,
     /// Typed host relationships resolved in the same snapshot as the VM settings.
     host: Option<HostBindings>,
+    /// Explicit Linux proxy override; otherwise a Linux default firewall retains this service.
+    updates_proxy: Option<VmReference>,
     /// Boot environment captured alongside the resolved host relationships.
     platform: HostPlatform,
     /// Diagnostic source declaration, checked for exact machine membership at finalization.
@@ -1204,10 +1208,10 @@ impl Machine {
 
     /// Selects the host's GUI, network default and admission caller using role-checked handles.
     /// References may be assigned before registration; `finish` checks the actual declarations.
-    pub fn set_host(
+    pub fn set_host<B>(
         &mut self,
         gui: &VmHandle<Gui>,
-        network: &VmHandle<Firewall>,
+        network: &VmHandle<Firewall, B>,
         controller: &VmHandle<Controller>,
     ) {
         self.host = Some(HostBindings {
@@ -1215,6 +1219,12 @@ impl Machine {
             network: network.reference.clone(),
             controller: controller.reference.clone(),
         });
+    }
+
+    /// Selects a Linux firewall's existing UpdatesProxy service separately from packet forwarding.
+    /// Native Hermit handles cannot supply qrexec services. Finalization checks machine membership.
+    pub fn set_updates_proxy(&mut self, proxy: &VmHandle<Firewall>) {
+        self.updates_proxy = Some(proxy.reference.clone());
     }
 
     /// Rejects missing and foreign declarations with the relationship's full context.
@@ -1413,6 +1423,14 @@ impl Machine {
 
     /// Resolves typed host references and enforces identities required by upstream policy.
     fn freeze_host(&self, bindings: &HostBindings) -> Result<HostSnapshot, AuthoringError> {
+        let updates_proxy = self.updates_proxy.as_ref().or_else(|| {
+            matches!(bindings.network.definition.backend, GuestBackend::Nixos)
+                .then_some(&bindings.network)
+        });
+        if let Some(proxy) = updates_proxy {
+            self.check_reference("host", "updates proxy", &proxy.definition)?;
+        }
+
         for (relation, reference) in [
             ("default GUI", &bindings.gui),
             ("default network", &bindings.network),
@@ -1441,6 +1459,7 @@ impl Machine {
             gui: bindings.gui.definition.name.clone(),
             network: bindings.network.definition.name.clone(),
             controller: bindings.controller.definition.name.clone(),
+            updates_proxy: updates_proxy.map(|proxy| proxy.definition.name.clone()),
         })
     }
 
