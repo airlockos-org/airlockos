@@ -1427,16 +1427,15 @@ impl Machine {
             matches!(bindings.network.definition.backend, GuestBackend::Nixos)
                 .then_some(&bindings.network)
         });
-        if let Some(proxy) = updates_proxy {
-            self.check_reference("host", "updates proxy", &proxy.definition)?;
-        }
-
         for (relation, reference) in [
             ("default GUI", &bindings.gui),
             ("default network", &bindings.network),
             ("admission controller", &bindings.controller),
         ] {
             self.check_reference("host", relation, &reference.definition)?;
+        }
+        if let Some(proxy) = updates_proxy {
+            self.check_reference("host", "updates proxy", &proxy.definition)?;
         }
 
         // Existing machine-deployment scripts/policy name the controller and GUI.
