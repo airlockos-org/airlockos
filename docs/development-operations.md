@@ -104,6 +104,21 @@ SSH orchestration and test evidence. Shell entry points pass arguments to that
 command. Warm tool sync is an explicit development override inside the disposable
 guest; it is separate from the reviewed deployment path.
 
+The Hermit cutover profiles keep `usr-assistant`, `sys-ctrl` and the development
+UpdatesProxy on Linux `sys-firewall-old`. Native `sys-firewall` is the default
+for reviewed application clients. Both paths share `sys-net`. After restarting
+that upstream, restart the native firewall through Qubes even if it still reports
+Running: wait for `sys-net` readiness, shut down a running `sys-firewall` with
+`qvm-shutdown --force --wait sys-firewall`, then use the normal Qubes start and
+readiness operation. Existing connections are lost; automatic upstream
+reattachment and fallback to Linux are not implemented. The forced shutdown
+permits connected clients to remain running; it does not change their NetVM.
+Use a fresh image or a reviewed whole-machine lifecycle plan for cutover;
+renaming an existing Linux domain does not convert it to Hermit. Retain the
+previous image and its offline artifacts for deliberate rollback. Tailnet
+enrollment and physical-network acceptance remain separate from local QEMU
+validation.
+
 ```sh
 make test-warm
 make test-slow
