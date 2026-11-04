@@ -3,6 +3,9 @@
 //! the existing GUI authority permits one live connection per principal. This
 //! peer uses ordinary Qubes provisioning and never supplies its own identity.
 
+#[path = "../clipboard_stress.rs"]
+mod stress;
+
 use airlock_clipboard_core::shared::{DEFAULT_CAPACITY, Error, Format, Generation};
 use airlock_machine_core::services::{ClipboardConnection, ClipboardEndpoint};
 use airlock_sys_clipboard::shared::{self, DATA_CHUNK, Reply, Request};
@@ -28,6 +31,8 @@ enum Case {
     Clear,
     /// Reject authority escalation, stale requests and out-of-order writes.
     Faults,
+    /// Stress independent endpoints using an explicitly boot-bound laboratory authority.
+    Stress,
 }
 
 /// No endpoint coordinates or authorization claims are accepted as command-line inputs.
@@ -42,6 +47,16 @@ struct Args {
     /// Aggregate payload across two representations, generated in fixed chunks.
     #[arg(long, default_value_t = 6 * 1024 * 1024)]
     size: usize,
+    /// Trusted console offer for a disposable guest booted with this Linux VM as authority.
+    /// This test-only path bypasses no Xen permissions and is never used by desktop adapters.
+    #[arg(long, requires = "peer_domain")]
+    lab_authority: Option<PathBuf>,
+    /// Actual Xen domain of this controlled Linux peer, selected by the laboratory toolstack.
+    #[arg(long, requires = "lab_authority")]
+    peer_domain: Option<u16>,
+    /// Bounded replacement/fragmentation rounds; each round verifies the resulting bytes.
+    #[arg(long, default_value_t = 32, value_parser = clap::value_parser!(u16).range(1..=256))]
+    rounds: u16,
 }
 
 /// Own the authenticated mapping and a strictly increasing request sequence.
@@ -76,6 +91,11 @@ impl Client {
                 && endpoint.epoch > 0,
             "invalid trusted endpoint"
         );
+        Self::attach(endpoint)
+    }
+
+    /// Map only an endpoint obtained from the trusted GUI or explicit laboratory authority.
+    fn attach(endpoint: ClipboardEndpoint) -> Result<Self> {
         let backend = Linux::open(
             Peer {
                 domain: endpoint.domain,
@@ -119,11 +139,15 @@ impl Client {
 
     /// Stream synthetic data into two representations without allocating the full offer.
     fn copy(&mut self, size: usize, cancel: bool) -> Result<Generation> {
+        self.publish(&formats(size), cancel)
+    }
+
+    /// Publish caller-selected metadata while generating data in fixed chunks.
+    fn publish(&mut self, formats: &[Format], cancel: bool) -> Result<Generation> {
         let generation = self.reserve()?;
-        let formats = formats(size);
         self.mutate(Request::Declare {
             generation,
-            formats: formats.clone(),
+            formats: formats.to_vec(),
         })?;
         let mut bytes = [0; DATA_CHUNK];
         for (format, representation) in formats.iter().enumerate() {
@@ -147,11 +171,16 @@ impl Client {
 
     /// Verify every promised byte twice, including unaligned representation boundaries.
     fn read(&mut self, size: usize) -> Result<Generation> {
+        self.verify(&formats(size))
+    }
+
+    /// Compare canonical metadata and two complete reads without logging content.
+    fn verify(&mut self, formats: &[Format]) -> Result<Generation> {
         let Reply::Offer(generation, Some(offer)) = self.request(Request::Offer)? else {
             bail!("no complete offer");
         };
         ensure!(
-            offer.generation == generation && offer.formats == formats(size),
+            offer.generation == generation && offer.formats == formats,
             "unexpected offer metadata"
         );
         let mut expected = [0; DATA_CHUNK];
@@ -267,6 +296,22 @@ fn main() -> Result<()> {
         (2..=DEFAULT_CAPACITY).contains(&args.size),
         "invalid aggregate size"
     );
+    if matches!(args.case, Case::Stress) {
+        let endpoint = args
+            .lab_authority
+            .as_ref()
+            .context("stress requires --lab-authority")?;
+        let domain = args.peer_domain.context("stress requires --peer-domain")?;
+        ensure!(
+            (1..0x7ff0).contains(&domain),
+            "invalid laboratory peer domain"
+        );
+        return stress::run(endpoint, domain, args.rounds);
+    }
+    ensure!(
+        args.lab_authority.is_none(),
+        "laboratory authority requires --case stress"
+    );
     let mut bytes = Vec::new();
     File::open(&args.config)?
         .take(16 * 1024 + 1)
@@ -299,6 +344,7 @@ fn main() -> Result<()> {
             client.empty()?;
         }
         Case::Faults => client.faults()?,
+        Case::Stress => unreachable!("handled before normal provisioning"),
     }
     println!(
         "{record}",
