@@ -21,6 +21,11 @@ that cannot allocate a packet or response is retired. Startup and standard-libra
 infallible allocation failure still terminates the guest; this is not a proof that
 all policy-admitted workloads can always complete. Heap diagnostics record only
 capacity, live requested bytes and their allocation-boundary high-water mark.
+Large RAM offers require one contiguous allocation, so fragmentation can reject
+an offer even when requested live bytes are below the arena cap. Reserve has
+already invalidated the previous offer; a failed replacement stays unpublished.
+Releasing peer resources and retrying can restore capacity. The service does not
+silently move a rejected RAM offer onto disk.
 
 The core owns non-cloneable admission capabilities scoped to one clipboard object
 and one authenticated incarnation. A descriptive participant or decoded message
