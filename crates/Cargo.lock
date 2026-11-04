@@ -135,6 +135,14 @@ name = "airlock-desktop"
 version = "0.1.0"
 
 [[package]]
+name = "airlock-desktop-preferences"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "airlock-dev"
 version = "0.1.0"
 dependencies = [
@@ -411,6 +419,7 @@ version = "0.1.0"
 dependencies = [
  "airlock-build",
  "airlock-desktop",
+ "airlock-desktop-preferences",
  "airlock-machine-core",
  "airlock-nix-core",
  "airlock-vm-service",
@@ -479,6 +488,7 @@ name = "airlock-vm-service"
 version = "0.1.0"
 dependencies = [
  "airlock-clipboard-core",
+ "airlock-desktop-preferences",
  "airlock-machine-core",
  "airlock-machine-planning",
  "airlock-nix-core",

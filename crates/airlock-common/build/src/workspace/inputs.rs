@@ -50,6 +50,7 @@ const MANIFESTS: &[(&str, &str)] = manifests![
     "airlock-common/build",
     "airlock-common/build-plan",
     "airlock-common/desktop",
+    "airlock-common/desktop-preferences",
     "airlock-common/qubes",
     "runtime/airlock-qubes-python",
     "runtime/airlock-cli",

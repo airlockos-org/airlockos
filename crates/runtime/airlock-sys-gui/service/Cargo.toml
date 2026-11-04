@@ -19,6 +19,7 @@ runtime = [
     "airlock-nix-core/runtime",
     "dep:anyhow", "dep:rustix", "dep:sha2", "dep:tempfile",
     "dep:airlock-vm-service", "dep:uuid", "dep:x11rb", "dep:png",
+    "dep:airlock-desktop-preferences",
 ]
 authoring = ["dep:rusix", "dep:airlock-build"]
 
@@ -26,6 +27,7 @@ authoring = ["dep:rusix", "dep:airlock-build"]
 path = "src/lib.rs"
 
 [dependencies]
+airlock-desktop-preferences = { path = "../../../airlock-common/desktop-preferences", optional = true }
 airlock-desktop = { path = "../../../airlock-common/desktop" }
 airlock-build = { path = "../../../airlock-common/build", optional = true }
 airlock-machine-core = { path = "../../../airlock-common/machine" }
