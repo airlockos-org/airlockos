@@ -5,6 +5,8 @@ mod capture;
 
 mod package;
 
+mod preferences;
+
 use crate::command::{DesktopCommand, EXECUTABLE, RUNTIME_COMMAND_NAMES, WINDOW_IDENTITY};
 use clap::Subcommand;
 use rusix::{

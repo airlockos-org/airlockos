@@ -13,6 +13,8 @@ mod menus;
 
 mod notifications;
 
+mod preferences;
+
 mod startup;
 
 mod qubes;
@@ -36,6 +38,13 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Action {
+    /// Publish allowlisted session preferences or serve an isolated subscription.
+    #[command(name = command::PREFERENCES)]
+    Preferences {
+        /// Fixed publisher/exporter operation; no arbitrary settings queries.
+        #[command(subcommand)]
+        action: preferences::Action,
+    },
     /// Explicitly start one VM and refresh its application menu.
     #[command(name = command::SYNC_APPMENUS)]
     SyncAppmenus {
@@ -75,6 +84,7 @@ enum Action {
 
 fn run(args: Args) -> Result<ExitCode> {
     match args.command {
+        Action::Preferences { action } => preferences::execute(action),
         Action::SyncAppmenus { name } => return launch::sync_menus(name).map(ExitCode::from),
         Action::Launch(request) => return launch::execute(request).map(ExitCode::from),
         Action::Gpu(request) => gpu::execute(request),

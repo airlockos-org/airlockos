@@ -425,6 +425,7 @@ dependencies = [
  "airlock-vm-service",
  "anyhow",
  "clap",
+ "gio",
  "png",
  "rusix",
  "rustix 1.1.5",

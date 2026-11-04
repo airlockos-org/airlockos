@@ -26,16 +26,19 @@ pub(super) fn native(pkgs: &NixValue, apps: &NixPath) -> Package {
             "ffmpeg-headless",
             "systemd",
             "coreutils",
+            "bubblewrap",
         ]
         .map(|name| pkgs.clone().select(name)),
     );
     let install = nix_text!(
         r#"
             wrapProgram "$out/bin/{executable}" \
-              --prefix PATH : {tools}
+              --prefix PATH : {tools} \
+              --set AIRLOCK_PREFERENCES_BWRAP {bubblewrap}/bin/bwrap
         "#,
         executable = EXECUTABLE,
         tools = lib.clone().select("makeBinPath").call(tools),
+        bubblewrap = pkgs.clone().select("bubblewrap"),
     );
 
     Package::from_expression(pkgs.clone().select("rustPlatform.buildRustPackage").call(
@@ -46,7 +49,8 @@ pub(super) fn native(pkgs: &NixValue, apps: &NixPath) -> Package {
             "cargoLock": workspace.cargo_lock(),
             "cargoBuildFlags": NixValue::list(flags),
             "doCheck": false,
-            "nativeBuildInputs": NixValue::list([pkgs.clone().select("makeWrapper")]),
+            "nativeBuildInputs": NixValue::list([pkgs.clone().select("makeWrapper"), pkgs.clone().select("pkg-config")]),
+            "buildInputs": NixValue::list([pkgs.clone().select("glib")]),
             "postInstall": install,
             "meta": nix_record! {
                 "description": "Airlock desktop integration in sys-gui",

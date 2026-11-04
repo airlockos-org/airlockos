@@ -1,0 +1,57 @@
+//! Session lifetime and the fixed RPC entry point; machine composition owns routing and policy.
+
+use super::Deployment;
+use rusix::{
+    installation::Application, interop::raw::NixValue, nix_record, nix_text, nixos::ModuleBody,
+};
+
+impl Deployment {
+    /// Install the GNOME publisher and read-only preferences RPC, without granting a caller permission.
+    ///
+    /// Compose this once in the GUI VM. Qubes policy must run the RPC as the active
+    /// desktop user and restrict it to the assigned GUI clients with no service
+    /// argument. The launcher enters its sandbox before any guest I/O. It uses the
+    /// same user's /run/user directory to find the feed, independent of D-Bus.
+    /// Logout stops the writer; a crash or abrupt logout expires its last frame
+    /// within five seconds. Existing exporters also expire after five minutes so
+    /// reconnects pass through Qubes policy; immediate revocation needs lifecycle
+    /// teardown in the machine integration, not just a policy-file update.
+    pub fn desktop_preferences(&self) -> Application {
+        self.installation()
+            .etc_text("qubes-rpc/airlock.DesktopPreferences", nix_text!(
+                r#"
+                    #!{shell}
+                    exec {executable} preferences export "$@"
+                "#,
+                shell = self.pkgs.clone().select("runtimeShell"),
+                executable = self.executable(),
+            ))
+            .module(ModuleBody::new(nix_record! {
+                "environment": nix_record! {
+                    "etc": nix_record! {
+                        "qubes-rpc/airlock.DesktopPreferences": nix_record! { "mode": "0555" },
+                    },
+                },
+                "systemd": nix_record! {
+                    "user": nix_record! {
+                        "services": nix_record! {
+                            "airlock-desktop-preferences": nix_record! {
+                                "description": "Publish read-only GNOME desktop preferences",
+                                "wantedBy": NixValue::list(["gnome-session.target".into()]),
+                                "partOf": NixValue::list(["graphical-session.target".into()]),
+                                "after": NixValue::list(["graphical-session-pre.target".into()]),
+                                "serviceConfig": nix_record! {
+                                    "ExecStart": nix_text!("{executable} preferences publish", executable = self.executable()),
+                                    "Restart": "on-failure",
+                                    "RestartSec": 1,
+                                    "UMask": "0077",
+                                    "NoNewPrivileges": true,
+                                    "RestrictSUIDSGID": true,
+                                },
+                            },
+                        },
+                    },
+                },
+            }))
+    }
+}

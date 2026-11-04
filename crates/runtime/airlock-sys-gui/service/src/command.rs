@@ -34,6 +34,8 @@ root_command_names! { RUNTIME_COMMAND_NAMES {
     WORKSPACE = "workspace";
     /// Select the readiness RPC advertised by a VM.
     READINESS_SERVICE = "readiness-service";
+    /// Publish GNOME preferences or export their fixed read-only feed.
+    PREFERENCES = "preferences";
 } }
 
 root_command_names! { DESKTOP_COMMAND_NAMES {
