@@ -3,7 +3,7 @@
 //! Several principals share that peer domain; this is endpoint stress, not a test
 //! of GUI membership or isolation between 32 separate Linux VMs.
 
-use super::{Client, DATA_CHUNK, Error, Format, Reply, Request, formats, pattern};
+use super::{Client, Error, Format, Reply, Request, formats};
 use airlock_clipboard_core::{
     resources::{LIVE_LIMIT, SLOT_LIMIT},
     shared::{DEFAULT_CAPACITY, MAX_FORMAT_NAME, MAX_FORMATS, storage::RAM_LIMIT},
@@ -120,32 +120,14 @@ fn rich_formats(size: usize) -> Vec<Format> {
         .collect()
 }
 
-/// Assert byte identity for an already queued read without printing its payload.
-fn check_data(reply: Reply, format: usize, offset: usize, count: usize) -> Result<()> {
-    let Reply::Data(bytes) = reply else {
-        bail!("queued read failed");
-    };
-    let mut expected = vec![0; count];
-    pattern(format, offset, &mut expected);
-    ensure!(bytes == expected, "queued read payload mismatch");
-    Ok(())
-}
-
 /// Keep response queues full on every other peer while one peer continues useful work.
 fn backpressure(peers: &mut [Client], metadata: &[Format]) -> Result<()> {
     let generation = peers[0].verify(metadata)?;
     let mut requests = Vec::new();
     for peer in &mut peers[1..] {
-        requests.push(send(
-            peer,
-            Request::Read {
-                generation,
-                format: 0,
-                offset: 0,
-            },
-        )?);
+        requests.push(send(peer, Request::Offer)?);
     }
-    // Read replies contain 4096 bytes and cannot fit into eight 224-byte frames.
+    // Maximal offer metadata cannot fit into eight 224-byte frames.
     // Fill each request ring while its response is deliberately left unread.
     let mut queued = Vec::new();
     for peer in &mut peers[1..] {
@@ -175,7 +157,11 @@ fn backpressure(peers: &mut [Client], metadata: &[Format]) -> Result<()> {
     // A blocked connection must not monopolize the service loop.
     peers[0].verify(metadata)?;
     for ((peer, read), ids) in peers[1..].iter_mut().zip(requests).zip(queued) {
-        check_data(receive(peer, read)?, 0, 0, DATA_CHUNK)?;
+        ensure!(
+            matches!(receive(peer, read)?, Reply::Offer(current, Some(offer))
+            if current == generation && offer.formats == metadata),
+            "initial queued metadata corrupted"
+        );
         for id in ids {
             ensure!(
                 matches!(receive(peer, id)?, Reply::Offer(current, Some(offer))
@@ -277,6 +263,13 @@ pub(super) fn run(path: &Path, domain: u16, rounds: u16) -> Result<()> {
         "retained-limit",
         serde_json::json!({"live": peers.len(), "retiring": retained.len(), "rejected": true}),
     );
+    for old in &mut retained {
+        ensure!(
+            old.request(Request::Reserve).is_err(),
+            "retired incarnation remained usable"
+        );
+    }
+    peers[0].verify(&metadata)?;
     drop(retained);
     peers.push(readmit(&mut authority, LIVE_LIMIT as u64, domain, guest)?);
     peers[0].verify(&metadata)?;
