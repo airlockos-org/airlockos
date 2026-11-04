@@ -211,7 +211,7 @@ fn combined_usb_build_prepares_once_and_provisions_only_its_successful_image() -
         "provision_fail",
     ] {
         let fixture = Repository::new()?;
-        fs::create_dir(fixture.root.join("crates"))?;
+        fs::create_dir_all(fixture.root.join("crates"))?;
         fs::write(fixture.root.join("crates/application.rs"), "application")?;
         git(&fixture.root, &["add", "crates"])?;
         git(&fixture.root, &["commit", "-qm", "Applications"])?;
@@ -381,7 +381,7 @@ fn combined_usb_build_prepares_once_and_provisions_only_its_successful_image() -
 #[test]
 fn image_build_rejects_stale_application_content_before_prerequisites() -> Result<()> {
     let fixture = Repository::new()?;
-    fs::create_dir(fixture.root.join("crates"))?;
+    fs::create_dir_all(fixture.root.join("crates"))?;
     let application = fixture.root.join("crates/application.rs");
     fs::write(&application, "initial application\n")?;
     git(&fixture.root, &["add", "crates"])?;
