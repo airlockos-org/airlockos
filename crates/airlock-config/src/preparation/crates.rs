@@ -138,9 +138,13 @@ replace-with = "airlock-admitted"
     // already normalized by Cargo are added separately, without a remote Git fetch.
     let mut registry: toml::Value = toml::from_str(std::str::from_utf8(&locked)?)?;
     registry
-        .get_mut("package")
-        .and_then(toml::Value::as_array_mut)
-        .ok_or("Cargo lock lacks packages")?
+        .as_table_mut()
+        .ok_or("Cargo lock is not a table")?
+        // Cargo omits this table for an empty workspace.
+        .entry("package")
+        .or_insert_with(|| toml::Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or("Cargo lock packages are not an array")?
         .retain(|package| {
             !package
                 .get("source")
