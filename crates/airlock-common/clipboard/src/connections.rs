@@ -161,10 +161,10 @@ mod tests {
         assert!(!peers.retire(0));
         assert!(!peers.reclaim_with(0, |_| false));
         assert_eq!(peers.retiring_len(), LIVE_LIMIT);
-        for value in 0..LIVE_LIMIT {
+        for value in LIVE_LIMIT..SLOT_LIMIT {
             assert!(peers.insert_with(|| Ok::<_, ()>((value, ()))).is_ok());
         }
-        for _ in 0..LIVE_LIMIT {
+        for _ in LIVE_LIMIT..SLOT_LIMIT {
             assert!(peers.retire(0));
         }
         assert_eq!(peers.retiring_len(), SLOT_LIMIT);

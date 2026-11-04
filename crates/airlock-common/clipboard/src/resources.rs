@@ -11,8 +11,9 @@ verus! {
 /// Maximum simultaneously admitted data connections.
 pub const LIVE_LIMIT: usize = 32;
 
-/// Total live and retiring reservations, including uncooperative peers.
-pub const SLOT_LIMIT: usize = 64;
+/// Data reservations within Hermit's 64 endpoint slots. The boot-bound authority
+/// retains the remaining slot for the entire service lifetime, including cleanup.
+pub const SLOT_LIMIT: usize = 63;
 
 /// Checked reservation ledger used by the actual service loop.
 /// Transport handles and their correspondence to these counts remain runtime adapters.
@@ -144,7 +145,7 @@ mod tests {
         for _ in 0..LIVE_LIMIT {
             assert!(slots.retire());
         }
-        for _ in 0..LIVE_LIMIT {
+        for _ in LIVE_LIMIT..SLOT_LIMIT {
             assert!(slots.admit());
             assert!(slots.retire());
         }

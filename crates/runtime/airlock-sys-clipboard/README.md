@@ -40,8 +40,8 @@ claims remain separate from admitted callers. Malformed or replayed frame stream
 poison that connection rather than resuming an ambiguous transfer.
 
 The connection owner couples the checked ledger directly to its live and retiring
-transport collections: at most 32 live data connections and 64 live/retiring owners
-in total. A peer preventing grant revocation keeps both its owner and reservation.
+transport collections: at most 32 live data connections and 63 live/retiring data owners
+in total. The authority retains the remaining slot in Hermit's 64-endpoint pool. A peer preventing grant revocation keeps both its owner and reservation.
 Construction is invoked only after admission. An uncertain endpoint-construction
 failure terminates this service lifetime; normal processing never resumes after
 releasing that reservation. Shutdown revokes all data capabilities and retries

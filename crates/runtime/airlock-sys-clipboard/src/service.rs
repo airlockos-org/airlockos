@@ -337,7 +337,16 @@ pub fn run(
                                     grant: offer.grant,
                                 }
                             }
-                            Err(InsertError::Capacity) => Reply::Error(Error::Capacity),
+                            Err(InsertError::Capacity) => {
+                                let (live_bytes, peak_bytes) =
+                                    crate::heap::APPLICATION_HEAP.usage();
+                                println!(
+                                    "AIRLOCK_CLIPBOARD_CAPACITY live={live} retiring={retiring} heap_live={live_bytes} heap_peak={peak_bytes}",
+                                    live = peers.live_len(),
+                                    retiring = peers.retiring_len()
+                                );
+                                Reply::Error(Error::Capacity)
+                            }
                             // The dependency may retain uncertain partial construction in
                             // its bounded kernel quarantine. Terminate this service life;
                             // never recycle admission and continue creating endpoints.
