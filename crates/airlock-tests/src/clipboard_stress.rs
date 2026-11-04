@@ -3,7 +3,7 @@
 //! Several principals share that peer domain; this is endpoint stress, not a test
 //! of GUI membership or isolation between 32 separate Linux VMs.
 
-use super::{Client, Error, Format, Reply, Request, formats};
+use super::{Client, Error, Format, MutationRejected, Reply, Request, formats};
 use airlock_clipboard_core::{
     resources::{LIVE_LIMIT, SLOT_LIMIT},
     shared::{DEFAULT_CAPACITY, MAX_FORMAT_NAME, MAX_FORMATS, storage::RAM_LIMIT},
@@ -278,6 +278,7 @@ pub(super) fn run(path: &Path, domain: u16, rounds: u16) -> Result<()> {
     // Vary metadata and packet allocation sizes around the RAM/disk threshold.
     // Retiring partial assemblies create holes while the next maximum RAM offer
     // is allocated. Every round verifies bytes before and after source changes.
+    let mut heap_rejections = 0;
     for round in 0..usize::from(rounds) {
         let size = match round % 4 {
             0 => RAM_LIMIT,
@@ -290,7 +291,34 @@ pub(super) fn run(path: &Path, domain: u16, rounds: u16) -> Result<()> {
         } else {
             formats(size)
         };
-        peers[0].publish(&layout, false)?;
+        match peers[0].publish(&layout, false) {
+            Ok(_) => (),
+            Err(error)
+                if error
+                    .downcast_ref::<MutationRejected>()
+                    .is_some_and(|rejected| rejected.reason == Error::Capacity) =>
+            {
+                // Replacement invalidates the previous offer at Reserve. A
+                // fragmented arena may reject Declare, but must not publish
+                // partial data or retain that failed payload reservation.
+                peers[0].empty()?;
+                peers.truncate(1);
+                peers[0].empty()?;
+                peers[0].publish(&layout, false)?;
+                peers[0].verify(&layout)?;
+                for principal in 2..=LIVE_LIMIT {
+                    peers.push(readmit(&mut authority, principal as u64, domain, guest)?);
+                }
+                heap_rejections += 1;
+                event(
+                    "heap-rejection-recovered",
+                    serde_json::json!({
+                        "round": round, "size": size, "live_restored": peers.len()
+                    }),
+                );
+            }
+            Err(error) => return Err(error),
+        }
         peers[1].verify(&layout)?;
         partial_packets(&mut peers[2..], round)?;
         for (index, peer) in peers.iter_mut().enumerate().skip(2) {
@@ -324,7 +352,7 @@ pub(super) fn run(path: &Path, domain: u16, rounds: u16) -> Result<()> {
     fresh.read(8193)?;
     event(
         "complete",
-        serde_json::json!({"status": "passed", "rounds": rounds,
+        serde_json::json!({"status": "passed", "rounds": rounds, "heap_rejections": heap_rejections,
         "live_limit": LIVE_LIMIT, "data_slot_limit": SLOT_LIMIT, "linux_peer_domains": 1}),
     );
     Ok(())

@@ -68,6 +68,26 @@ struct Client {
     sequence: u64,
 }
 
+/// A decoded policy rejection remains distinct from framing or transport failure.
+#[derive(Debug)]
+struct MutationRejected {
+    /// Stable service category; the rejected request's bytes are never retained.
+    reason: Error,
+}
+
+impl std::fmt::Display for MutationRejected {
+    /// Expose the category without retaining request metadata or payload.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "mutation rejected: {reason:?}",
+            reason = self.reason
+        )
+    }
+}
+
+impl std::error::Error for MutationRejected {}
+
 impl Client {
     /// Provision through qrexec, whose trusted remote-domain context binds this peer.
     fn open(config: &ClipboardConnection) -> Result<Self> {
@@ -125,7 +145,7 @@ impl Client {
     fn mutate(&mut self, request: Request) -> Result<()> {
         match self.request(request)? {
             Reply::Ok => Ok(()),
-            Reply::Error(error) => bail!("mutation rejected: {error:?}"),
+            Reply::Error(reason) => Err(MutationRejected { reason }.into()),
             _ => bail!("unexpected mutation reply"),
         }
     }
