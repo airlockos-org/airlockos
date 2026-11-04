@@ -12,7 +12,7 @@ name = "airlock-sys-ctrl-service"
 path = "src/main.rs"
 
 [dependencies]
-airlock-nix-core = { path = "../../../airlock-common/nix", features = ["runtime", "job-writer"] }
+airlock-nix-core = { path = "../../../airlock-common/nix", features = ["runtime", "job-writer", "artifacts"] }
 clap = { version = "4.5", features = ["derive"] }
 flate2 = "1.1"
 rustix = { version = "1.1", features = ["fs", "event", "process"] }

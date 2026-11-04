@@ -144,6 +144,13 @@ pub(super) fn input() -> Result<Input> {
     }))
 }
 
+/// Reuse descriptor readiness polling for a finite pool-artifact transfer.
+pub(super) fn artifact_input() -> Result<Input> {
+    let mut input = input()?;
+    input.get_mut().deadline = Instant::now() + TRANSFER_TIMEOUT;
+    Ok(input)
+}
+
 struct Counted<R> {
     // Remaining wire payload after the newline-terminated request header.
     inner: R,

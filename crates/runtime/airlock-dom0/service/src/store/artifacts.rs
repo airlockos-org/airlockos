@@ -1,7 +1,7 @@
 //! Receive artifacts over a policy-controlled channel and publish inactive retained generations.
 //! Negotiation pins reused extents until the validated manifest and its transaction commit.
 
-use super::{fs::*, pool_cli, records, root, segments, views};
+use super::{builder, fs::*, pool_cli, records, root, segments, views};
 use airlock_nix_core::artifact::{
     self, ERROR_SCHEMA, FULL_SCHEMA, INCREMENTAL_SCHEMA, MAX_MESSAGE, PROBE_SCHEMA, REQUEST_SCHEMA,
     read_message, write_message,
@@ -127,6 +127,7 @@ fn receive_members(
     staging: &Path,
     allowed: Option<&BTreeSet<String>>,
     descriptor: Option<&Value>,
+    payload_limit: Option<u64>,
 ) -> Result<(Value, BTreeMap<String, Fragment>)> {
     // A pipe read can return just one byte. Preserve the signature while sniffing
     // compression instead of assuming fill_buf supplies a complete magic number.
@@ -143,6 +144,7 @@ fn receive_members(
     let mut manifest = None;
     let mut fragments = BTreeMap::new();
     let segment_target = pool_cli::target(None)?;
+    let mut remaining = payload_limit.unwrap_or(u64::MAX);
     let mut segment_number = 0;
     let mut segment_size = 0u64;
     for member in archive.entries()? {
@@ -157,6 +159,9 @@ fn receive_members(
             .context("non-UTF8 artifact path")?
             .to_owned();
         let size = member.size();
+        remaining = remaining
+            .checked_sub(size)
+            .context("artifact exceeds publication byte budget")?;
         if name == "manifest.json" {
             ensure!(
                 manifest.is_none() && size <= MAX_MESSAGE as u64,
@@ -217,7 +222,12 @@ fn receive_members(
         output.seek(SeekFrom::Start(offset))?;
         let available = rustix::fs::statvfs(staging)?;
         ensure!(
-            size.checked_add(64 * 1024 * 1024).is_some_and(
+            size.checked_add(if payload_limit.is_some() {
+                2 * 1024u64.pow(3)
+            } else {
+                64 * 1024 * 1024
+            })
+            .is_some_and(
                 |required| required <= available.f_bavail.saturating_mul(available.f_frsize)
             ),
             "insufficient pool space for fragment"
@@ -380,6 +390,44 @@ fn candidate(inventory: &Value, identity: Option<&ExpectedAdmission>, probe: boo
     Ok(())
 }
 
+/// Bind the ordinary missing-object protocol to one protected build preparation.
+fn build_candidate(
+    inventory: &Value,
+    expected: &airlock_nix_core::build_cache::Request,
+) -> Result<()> {
+    use airlock_nix_core::build_cache::DOMAIN;
+    ensure!(
+        inventory["schema"] == INCREMENTAL_SCHEMA
+            && inventory["domain"] == DOMAIN
+            && inventory["system"] == expected.derivation.as_str()
+            && inventory["closure_source"] == expected.derivation.as_str()
+            && inventory["root_source"] == ""
+            && inventory["root_artifact"].is_null()
+            && inventory["kernel_name"] == ""
+            && inventory["source_revision"] == expected.revision.as_str()
+            && inventory["lock_hash"] == expected.lock_hash.as_str(),
+        "artifact differs from prepared build publication"
+    );
+    let objects = objects(inventory, DOMAIN, true)?;
+    ensure!(
+        objects.len() == expected.paths.len(),
+        "build object inventory changed"
+    );
+    for (path, object) in &objects {
+        let path: StorePath = path.parse()?;
+        ensure!(
+            expected.paths.get(&path) == Some(&number(object, "nar_size")?),
+            "build object metadata changed"
+        );
+    }
+    let registration = inventory["build_registration"]
+        .as_str()
+        .context("missing build registration")?;
+    expected.check_registration(registration)?;
+    builder::verify_registration(registration, &objects)?;
+    Ok(())
+}
+
 fn reuse(root: &Path, probe: &Value, domain: &str, approved_by: &str) -> Result<Option<Value>> {
     ensure!(probe["domain"] == domain, "artifact target mismatch");
     artifact::validate_store_path(&text(probe, "system")?)?;
@@ -495,7 +543,19 @@ fn admit(
                 saved.is_some_and(|saved| saved["tree_hash"] == object["tree_hash"])
             })
         });
-        if receipt["source_revision"] == manifest["source_revision"]
+        let matching_registration = manifest
+            .get("build_registration")
+            .and_then(Value::as_str)
+            .is_none_or(|incoming| {
+                Path::new(receipt["manifest"].as_str().unwrap_or(""))
+                    .parent()
+                    .is_some_and(|directory| {
+                        fs::read_to_string(directory.join("registration"))
+                            .is_ok_and(|saved| saved == incoming)
+                    })
+            });
+        if matching_registration
+            && receipt["source_revision"] == manifest["source_revision"]
             && receipt["lock_hash"] == manifest["lock_hash"]
             && receipt["root_artifact"] == manifest["root_artifact"]
             && old["store"]["paths"] == json!(paths)
@@ -643,6 +703,13 @@ fn admit(
             "verification": {"mode":"transferred-artifact","status":"passed","verified_objects":paths.len()},
             "retention": {"retain":true},
         });
+        if let Some(registration) = manifest.get("build_registration").and_then(Value::as_str) {
+            atomic(
+                &directory.join("registration"),
+                registration.as_bytes(),
+                0o444,
+            )?;
+        }
         failpoint("artifact-before-generation-commit")?;
         write(&path, &generation_manifest, 0o644)?;
         write(
@@ -703,6 +770,20 @@ fn admit(
     publish
 }
 
+/// Exactly one protected admission scope; ordinary guest transfers may omit a candidate binding.
+pub(super) enum Expectation<'a> {
+    /// Existing guest admission, optionally bound to a prepared machine candidate.
+    Guest(
+        /// Protected candidate identity when this guest belongs to a reviewed machine release.
+        Option<&'a ExpectedAdmission>,
+    ),
+    /// Compilation inputs bound to a protected source review and exact inventory.
+    Build(
+        /// Request already authenticated against dom0-owned review and preparation records.
+        &'a airlock_nix_core::build_cache::Request,
+    ),
+}
+
 pub(super) fn receive(
     input: &mut dyn BufRead,
     output: &mut dyn Write,
@@ -710,8 +791,12 @@ pub(super) fn receive(
     domain: &str,
     approved_by: &str,
     incremental: bool,
-    identity: Option<&ExpectedAdmission>,
+    expectation: Expectation<'_>,
 ) -> Result<Value> {
+    let (identity, build) = match expectation {
+        Expectation::Guest(identity) => (identity, None),
+        Expectation::Build(request) => (None, Some(request)),
+    };
     component(domain)?;
     ensure_pool(pool)?;
     let _lock = PoolLock::acquire(&pool.join("admission.lock"))?;
@@ -720,6 +805,21 @@ pub(super) fn receive(
     } else {
         None
     };
+    if let Some(expected) = build {
+        build_candidate(
+            inventory
+                .as_ref()
+                .context("build publication requires negotiation")?,
+            expected,
+        )?;
+    } else {
+        ensure!(
+            inventory
+                .as_ref()
+                .is_none_or(|value| value.get("build_registration").is_none()),
+            "build registration requires protected build admission"
+        );
+    }
     if inventory
         .as_ref()
         .is_some_and(|value| value["schema"] == PROBE_SCHEMA)
@@ -805,7 +905,13 @@ pub(super) fn receive(
         .filter(|v| !v.is_null());
     let receive_start = std::time::Instant::now();
     let (manifest, fragments) = progress::phase("receiving_payload", || {
-        receive_members(input, temporary.path(), allowed.as_ref(), descriptor)
+        receive_members(
+            input,
+            temporary.path(),
+            allowed.as_ref(),
+            descriptor,
+            build.map(|_| airlock_nix_core::build_cache::MAX_BYTES),
+        )
     })?;
     let receive_seconds = receive_start.elapsed().as_secs_f64();
     if let Some(inventory) = &inventory {
@@ -836,6 +942,12 @@ pub(super) fn receive(
             "incremental artifacts require negotiation"
         );
     }
+    // The exact negotiated inventory (including registration) was checked above;
+    // only validated fragment hashes/sizes may be added to the final manifest.
+    ensure!(
+        build.is_some() || manifest.get("build_registration").is_none(),
+        "build registration requires protected build admission"
+    );
     let admission_start = std::time::Instant::now();
     let mut receipt = progress::phase("admitting_artifacts", || {
         admit(

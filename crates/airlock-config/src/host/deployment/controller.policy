@@ -17,5 +17,9 @@ airlock.Ctrl.MachineApply * sys-ctrl dom0 allow
 airlock.Ctrl.MachineApply * @anyvm @anyvm deny
 airlock.Ctrl.MachinePrepare + sys-ctrl dom0 allow
 airlock.Ctrl.MachinePrepare * @anyvm @anyvm deny
+airlock.Ctrl.BuildPrepare + sys-ctrl dom0 allow
+airlock.Ctrl.BuildPrepare * @anyvm @anyvm deny
 airlock.Pool.AdmitCandidate * sys-ctrl dom0 allow
 airlock.Pool.AdmitCandidate * @anyvm @anyvm deny
+airlock.Pool.AdmitBuild * sys-ctrl dom0 allow
+airlock.Pool.AdmitBuild * @anyvm @anyvm deny

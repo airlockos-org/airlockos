@@ -9,10 +9,7 @@ use crate::{
 };
 use airlock_nix_core::identity::{BaselineFingerprint, GitRevision, GuestName, LockHash};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    time::Instant,
-};
+use std::{collections::BTreeMap, time::Instant};
 
 pub(super) const SCHEMA: &str = "airlock.sys-ctrl-machine-release.v2";
 
@@ -244,54 +241,18 @@ impl Receiver {
             return self.apply_prepared(&header, token);
         }
 
-        let started = Instant::now();
-        let paths = header.paths.as_ref().context("missing release inventory")?;
-        let inventory = process::run(
-            Command::new("nix").args([
-                "--extra-experimental-features",
-                "nix-command",
-                "path-info",
-                "--all",
-            ]),
-            None,
-            Some(Duration::from_secs(120)),
-        )?
-        .checked("read Nix inventory")?;
-        let valid = std::str::from_utf8(&inventory)?
-            .lines()
-            .filter(|line| !line.is_empty())
-            .map(str::parse)
-            .collect::<std::result::Result<BTreeSet<StorePath>, _>>()?;
-        let missing: Vec<_> = paths
-            .keys()
-            .filter(|path| !valid.contains(*path))
-            .cloned()
-            .collect();
-        let required = missing.iter().try_fold(0u64, |size, path| {
-            size.checked_add(paths[path])
-                .context("release inventory size overflow")
-        })?;
-        let space = rustix::fs::statvfs("/nix/store")?;
-        let available = space
-            .f_bavail
-            .checked_mul(space.f_frsize)
-            .context("store space overflow")?;
-        let budget = available
-            .checked_sub(2 * 1024 * 1024 * 1024)
-            .context("insufficient dom0 store space for release import")?;
-        ensure!(
-            required <= budget,
-            "insufficient dom0 store space for release import"
-        );
-        emit(&json!({"schema":SCHEMA,"missing":missing}))?;
-        let inventory_seconds = started.elapsed().as_secs_f64();
-
-        let started = Instant::now();
-        if let Some(lock) = &mut transfer_lock {
-            lock.update_phase("Importing transport release".into())?;
-        }
-        let imported = transfer::import(input, budget, &missing)?;
-        let import_seconds = started.elapsed().as_secs_f64();
+        let ImportedPaths {
+            missing,
+            imported,
+            inventory_seconds,
+            import_seconds,
+        } = self.import_paths(
+            header.paths.as_ref().context("missing release inventory")?,
+            SCHEMA,
+            input,
+            transfer_lock.as_mut(),
+            u64::MAX,
+        )?;
         let manifest: Manifest =
             state::read(&Path::new(header.release.as_str()).join("release.json"))?;
         ensure!(

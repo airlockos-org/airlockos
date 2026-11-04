@@ -38,6 +38,8 @@ mod host;
 
 mod admission;
 
+mod build_cache;
+
 pub(crate) mod approval;
 
 mod boot;

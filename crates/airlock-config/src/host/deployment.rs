@@ -133,6 +133,13 @@ fn rpcs(context: &ModuleContext, engine: &NixValue) -> NixValue {
     for (name, operation, accepts_argument, developer) in [
         ("airlock.Ctrl.ReviewControl", "review-control", false, false),
         (
+            "airlock.Ctrl.BuildPrepare",
+            "rpc build-prepare",
+            false,
+            false,
+        ),
+        ("airlock.Pool.AdmitBuild", "build-receive", true, false),
+        (
             "airlock.Ctrl.MachineControl",
             "rpc machine-control",
             false,

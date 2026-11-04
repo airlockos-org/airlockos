@@ -66,7 +66,7 @@ pub(super) fn run(command: Request) -> Result<()> {
             &receiver.expected_domain,
             &receiver.approved_by,
             incremental,
-            identity.as_ref(),
+            artifacts::Expectation::Guest(identity.as_ref()),
         )?;
         let receipt: super::AdmissionReceipt = serde_json::from_value(value)?;
         if let Some(root) = &receipt.root_artifact {

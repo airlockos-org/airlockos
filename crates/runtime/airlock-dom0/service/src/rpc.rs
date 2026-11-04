@@ -8,6 +8,8 @@ mod machine;
 
 mod transfer;
 
+mod build_cache;
+
 use crate::{model::ReleasePath, process::ProtocolFailed};
 use airlock_nix_core::{
     identity::{GitRevision, GuestName, LockHash, ReviewId},
@@ -39,6 +41,8 @@ pub(crate) struct Request {
 
 #[derive(Subcommand)]
 enum Operation {
+    /// Import recipe metadata and prepare a source-bound build publication.
+    BuildPrepare,
     /// Receive a transport release and prepare, plan or start machine activation.
     MachineReceive {
         // Whether to admit guest artifacts, compute effects or start activation.
@@ -100,6 +104,7 @@ struct Receiver {
 pub(crate) fn execute(state: &Path, request: Request) -> Result<()> {
     let guest = matches!(request.operation, Operation::GuestReceive { .. });
     let schema = match request.operation {
+        Operation::BuildPrepare => airlock_nix_core::build_cache::SCHEMA,
         Operation::MachineReceive { .. } => machine::SCHEMA,
         Operation::GuestReceive { .. } => "airlock.guest-deploy-error.v1",
         Operation::MachineControl => control::SCHEMA,
@@ -130,6 +135,7 @@ pub(crate) fn execute(state: &Path, request: Request) -> Result<()> {
         };
         let mut input = transfer::input()?;
         match request.operation {
+            Operation::BuildPrepare => receiver.build_cache(&mut input),
             Operation::MachineReceive { action } => receiver.machine(action, &mut input),
             Operation::GuestReceive { action } => receiver.guest(action, &mut input),
             Operation::MachineControl => receiver.control(&mut input),
@@ -356,4 +362,91 @@ impl Receiver {
         }
         Ok(result)
     }
+}
+
+/// Imported Nix objects and separate transport measurements, with no publication authority.
+struct ImportedPaths {
+    // Exact missing paths requested from the sender, retained for transfer accounting.
+    missing: Vec<crate::model::StorePath>,
+    // Validated compressed/uncompressed transfer measurements.
+    imported: transfer::Imported,
+    // Elapsed inventory validation and space budgeting.
+    inventory_seconds: f64,
+    // Elapsed transfer/decompression/import time.
+    import_seconds: f64,
+}
+
+impl Receiver {
+    /// Reuse the bounded Nix transport for machine releases and approved compilation inputs.
+    fn import_paths(
+        &self,
+        paths: &std::collections::BTreeMap<crate::model::StorePath, u64>,
+        schema: &str,
+        input: &mut transfer::Input,
+        lock: Option<&mut OperationLock>,
+        ceiling: u64,
+    ) -> Result<ImportedPaths> {
+        use crate::model::StorePath;
+        use std::{collections::BTreeSet, time::Instant};
+        let started = Instant::now();
+        let inventory = process::run(
+            Command::new("nix").args([
+                "--extra-experimental-features",
+                "nix-command",
+                "path-info",
+                "--all",
+            ]),
+            None,
+            Some(Duration::from_secs(120)),
+        )?
+        .checked("read Nix inventory")?;
+        let valid = std::str::from_utf8(&inventory)?
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(str::parse)
+            .collect::<std::result::Result<BTreeSet<StorePath>, _>>()?;
+        let missing: Vec<_> = paths
+            .keys()
+            .filter(|path| !valid.contains(*path))
+            .cloned()
+            .collect();
+        let required = missing.iter().try_fold(0u64, |size, path| {
+            size.checked_add(paths[path])
+                .context("release inventory size overflow")
+        })?;
+        let space = rustix::fs::statvfs("/nix/store")?;
+        let available = space
+            .f_bavail
+            .checked_mul(space.f_frsize)
+            .context("store space overflow")?;
+        let budget = available
+            .checked_sub(2 * 1024 * 1024 * 1024)
+            .context("insufficient dom0 store space for release import")?;
+        let budget = budget.min(ceiling);
+        ensure!(
+            required <= budget,
+            "insufficient dom0 store space for release import"
+        );
+        emit(&json!({"schema":schema,"missing":missing}))?;
+        let inventory_seconds = started.elapsed().as_secs_f64();
+
+        let started = Instant::now();
+        if let Some(lock) = lock {
+            lock.update_phase("Importing transport release".into())?;
+        }
+        let imported = transfer::import(input, budget, &missing)?;
+        let import_seconds = started.elapsed().as_secs_f64();
+
+        Ok(ImportedPaths {
+            missing,
+            imported,
+            inventory_seconds,
+            import_seconds,
+        })
+    }
+}
+
+/// Apply the existing wire deadline to build artifacts received after protected preparation.
+pub(crate) fn publication_input() -> Result<impl BufRead> {
+    transfer::artifact_input()
 }

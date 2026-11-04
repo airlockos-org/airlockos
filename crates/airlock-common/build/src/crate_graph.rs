@@ -203,7 +203,10 @@ pub fn constructor() -> NixValue {
                             arguments
                                 .clone()
                                 .select("attributes")
-                                .merge_attrs(nix_record! {"crateBin":bins}),
+                                .merge_attrs(nix_record! {
+                                    "crateBin": bins,
+                                    "AIRLOCK_BUILD_ARTIFACT": "1",
+                                }),
                             nix_record! {},
                         )),
                 )

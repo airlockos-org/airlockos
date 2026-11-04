@@ -97,6 +97,51 @@ pub(super) fn registration(source: &str) -> Result<BTreeMap<String, Registration
     Ok(output)
 }
 
+/// Cross-check the unchanged Nix dump/load bytes against the negotiated object inventory.
+/// Nix owns hash-format conversion; this does not implement another Nix hash codec.
+pub(super) fn verify_registration(source: &str, objects: &BTreeMap<String, Value>) -> Result<()> {
+    let records = registration(source)?;
+    ensure!(
+        records.keys().eq(objects.keys()),
+        "build registration paths differ from inventory"
+    );
+    let ordered: Vec<_> = objects.iter().collect();
+    for chunk in ordered.chunks(128) {
+        let mut args = vec![
+            "hash",
+            "convert",
+            "--hash-algo",
+            "sha256",
+            "--to",
+            "base16",
+            "--",
+        ];
+        for (_, object) in chunk {
+            let hash = object["nar_hash"].as_str().context("missing NAR hash")?;
+            ensure!(hash.len() <= 128, "oversized NAR hash");
+            args.push(hash);
+        }
+        let converted = command("nix", &args, None)?;
+        let hashes: Vec<_> = converted.lines().collect();
+        ensure!(
+            hashes.len() == chunk.len(),
+            "incomplete Nix hash conversion"
+        );
+        for ((path, object), hash) in chunk.iter().zip(hashes) {
+            let registered = records.get(*path).context("missing registration path")?;
+            let references: BTreeSet<String> =
+                serde_json::from_value(object["references"].clone())?;
+            ensure!(
+                registered.digest == hash
+                    && registered.size == number(object, "nar_size")?
+                    && registered.references == references,
+                "build registration differs from Nix object metadata"
+            );
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn merge(inputs: &[&str]) -> Result<String> {
     let mut output: BTreeMap<String, Registration> = BTreeMap::new();
     for input in inputs {

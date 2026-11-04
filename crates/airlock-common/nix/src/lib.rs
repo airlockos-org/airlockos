@@ -37,6 +37,10 @@ pub mod configuration;
 #[cfg(feature = "artifacts")]
 pub mod artifact;
 
+/// Reviewed build-output inventories using Nix's existing derivation and closure identities.
+#[cfg(feature = "artifacts")]
+pub mod build_cache;
+
 pub mod job;
 
 pub mod review;

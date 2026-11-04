@@ -210,6 +210,16 @@ enum Action {
     },
     /// Create, decide, validate or observe a protected source review from stdin.
     ReviewControl,
+    /// Prepare metadata and protected review binding for later compilation-input admission.
+    BuildPrepare,
+    /// Receive compiled objects only for a protected, source-bound preparation token.
+    BuildReceive {
+        // Exact protected build identity issued by build preparation.
+        token: airlock_nix_core::identity::LockHash,
+        // Authenticated caller fixed by the restricted wrapper.
+        #[arg(long)]
+        caller: String,
+    },
     /// Bind a prepared release to an existing protected source review.
     ReviewBind {
         // Human authorization whose source and scope must cover the release.
@@ -376,6 +386,14 @@ fn run(args: Args) -> Result<Value> {
         } => c.trash_purge(&identity, &confirm, before_expiry)?,
         Action::GenerationMaintenance => c.generation_maintenance()?,
         Action::AdmissionPrepare { release, caller } => c.admission_prepare(&release, &caller)?,
+        Action::BuildPrepare => c.prepare_build_cache()?,
+        Action::BuildReceive { token, caller } => match c.receive_build_cache(&token, &caller) {
+            Ok(value) => value,
+            Err(error) => {
+                crate::store::report_build_error(&error);
+                return Err(crate::process::ProtocolFailed.into());
+            }
+        },
         Action::AdmissionReceive { argument, caller } => {
             c.admission_receive(&argument, &caller)?;
             Value::Null

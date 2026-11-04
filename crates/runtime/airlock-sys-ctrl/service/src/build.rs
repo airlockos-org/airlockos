@@ -29,6 +29,8 @@ use std::{
     time::Instant,
 };
 
+mod cache;
+
 const MACHINE_SCHEMA: &str = "airlock.sys-ctrl-machine-release.v2";
 
 /// Installed controller configuration selects a release family; wire requests cannot change it.
@@ -172,12 +174,15 @@ pub(super) fn execute(store: &StateStore, grant: &Grant, lock: &OperationLock) -
     grant.check(lock)?;
     if grant.header.action.is_machine() {
         let release = progress::phase("building_release", || build_release(store, grant, lock))?;
+        let publication = cache::publish(store, grant, lock, &release)?;
         if grant.header.action == Action::MachineBuild {
             return Ok(
-                json!({"schema":MACHINE_SCHEMA,"release":release,"revision":grant.header.revision,"lock_hash":grant.header.lock_hash}),
+                json!({"schema":MACHINE_SCHEMA,"release":release,"revision":grant.header.revision,"lock_hash":grant.header.lock_hash,"build_publication":publication}),
             );
         }
-        return send_release(store, grant, lock, &release);
+        let mut result = send_release(store, grant, lock, &release)?;
+        result["build_publication"] = publication;
+        return Ok(result);
     }
 
     let target = grant
@@ -201,6 +206,7 @@ pub(super) fn execute(store: &StateStore, grant: &Grant, lock: &OperationLock) -
         ],
     )?)?;
     receipt.check_transfer(target, &grant.header.source())?;
+    let publication = cache::publish(store, grant, lock, &receipt.system)?;
     grant.check(lock)?;
     receipt
         .diagnostics
@@ -214,6 +220,8 @@ pub(super) fn execute(store: &StateStore, grant: &Grant, lock: &OperationLock) -
         process::rpc(service, &serde_json::to_value(&receipt)?, None)
     })?;
     check_plan(&result, grant)?;
+    let mut result = result;
+    result["build_publication"] = publication;
 
     records::save(
         store,
@@ -650,7 +658,7 @@ fn send_transport(
             .get("narSize")
             .and_then(Value::as_u64)
             .ok_or_else(|| Error::Message("Nix metadata lacks narSize".into()))?;
-        paths.insert(path, size);
+        paths.insert(path.clone(), size);
     }
 
     let service = match action {
@@ -659,6 +667,14 @@ fn send_transport(
         "apply" => "airlock.Ctrl.MachineApply",
         _ => return Err(Error::Message("unsupported transport action".into())),
     };
+    let header = json!({"schema":MACHINE_SCHEMA,"release":transport,"revision":grant.header.revision,
+        "lock_hash":grant.header.lock_hash,"profile":profile()?,"receipts":receipts,
+        "paths":paths,"review_authorization":grant.id});
+    send_objects(service, &header, &paths)
+}
+
+/// Send only the receiver-requested members of one already approved, frozen inventory.
+fn send_objects(service: &str, header: &Value, paths: &BTreeMap<StorePath, u64>) -> Result<Value> {
     let mut child = OwnedChild(
         Command::new("qrexec-client-vm")
             .args(["dom0", service])
@@ -669,10 +685,7 @@ fn send_transport(
 
     let mut input = child.0.stdin.take().expect("piped stdin");
     let mut output = BufReader::new(child.0.stdout.take().expect("piped stdout"));
-    serde_json::to_writer(
-        &mut input,
-        &json!({"schema":MACHINE_SCHEMA,"release":transport,"revision":grant.header.revision,"lock_hash":grant.header.lock_hash,"profile":profile()?,"receipts":receipts,"paths":paths,"review_authorization":grant.id}),
-    )?;
+    serde_json::to_writer(&mut input, header)?;
     input.write_all(b"\n")?;
     input.flush()?;
 
@@ -687,13 +700,13 @@ fn send_transport(
     )?;
     let inventory = response(&line)?;
     require(
-        inventory.get("schema") == Some(&json!(MACHINE_SCHEMA)),
+        inventory.get("schema") == header.get("schema"),
         "unsupported inventory response schema",
     )?;
     let missing: Vec<StorePath> = decode(&serde_json::to_vec(&inventory["missing"])?)?;
     require(
         missing.iter().cloned().collect::<BTreeSet<_>>().len() == missing.len()
-            && missing.iter().all(|p| metadata.contains_key(p)),
+            && missing.iter().all(|p| paths.contains_key(p)),
         "invalid dom0 missing-object inventory",
     )?;
 

@@ -18,6 +18,9 @@ pub mod effects;
 /// Guest-admission evidence matched to complete immutable candidate requirements.
 pub mod admission;
 
+/// Count and byte admission for reusable compilation-input publication.
+pub mod build_publication;
+
 /// Content correspondence and complete evidence for administrative configuration validation.
 pub mod validation;
 

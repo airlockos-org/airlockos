@@ -193,44 +193,64 @@ impl Source {
     }
 
     fn inventory(&self, incremental: bool) -> Result<Value> {
+        self.inventory_paths(incremental, None)
+    }
+
+    /// Use caller-frozen build roots only on the protected build-publication channel.
+    fn inventory_paths(
+        &self,
+        incremental: bool,
+        build_paths: Option<&BTreeMap<crate::store_path::StorePath, u64>>,
+    ) -> Result<Value> {
         component(&self.domain)?;
         validate_store_path(&self.system)?;
         validate_provenance(&self.source_revision, &self.lock_hash)?;
-        let paths = self.paths()?;
-        let info = if let Some(value) = &self.path_info {
-            value.clone()
-        } else {
-            let mut command = Command::new(&self.nix);
-            if let Some(store) = &self.nix_store {
-                command.args(["--store", store]);
-            }
-            let output = command
-                .args(["path-info", "--json"])
-                .args(&paths)
-                .stdin(Stdio::null())
-                .output()?;
-            ensure!(
-                output.status.success(),
-                "Nix path metadata query failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            serde_json::from_slice(&output.stdout)?
+        let paths = match build_paths {
+            Some(paths) => paths.keys().map(|p| p.as_str().to_owned()).collect(),
+            None => self.paths()?,
         };
-        let info = if let Some(items) = info.as_array() {
-            let mut mapped = serde_json::Map::new();
-            for value in items {
-                let path = value["path"]
-                    .as_str()
-                    .context("path-info record has no path")?;
+        let batches = if let Some(value) = &self.path_info {
+            vec![value.clone()]
+        } else {
+            let mut batches = Vec::new();
+            for chunk in paths.chunks(128) {
+                let mut command = Command::new(&self.nix);
+                if let Some(store) = &self.nix_store {
+                    command.args(["--store", store]);
+                }
+                let output = crate::runtime::process::run(
+                    command.args(["path-info", "--json"]).args(chunk),
+                    None,
+                    Some(std::time::Duration::from_secs(120)),
+                )?
+                .checked("query artifact metadata")?;
+                batches.push(serde_json::from_slice(&output)?);
+            }
+            batches
+        };
+        let mut info = serde_json::Map::new();
+        for batch in batches {
+            let records = match batch {
+                Value::Array(items) => items
+                    .into_iter()
+                    .map(|value| {
+                        let path = value["path"]
+                            .as_str()
+                            .context("path-info record has no path")?
+                            .to_owned();
+                        Ok((path, value))
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+                Value::Object(items) => items.into_iter().collect(),
+                _ => anyhow::bail!("invalid path-info response"),
+            };
+            for (path, value) in records {
                 ensure!(
-                    mapped.insert(path.to_owned(), value.clone()).is_none(),
+                    info.insert(path, value).is_none(),
                     "duplicate path-info record"
                 );
             }
-            Value::Object(mapped)
-        } else {
-            info
-        };
+        }
         let mut objects = Vec::new();
         for path in paths {
             let info = info
@@ -338,6 +358,7 @@ impl Source {
         } else {
             (paths, root_descriptor.is_some(), BTreeMap::new())
         };
+        let verify_reused = inventory.get("build_registration").is_some();
         let mut payload_progress = progress::Span::start("sending_payload");
         let total = missing.len();
         let object_count = inventory["object_count"].clone();
@@ -368,6 +389,17 @@ impl Source {
                 .context("missing object path")?
                 .to_owned();
             if !missing.contains(&path) {
+                // Registration must describe the canonical bytes, even when an
+                // input-addressed derivation produced different output on retry.
+                // Reuse the existing tree identity; no reused payload is sent.
+                if verify_reused {
+                    ensure!(
+                        progress::phase("checking_reused_build_object", || tree_hash(
+                            &self.physical(&path)?
+                        ))? == reused[&path],
+                        "pool object differs from the frozen build: {path}"
+                    );
+                }
                 object["tree_hash"] = json!(reused[&path]);
                 continue;
             }
@@ -438,6 +470,18 @@ impl Source {
         output: &mut dyn Write,
         reuse_generation: bool,
     ) -> Result<AdmissionReceipt> {
+        self.transfer_registered(input, output, reuse_generation, None, None)
+    }
+
+    /// Reuse missing-object negotiation while carrying exact Nix registration for a build publication.
+    fn transfer_registered(
+        &self,
+        input: &mut dyn BufRead,
+        output: &mut dyn Write,
+        reuse_generation: bool,
+        registration: Option<&str>,
+        build_paths: Option<&BTreeMap<crate::store_path::StorePath, u64>>,
+    ) -> Result<AdmissionReceipt> {
         component(&self.domain)?;
         validate_store_path(&self.system)?;
         validate_provenance(&self.source_revision, &self.lock_hash)?;
@@ -467,7 +511,11 @@ impl Source {
             }
             ensure!(probe["reuse"] == false, "invalid generation reuse response");
         }
-        let inventory = progress::phase("inventory", || self.inventory(true))?;
+        let mut inventory =
+            progress::phase("inventory", || self.inventory_paths(true, build_paths))?;
+        if let Some(registration) = registration {
+            inventory["build_registration"] = json!(registration);
+        }
         write_message(output, &inventory)?;
         let request = progress::phase("negotiating_objects", || receiver_message(input))?;
         let manifest = self.payload(output, inventory, Some(&request))?;
@@ -519,15 +567,71 @@ impl Source {
         } else {
             format!("airlock.Pool.AdmitIncremental+{}", self.domain)
         };
-        let child = Command::new(qrexec)
-            .args(["dom0", &service])
+        self.send_channel(qrexec, &service, reuse_generation, None, None)
+    }
+
+    /// Publish through the controller-only build channel using a protected preparation token.
+    /// Bulk objects are negotiated against the shared pool, not dom0's runtime Nix store.
+    pub fn send_build(
+        &self,
+        qrexec: &str,
+        request: &crate::build_cache::Request,
+        registration: &str,
+    ) -> Result<AdmissionReceipt> {
+        request.validate()?;
+        request.check_registration(registration)?;
+        ensure!(
+            self.domain == crate::build_cache::DOMAIN
+                && self.system == request.derivation.as_str()
+                && self.closure_source == request.derivation.as_str()
+                && self.root_source.is_empty()
+                && self.kernel_name.is_empty(),
+            "build artifact source differs from preparation"
+        );
+        let admission = request.fingerprint()?;
+        let service = format!("airlock.Pool.AdmitBuild+{admission}");
+        self.send_channel(
+            qrexec,
+            &service,
+            false,
+            Some(registration),
+            Some(&request.paths),
+        )
+    }
+
+    /// Own the same qrexec child and validated admission receipt for both existing artifact uses.
+    fn send_channel(
+        &self,
+        qrexec: &str,
+        service: &str,
+        reuse_generation: bool,
+        registration: Option<&str>,
+        build_paths: Option<&BTreeMap<crate::store_path::StorePath, u64>>,
+    ) -> Result<AdmissionReceipt> {
+        // Coreutils owns the finite channel deadline, including a receiver which
+        // stops reading payload bytes. Killing qrexec closes both guarded pipes.
+        let mut command = if build_paths.is_some() {
+            let mut command = Command::new("timeout");
+            command.args(["--signal=TERM", "--kill-after=5s", "1800", qrexec]);
+            command
+        } else {
+            Command::new(qrexec)
+        };
+        let child = command
+            .args(["dom0", service])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()?;
         let mut child = OwnedChild(child);
         let mut input = BufReader::new(child.0.stdout.take().context("qrexec stdout unavailable")?);
         let mut output = child.0.stdin.take().context("qrexec stdin unavailable")?;
-        let result = self.transfer(&mut input, &mut output, reuse_generation);
+        let result = self.transfer_registered(
+            &mut input,
+            &mut output,
+            reuse_generation,
+            registration,
+            build_paths,
+        );
         drop(output);
         let receipt = result?;
         ensure!(child.0.wait()?.success(), "pool admission receiver failed");

@@ -142,9 +142,12 @@ fn image(
             "bin": bin, "pname": package, "cargoVendorDir": vendor.clone(),
         })
         .select("overrideAttrs")
-        .call(NixValue::function(
-            |_| nix_record! { "AIRLOCK_SOURCE_REVISION": revision.clone() },
-        ));
+        .call(NixValue::function(|_| {
+            nix_record! {
+                "AIRLOCK_SOURCE_REVISION": revision.clone(),
+                "AIRLOCK_BUILD_ARTIFACT": "1",
+            }
+        }));
     image.bind(|image| image.clone().merge_attrs(nix_record! {
         "buildArtifacts": pkgs.clone().select("lib.unique").call(NixValue::concat_lists([
             NixValue::list([vendor, integration.clone().select("packages.x86_64-linux.hermit-kernel")]),

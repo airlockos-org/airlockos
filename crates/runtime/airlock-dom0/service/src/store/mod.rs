@@ -104,6 +104,98 @@ pub(crate) use airlock_deployment_core::attachment::runtime_namespace;
 
 pub(crate) use cli::{Command, execute};
 
+/// Receive only missing canonical pool objects, then reuse the existing additive builder publisher.
+/// The checked gate is borrowed throughout receipt and publication, never reconstructed from JSON.
+pub(crate) fn receive_build_cache(
+    request: &airlock_nix_core::build_cache::Request,
+    gate: &airlock_deployment_core::publication::Publication,
+    attempt: &str,
+    binding: &str,
+    mut saved: impl FnMut(&str, &serde_json::Value) -> anyhow::Result<()>,
+) -> anyhow::Result<serde_json::Value> {
+    use anyhow::{Context, ensure};
+    let root = std::path::Path::new(host::POOL);
+    ensure!(
+        gate.executing(attempt, binding),
+        "build admission lacks durable authorization"
+    );
+    let mut receipt = artifacts::receive(
+        &mut crate::rpc::publication_input()?,
+        &mut std::io::stdout().lock(),
+        root,
+        airlock_nix_core::build_cache::DOMAIN,
+        "sys-ctrl",
+        true,
+        artifacts::Expectation::Build(request),
+    )?;
+    saved("admission", &receipt)?;
+    let manifest = std::path::Path::new(
+        receipt["manifest"]
+            .as_str()
+            .context("missing admitted manifest")?,
+    );
+    fs::pool_path(root, manifest)?;
+    let registration = std::fs::read_to_string(
+        manifest
+            .parent()
+            .context("missing admission directory")?
+            .join("registration"),
+    )?;
+    request.check_registration(&registration)?;
+    let views = publish_build_cache(&registration, gate, attempt, binding, |role, view| {
+        saved(role, view)
+    })?;
+    receipt["builder_views"] = views;
+    Ok(receipt)
+}
+
+/// Emit the same bounded duplex error used by ordinary artifact admission.
+pub(crate) fn report_build_error(error: &anyhow::Error) {
+    artifacts::report_error(&mut std::io::stdout().lock(), error);
+}
+
+/// Publish independently complete builder successors; existing attachments retain their old pins.
+/// The caller holds machine exclusion and an acknowledged, source-bound execution gate.
+pub(crate) fn publish_build_cache(
+    registration: &str,
+    gate: &airlock_deployment_core::publication::Publication,
+    attempt: &str,
+    binding: &str,
+    mut saved: impl FnMut(&str, &serde_json::Value) -> anyhow::Result<()>,
+) -> anyhow::Result<serde_json::Value> {
+    use anyhow::ensure;
+    let root = std::path::Path::new(host::POOL);
+    fs::ensure_pool(root)?;
+    let _lock = fs::PoolLock::acquire(&root.join("admission.lock"))?;
+    ensure!(
+        gate.executing(attempt, binding),
+        "build publication lacks its durable execution gate"
+    );
+    let mut views = serde_json::json!({});
+    for role in ["sys-ctrl", "usr-assistant"] {
+        ensure!(
+            gate.executing(attempt, binding),
+            "build publication binding changed"
+        );
+        let view = host::refresh_builder(
+            root,
+            role,
+            registration,
+            true,
+            if role == "usr-assistant" {
+                Some("sys-ctrl")
+            } else {
+                None
+            },
+        )?;
+        // Each descriptor points only to an already committed, pinned, reference-complete
+        // generation. A second-role failure leaves the first valid and retryable.
+        saved(role, &view)?;
+        views[role] = view;
+    }
+    Ok(views)
+}
+
 use crate::{
     model::{Backend, GenerationId, StorePath},
     process::Runner,
