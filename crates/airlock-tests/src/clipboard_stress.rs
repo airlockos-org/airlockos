@@ -252,9 +252,9 @@ pub(super) fn run(path: &Path, domain: u16, rounds: u16) -> Result<()> {
     // Supersede each partial peer while retaining its Linux mappings. Closing the
     // old grant must remain Busy, so its service-side reservation stays charged.
     let mut retained = Vec::new();
-    for index in 1..LIVE_LIMIT {
+    for (index, peer) in peers.iter_mut().enumerate().skip(1) {
         let replacement = admit(&mut authority, (index + 1) as u64, domain, guest)?;
-        retained.push(std::mem::replace(&mut peers[index], replacement));
+        retained.push(std::mem::replace(peer, replacement));
     }
     ensure!(
         peers.len() + retained.len() == SLOT_LIMIT,
@@ -300,11 +300,11 @@ pub(super) fn run(path: &Path, domain: u16, rounds: u16) -> Result<()> {
         peers[0].publish(&layout, false)?;
         peers[1].verify(&layout)?;
         partial_packets(&mut peers[2..], round)?;
-        for index in 2..peers.len() {
+        for (index, peer) in peers.iter_mut().enumerate().skip(2) {
             // Only one old mapping is retained during this churn; capacity is
             // retried exclusively after its confirmed local owner is dropped.
             let replacement = readmit(&mut authority, (index + 1) as u64, domain, guest)?;
-            drop(std::mem::replace(&mut peers[index], replacement));
+            drop(std::mem::replace(peer, replacement));
         }
         peers[0].verify(&layout)?;
         event(
