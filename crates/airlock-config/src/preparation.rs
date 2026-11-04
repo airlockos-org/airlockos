@@ -441,9 +441,13 @@ pub fn run_machine(
         // it alongside the generated graph so relative crate paths remain portable.
         // Development preparation already captures and generates that workspace.
         if let Some(prepared) = std::env::var_os("AIRLOCK_PREPARED_APPLICATIONS") {
-            if !Path::new(&prepared).join("Cargo.nix").is_file() {
+            if ["Cargo.nix", "airlock-crate-build.nix"]
+                .iter()
+                .any(|name| !Path::new(&prepared).join(name).is_file())
+            {
                 return Err("development application graph was not prepared".into());
             }
+            mirror(Path::new(&prepared), &directory.join("generated/crate2nix"))?;
         } else {
             let applications = std::env::var_os("AIRLOCK_APPS")
                 .map(PathBuf::from)

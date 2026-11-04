@@ -33,37 +33,25 @@ pub fn detached_boot_topology(
 /// Build the format-only tool from an independently locked source root.
 /// Application manifests, lockfile, feature graph and authoring code never enter this derivation.
 pub(crate) fn packer(pkgs: &NixValue, workspace: &Workspace) -> Package {
-    let root = workspace.file("tooling/airlock-store-packer");
-    let manifest: toml::Value = toml::from_str(include_str!(
-        "../../../tooling/airlock-store-packer/Cargo.toml"
-    ))
-    .expect("valid standalone packer manifest");
-    let source = pkgs
-        .clone()
-        .select("lib.fileset.toSource")
-        .call(nix_record! {
-            "root": root.clone(),
-            "fileset": pkgs.clone().select("lib.fileset.unions").call(NixValue::list([
-                root.join_relative("Cargo.toml").unwrap().as_expression(),
-                root.join_relative("Cargo.lock").unwrap().as_expression(),
-                root.join_relative("src").unwrap().as_expression(),
-            ])),
-        });
-
-    Package::from_expression(pkgs.clone().select("rustPlatform.buildRustPackage").call(nix_record! {
-        "pname": "airlock-store-packer",
-        "version": manifest["package"]["version"].as_str().unwrap(),
-        "src": source,
-        "cargoLock": nix_record! { "lockFile": root.join_relative("Cargo.lock").unwrap().snapshot() },
-        "cargoBuildFlags": NixValue::list(["--bin".into(), "airlock-store-packer".into()]),
-        "doCheck": false,
-        "meta": nix_record! {
-            "description": "Canonical immutable package fragment packing",
-            "mainProgram": "airlock-store-packer",
-            "license": pkgs.clone().select("lib.licenses.mit"),
-            "platforms": pkgs.clone().select("lib.platforms.linux"),
+    let independent = Workspace::new(workspace.file("tooling/airlock-store-packer"));
+    Package::from_expression(crate::crate_graph::package(
+        pkgs,
+        &independent,
+        crate::crate_graph::Build {
+            member: None,
+            features: &["default"],
+            binaries: &["airlock-store-packer"],
+            attributes: nix_record! {
+                "pname": "airlock-store-packer", "doCheck": false,
+                "meta": nix_record! {
+                    "description": "Canonical immutable package fragment packing",
+                    "mainProgram": "airlock-store-packer",
+                    "license": pkgs.clone().select("lib.licenses.mit"),
+                    "platforms": pkgs.clone().select("lib.platforms.linux"),
+                },
+            },
         },
-    }))
+    ))
 }
 
 /// Restore a known realized store root's dependency context without copying or renaming its contents.

@@ -240,9 +240,7 @@ pub(super) fn outputs() -> NixValue {
                     .to_text()
                     .into_expr::<String>(),
             );
-            let workspace = Workspace::new(NixPath::from_expression(
-                inputs.clone().select("airlock-apps"),
-            ));
+            let workspace = Workspace::new(source.join_relative("generated/crate2nix").unwrap());
             let lib = inputs.clone().select("nixpkgs.lib");
             let constructors = nix_record! {
                 "modules": crate::vm::module_constructors().call(source.clone()),

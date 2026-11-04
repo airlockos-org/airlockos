@@ -161,7 +161,13 @@ pub(super) fn generate(applications: &Path) -> Result<()> {
         &generator,
         &packer_vendor,
     )?;
+    let constructor = rusix::compile_value(crate_graph::constructor())
+        .map_err(|diagnostic| diagnostic.render(applications))?;
     for directory in ["", "tooling/airlock-store-packer"] {
+        fs::write(
+            applications.join(directory).join("airlock-crate-build.nix"),
+            &constructor.source,
+        )?;
         for name in ["Cargo.nix", "crate-hashes.json"] {
             fs::copy(
                 captured.join(directory).join(name),

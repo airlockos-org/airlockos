@@ -216,17 +216,13 @@ impl Application {
         } else {
             &[]
         };
-        let source = workspace.package_source(package, default_features, features);
-        let mut flags: Vec<NixValue> = source.arguments().into_iter().map(NixValue::from).collect();
-        for binary in binaries {
-            flags.extend(["--bin".into(), (*binary).into()]);
-        }
+        let selected_features: Vec<_> = std::iter::once("default")
+            .filter(|_| default_features)
+            .chain(features.iter().copied())
+            .collect();
         let mut attributes = vec![
             ("pname", name.into()),
             ("version", env!("CARGO_PKG_VERSION").into()),
-            ("src", source.source(&lib)),
-            ("cargoLock", workspace.cargo_lock()),
-            ("cargoBuildFlags", NixValue::list(flags)),
             // Behavioral checks run through Cargo against explicitly prepared binaries.
             ("doCheck", false.into()),
             (
@@ -406,10 +402,22 @@ impl Application {
             )]);
         }
 
-        let native = pkgs
-            .clone()
-            .select("rustPlatform.buildRustPackage")
-            .call(NixValue::record(attributes));
+        let default_binary = [name];
+        let native = crate::crate_graph::package(
+            pkgs,
+            workspace,
+            crate::crate_graph::Build {
+                member: Some(package),
+                features: &selected_features,
+                binaries: if binaries.is_empty() {
+                    &default_binary
+                } else {
+                    binaries
+                },
+                attributes: NixValue::record(attributes),
+            },
+        );
+        let build_artifacts = native.clone().select("buildArtifacts");
         if matches!(self, Self::QubesProbe) {
             let python = pkgs
                 .clone()
@@ -436,7 +444,8 @@ impl Application {
                         python = python,
                         site_packages = pkgs.clone().select("python3.sitePackages"),
                         native = native
-                    )),
+                    ))
+                    .merge_attrs(nix_record! { "buildArtifacts": build_artifacts }),
             );
         }
 
@@ -486,6 +495,8 @@ impl Application {
             package
         };
 
-        Package::from_expression(package)
+        Package::from_expression(
+            package.merge_attrs(nix_record! { "buildArtifacts": build_artifacts }),
+        )
     }
 }

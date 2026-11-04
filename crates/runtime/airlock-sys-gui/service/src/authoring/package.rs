@@ -14,9 +14,6 @@ use rusix::{
 pub(super) fn native(pkgs: &NixValue, apps: &NixPath) -> Package {
     let lib = pkgs.clone().select("lib");
     let workspace = airlock_build::Workspace::new(apps.clone());
-    let source = workspace.package_source(EXECUTABLE, true, &[]);
-    let mut flags: Vec<NixValue> = source.arguments().into_iter().map(NixValue::from).collect();
-    flags.extend(["--bin".into(), EXECUTABLE.into()]);
 
     let tools = NixValue::list(
         [
@@ -41,22 +38,26 @@ pub(super) fn native(pkgs: &NixValue, apps: &NixPath) -> Package {
         bubblewrap = pkgs.clone().select("bubblewrap"),
     );
 
-    Package::from_expression(pkgs.clone().select("rustPlatform.buildRustPackage").call(
-        nix_record! {
-            "pname": EXECUTABLE,
-            "version": env!("CARGO_PKG_VERSION"),
-            "src": source.source(&lib),
-            "cargoLock": workspace.cargo_lock(),
-            "cargoBuildFlags": NixValue::list(flags),
-            "doCheck": false,
-            "nativeBuildInputs": NixValue::list([pkgs.clone().select("makeWrapper"), pkgs.clone().select("pkg-config")]),
-            "buildInputs": NixValue::list([pkgs.clone().select("glib")]),
-            "postInstall": install,
-            "meta": nix_record! {
-                "description": "Airlock desktop integration in sys-gui",
-                "mainProgram": EXECUTABLE,
-                "license": lib.clone().select("licenses.mit"),
-                "platforms": lib.select("platforms.linux"),
+    Package::from_expression(airlock_build::crate_graph::package(
+        pkgs,
+        &workspace,
+        airlock_build::crate_graph::Build {
+            member: Some(EXECUTABLE),
+            features: &["default"],
+            binaries: &[EXECUTABLE],
+            attributes: nix_record! {
+                "pname": EXECUTABLE,
+                "version": env!("CARGO_PKG_VERSION"),
+                "doCheck": false,
+                "nativeBuildInputs": NixValue::list([pkgs.clone().select("makeWrapper"), pkgs.clone().select("pkg-config")]),
+                "buildInputs": NixValue::list([pkgs.clone().select("glib")]),
+                "postInstall": install,
+                "meta": nix_record! {
+                    "description": "Airlock desktop integration in sys-gui",
+                    "mainProgram": EXECUTABLE,
+                    "license": lib.clone().select("licenses.mit"),
+                    "platforms": lib.select("platforms.linux"),
+                },
             },
         },
     ))
@@ -65,6 +66,7 @@ pub(super) fn native(pkgs: &NixValue, apps: &NixPath) -> Package {
 /// Install the native desktop implementation with Qubes' C RPC client and QubesDB identity reader.
 pub(super) fn wrapped(pkgs: &NixValue, sources: &Sources) -> Package {
     let native = native(pkgs, &sources.apps);
+    let artifacts = native.as_expression().select("buildArtifacts");
     Package::from_expression(
         pkgs.clone()
             .select("writeShellApplication")
@@ -86,6 +88,7 @@ pub(super) fn wrapped(pkgs: &NixValue, sources: &Sources) -> Package {
                     "description": "Airlock desktop integration in sys-gui",
                     "license": pkgs.clone().select("lib.licenses.mit"),
                 },
-            }),
+            })
+            .merge_attrs(nix_record! { "buildArtifacts": artifacts }),
     )
 }

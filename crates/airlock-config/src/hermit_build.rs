@@ -125,16 +125,32 @@ fn image(
 ) -> NixValue {
     let package = format!("airlock-{bin}");
     let lock = NixValue::builtin("path").call(nix_record! { "path": workspace.file(&format!("runtime/{package}/build.lock")), "name": format!("{package}-build.lock") });
-    integration.clone().select("lib.x86_64-linux.buildHermitApplication").call(nix_record! {
-        "src": source(pkgs, workspace, integration, &package, members), "bin": bin, "pname": package.clone(),
-        "cargoVendorDir": pkgs.clone().select("rustPlatform.fetchCargoVendor").call(nix_record! {
-            "name": format!("{package}-deps"), "hash": vendor_hash,
-            "src": pkgs.clone().select("runCommand").call("airlock-hermit-dependency-lock").call(nix_record! {}).call(nix_text!(r#"
-                mkdir -p "$out"
-                cp {lock} "$out/Cargo.lock"
-            "#, lock=lock)),
-        }),
-    }).select("overrideAttrs").call(NixValue::function(|_| nix_record! { "AIRLOCK_SOURCE_REVISION": revision.clone() }))
+    // Hermit retains Cargo's nightly build-std and patched-kernel link pipeline.
+    // Its complete reusable input roots use the same metadata interface as Linux crates.
+    let vendor = pkgs.clone().select("rustPlatform.fetchCargoVendor").call(nix_record! {
+        "name": format!("{package}-deps"), "hash": vendor_hash,
+        "src": pkgs.clone().select("runCommand").call("airlock-hermit-dependency-lock").call(nix_record! {}).call(nix_text!(r#"
+            mkdir -p "$out"
+            cp {lock} "$out/Cargo.lock"
+        "#, lock=lock)),
+    });
+    let image = integration
+        .clone()
+        .select("lib.x86_64-linux.buildHermitApplication")
+        .call(nix_record! {
+            "src": source(pkgs, workspace, integration, &package, members),
+            "bin": bin, "pname": package, "cargoVendorDir": vendor.clone(),
+        })
+        .select("overrideAttrs")
+        .call(NixValue::function(
+            |_| nix_record! { "AIRLOCK_SOURCE_REVISION": revision.clone() },
+        ));
+    image.bind(|image| image.clone().merge_attrs(nix_record! {
+        "buildArtifacts": pkgs.clone().select("lib.unique").call(NixValue::concat_lists([
+            NixValue::list([vendor, integration.clone().select("packages.x86_64-linux.hermit-kernel")]),
+            image.select("nativeBuildInputs"),
+        ])),
+    }))
 }
 
 /// Produce an authenticated descriptor and domain definition for either application.
@@ -187,6 +203,7 @@ pub(crate) fn constructor(
                 "disconnected",
                 "normal",
             );
+            let build_artifacts = image.clone().select("buildArtifacts");
             let image = image.bind(|image| pkgs.clone().select("runCommand").call("airlock-hermit-executable").call(nix_record! {
             "allowedReferences": NixValue::list(["out".into()]),
         }).call(nix_text!(r#"
@@ -214,7 +231,9 @@ pub(crate) fn constructor(
             let artifact = NixValue::builtin("fromJSON").call(NixValue::builtin("unsafeDiscardStringContext").call(NixValue::builtin("readFile").call(nix_text!("{image}/artifact.json", image=image.clone()))))
                 .merge_attrs(nix_record! { "executable": nix_text!("{image}/kernel.elf", image=image.clone()) });
             nix_record! {
-                "backendType": "hermit", "executable": image.clone(),
+                "backendType": "hermit",
+                "buildArtifacts": build_artifacts.clone(),
+                "executable": image.clone().merge_attrs(nix_record! { "buildArtifacts": build_artifacts.clone() }),
                 "domain": nix_record! {
                     "class": "HermitVM", "label": NixValue::if_else(network.clone(), "green", "black"),
                     "netvm": request.clone().select("upstream"), "template": NixValue::null(),

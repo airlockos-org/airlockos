@@ -13,23 +13,23 @@ use rusix::{
 /// Linking the pinned libpython supports both Qubes imports and embedded offline image calls.
 pub fn qubes(pkgs: &NixValue, workspace: &Workspace) -> Package {
     let python = pkgs.clone().select("python3");
-    let source = workspace.package_source("airlock-qubes-python", true, &[]);
-    let mut flags: Vec<NixValue> = source.arguments().into_iter().map(NixValue::from).collect();
-    flags.push("--lib".into());
-    let native = pkgs.clone().select("rustPlatform.buildRustPackage").call(nix_record! {
-        "pname": "airlock-qubes", "version": env!("CARGO_PKG_VERSION"),
-        "src": source.source(&pkgs.clone().select("lib")),
-        "cargoLock": workspace.cargo_lock(),
-        "cargoBuildFlags": NixValue::list(flags),
-        "nativeBuildInputs": NixValue::list([pkgs.clone().select("pkg-config")]),
-        "buildInputs": NixValue::list([python.clone(), pkgs.clone().select("udev")]),
-        "PYO3_PYTHON": nix_text!("{python}/bin/python3", python = python.clone()),
-        "doCheck": false,
-        "installPhase": nix_text!(r#"
-            runHook preInstall
+    let native = crate::crate_graph::package(
+        pkgs,
+        workspace,
+        crate::crate_graph::Build {
+            member: Some("airlock-qubes-python"),
+            features: &["default"],
+            binaries: &[],
+            attributes: nix_record! {
+                "pname": "airlock-qubes", "version": env!("CARGO_PKG_VERSION"),
+                "nativeBuildInputs": NixValue::list([pkgs.clone().select("pkg-config")]),
+                "buildInputs": NixValue::list([python.clone(), pkgs.clone().select("udev")]),
+                "PYO3_PYTHON": nix_text!("{python}/bin/python3", python = python.clone()),
+                "doCheck": false,
+                "postInstall": nix_text!(r#"
             site="$out/{site_packages}"
             mkdir -p "$site/airlock_qubes-0.1.0.dist-info"
-            cp target/{target}/release/libairlock_qubes_native.so "$site/airlock_qubes.so"
+            cp "$lib/lib/libairlock_qubes_native.so" "$site/airlock_qubes.so"
             cat > "$site/airlock_qubes-0.1.0.dist-info/METADATA" <<'METADATA'
             Metadata-Version: 2.1
             Name: airlock-qubes
@@ -43,20 +43,21 @@ pub fn qubes(pkgs: &NixValue, workspace: &Workspace) -> Package {
             [qubes.ext]
             airlock-hermit-network = airlock_qubes:HermitNetworking
             ENTRY_POINTS
-            runHook postInstall
-        "#, site_packages = pkgs.clone().select("python3.sitePackages"),
-            target = pkgs.clone().select("stdenv.hostPlatform.rust.rustcTarget")),
-        "meta": nix_record! {
-            "description": "Native Airlock plugins for upstream Qubes storage and lifecycle APIs",
-            "license": pkgs.clone().select("lib.licenses.mit"),
-            "platforms": pkgs.clone().select("lib.platforms.linux"),
+        "#, site_packages = pkgs.clone().select("python3.sitePackages")),
+                "meta": nix_record! {
+                    "description": "Native Airlock plugins for upstream Qubes storage and lifecycle APIs",
+                    "license": pkgs.clone().select("lib.licenses.mit"),
+                    "platforms": pkgs.clone().select("lib.platforms.linux"),
+                },
+            },
         },
-    });
+    );
 
     Package::from_expression(
         pkgs.clone()
             .select("python3.pkgs.toPythonModule")
-            .call(native),
+            .call(native.clone())
+            .merge_attrs(nix_record! { "buildArtifacts": native.select("buildArtifacts") }),
     )
 }
 
