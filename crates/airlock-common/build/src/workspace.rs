@@ -83,15 +83,11 @@ impl Workspace {
         }
     }
 
-    /// Describe the shared Cargo lock and reviewed Git-source hashes for offline vendoring.
-    /// The whole lock is vendored even for Linux-only packages; these hashes do not
-    /// admit a Hermit image or change which applications a machine installs.
+    /// Describe registry dependencies for upstream vendoring. Preparation captures
+    /// Cargo-normalized Git crates separately so unpublished revisions need no fetch.
     pub fn cargo_lock(&self) -> NixValue {
         nix_record! {
-            "lockFile": self.file("Cargo.lock").snapshot(),
-            "outputHashes": NixValue::record(crate::git_sources::SOURCES.iter().map(|source| {
-                (source.package, NixValue::from(source.hash))
-            })),
+            "lockFile": self.file("airlock-registry.lock").snapshot(),
         }
     }
 

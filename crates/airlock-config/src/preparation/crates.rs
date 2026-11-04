@@ -20,6 +20,12 @@ struct Package {
     id: String,
     /// Registry or Git source identity; absent for workspace/path packages.
     source: Option<String>,
+    /// Cargo's normalized package name and version select its vendored directory.
+    name: String,
+    /// Exact resolved version, including distinct versions of the same crate.
+    version: String,
+    /// Cargo-selected manifest inside the explicitly supplied vendor tree.
+    manifest_path: std::path::PathBuf,
 }
 
 /// Generate recipes for one captured workspace. Keep CLI paths relative so random staging
@@ -71,6 +77,8 @@ replace-with = "airlock-admitted"
     )?;
     let metadata: Metadata = serde_json::from_slice(&metadata)?;
     let mut hashes = BTreeMap::new();
+    let mut git_crates = BTreeMap::new();
+    fs::create_dir_all(root.join("airlock-git-crates"))?;
     for package in metadata.packages {
         if let Some(identity) = package.source
             && identity.starts_with("git+")
@@ -87,8 +95,62 @@ replace-with = "airlock-admitted"
                 })
                 .ok_or_else(|| format!("Git source requires a reviewed tree hash: {identity}"))?;
             hashes.insert(package.id, source.hash);
+            let original = fs::canonicalize(
+                package
+                    .manifest_path
+                    .parent()
+                    .ok_or("missing vendor directory")?,
+            )?;
+            if !original.starts_with(vendor) {
+                return Err("Git crate metadata escaped the admitted vendor tree".into());
+            }
+            // Cargo resolved this package through the supplied directory source.
+            // Its normalized bytes join the prepared inventory; they are not a
+            // claim to reproduce the original repository's recursive Git hash.
+            let name = format!(
+                "{name}-{version}",
+                name = package.name,
+                version = package.version
+            );
+            let relative = format!("airlock-git-crates/{name}");
+            if git_crates
+                .insert(
+                    name,
+                    json!({
+                        "repository": source.repository,
+                        "revision": source.revision,
+                        "path": relative,
+                    }),
+                )
+                .is_some()
+            {
+                return Err("Cargo vendor contains an ambiguous Git crate identity".into());
+            }
+            super::mirror(&original, &root.join(relative))?;
         }
     }
+    fs::write(
+        root.join("airlock-git-crates.json"),
+        serde_json::to_vec_pretty(&git_crates)?,
+    )?;
+
+    // importCargoLock continues to own registry downloads and checksums. Git crates
+    // already normalized by Cargo are added separately, without a remote Git fetch.
+    let mut registry: toml::Value = toml::from_str(std::str::from_utf8(&locked)?)?;
+    registry
+        .get_mut("package")
+        .and_then(toml::Value::as_array_mut)
+        .ok_or("Cargo lock lacks packages")?
+        .retain(|package| {
+            !package
+                .get("source")
+                .and_then(toml::Value::as_str)
+                .is_some_and(|source| source.starts_with("git+"))
+        });
+    fs::write(
+        root.join("airlock-registry.lock"),
+        toml::to_string(&registry)?,
+    )?;
     fs::write(
         root.join("crate-hashes.json"),
         serde_json::to_vec_pretty(&hashes)?,
@@ -168,12 +230,21 @@ pub(super) fn generate(applications: &Path) -> Result<()> {
             applications.join(directory).join("airlock-crate-build.nix"),
             &constructor.source,
         )?;
-        for name in ["Cargo.nix", "crate-hashes.json"] {
+        for name in [
+            "Cargo.nix",
+            "crate-hashes.json",
+            "airlock-git-crates.json",
+            "airlock-registry.lock",
+        ] {
             fs::copy(
                 captured.join(directory).join(name),
                 applications.join(directory).join(name),
             )?;
         }
+        super::mirror(
+            &captured.join(directory).join("airlock-git-crates"),
+            &applications.join(directory).join("airlock-git-crates"),
+        )?;
     }
     fs::write(
         applications.join("crate2nix-preparation.json"),

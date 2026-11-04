@@ -153,6 +153,41 @@ pub fn constructor() -> NixValue {
                     "src": target_pkgs.clone().select("lib.fileset.toSource").call(nix_record! {"root":root.clone(),"fileset":lib.clone().select("fileset.unions").call(NixValue::list(embedded))}),
                     "workspace_member": directory,
                 };
+                let git = NixValue::builtin("fromJSON").call(
+                    NixValue::builtin("readFile").call(workspace.file("airlock-git-crates.json")),
+                );
+                let key: NixValue = nix_text!(
+                    "{name}-{version}",
+                    name = name.clone(),
+                    version = attributes.clone().select("version")
+                )
+                .into();
+                let captured = NixValue::builtin("getAttr")
+                    .call(key.clone())
+                    .call(git.clone());
+                let original = attributes.clone().attr_or("src", nix_record! {});
+                // Match the original Git identity too: a registry crate with the same
+                // name/version must never inherit a captured Git package's sources.
+                let captured_git = git
+                    .has_attr(key)
+                    .and(NixValue::builtin("isAttrs").call(original.clone()))
+                    .and(
+                        original
+                            .clone()
+                            .attr_or("url", "")
+                            .equals(captured.clone().select("repository")),
+                    )
+                    .and(
+                        original
+                            .attr_or("rev", "")
+                            .equals(captured.clone().select("revision")),
+                    );
+                let git_source = nix_record! {
+                    "src": NixValue::builtin("path").call(nix_record! {
+                        "path": path(captured.select("path")),
+                        "name": "airlock-captured-git-crate",
+                    }),
+                };
                 let bins = NixValue::builtin("filter")
                     .call(NixValue::function(|bin| {
                         NixValue::builtin("elem")
@@ -168,7 +203,7 @@ pub fn constructor() -> NixValue {
                             .call(name.clone())
                             .call(locations.clone()),
                         local,
-                        nix_record! {},
+                        NixValue::if_else(captured_git, git_source, nix_record! {}),
                     ));
                 let python = NixValue::if_else(
                     NixValue::builtin("elem")

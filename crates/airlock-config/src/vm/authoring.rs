@@ -90,9 +90,19 @@ pub(crate) fn compiler(pkgs: &NixValue, workspace: &Workspace, machine: &NixPath
 
 /// Vendor the pinned application workspace dependencies for machine and candidate compilation.
 pub(crate) fn dependencies(pkgs: &NixValue, applications: &NixPath) -> NixValue {
-    pkgs.clone()
+    let registry = pkgs
+        .clone()
         .select("rustPlatform.importCargoLock")
-        .call(Workspace::new(applications.clone()).cargo_lock())
+        .call(Workspace::new(applications.clone()).cargo_lock());
+    pkgs.clone().select("symlinkJoin").call(nix_record! {
+        "name": "airlock-authoring-vendor",
+        "paths": NixValue::list([registry,
+            applications.join_relative("airlock-git-crates").unwrap().snapshot().into()]),
+        "postBuild": nix_text!(r#"
+            rm "$out/Cargo.lock"
+            ln -s {lock} "$out/Cargo.lock"
+        "#, lock = applications.join_relative("Cargo.lock").unwrap().snapshot()),
+    })
 }
 
 /// Keep the store packer's independent lock and vendor tree outside application dependency churn.
