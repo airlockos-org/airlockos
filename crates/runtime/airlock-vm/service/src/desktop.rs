@@ -510,6 +510,9 @@ pub(crate) fn execute(request: Request) -> Result<()> {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error.into()),
             }
+            // These environment values are fixed when each application starts. Live text
+            // scaling must use toolkit settings while preserving this integer window scale;
+            // cursor synchronization must also account for the inherited XCURSOR_SIZE.
             exec(
                 Command::new(session)
                     .env("GDK_SCALE", scale)

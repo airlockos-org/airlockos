@@ -29,6 +29,8 @@ fn remaining(deadline: Instant) -> Result<Duration> {
 /// Wait for the user manager's display, the session bus, its startup marker, and a successful X probe.
 ///
 /// Return only the display/runtime/bus environment and the manager's X authority when present.
+/// The startup marker follows autostart dispatch; it does not establish readiness of every
+/// background service started there. Services needed before application launch need their own gate.
 /// `bus_address` preserves an address already supplied to qrexec; omission uses the runtime
 /// directory's bus. Every probe and retry shares `timeout`; expiry is an [`io::ErrorKind::TimedOut`]
 /// error. This observes local session state and does not start VMs or broaden RPC authority.

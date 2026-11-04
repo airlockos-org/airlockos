@@ -106,6 +106,8 @@ pub(super) fn module() -> NixValue {
                 ]),
             },
             "xdg": nix_record! {
+                // This backend reads VM-local GSettings; it does not import sys-gui preferences.
+                // X11 font and cursor updates also need a local XSettings provider.
                 "portal": nix_record! {
                     "enable": true,
                     "extraPortals": packages(&["xdg-desktop-portal-gtk"]),
