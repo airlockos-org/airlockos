@@ -299,15 +299,15 @@ pub fn constructor() -> NixValue {
                             dependency.clone(),
                             dependency.clone().select("lib"),
                             dependency.clone().select("src"),
-                            // Keep the recipe graph without realizing every upstream output.
-                            NixValue::builtin("unsafeDiscardOutputDependency")
-                                .call(dependency.clone().select("drvPath")),
                         ]),
                         dependency.clone().select("nativeBuildInputs"),
                         dependency.select("buildInputs"),
                     ])
                 }))
                 .call(crates);
+            // Normal evaluation recreates derivations from the seeded recipes/sources.
+            // Exporting .drv closures would also demand unbuilt bootstrap outputs
+            // (Nix issue #7330), outside the selected reusable package variants.
             // These are explicit retention inputs, not permission to publish a build.
             native
                 .clone()
