@@ -2,7 +2,7 @@
 
 use super::change::TrialChange;
 use super::{Args, Inputs, MODULE, TrialResult, input_reference, physical, store_root};
-use crate::support::captured;
+use crate::support::{captured, output};
 use airlock_nix_core::store_path::StorePath;
 use anyhow::{Context, Result, ensure};
 use std::{
@@ -228,6 +228,29 @@ pub(super) fn run(
         &flake_sources,
     )?;
 
+    // One selected input tree avoids bubblewrap's 9000-argument limit. Copies
+    // stay in this disposable trial; reflinks avoid payload copies where supported.
+    // The overlay keeps inputs read-only while admitting newly built store paths.
+    let lower = trial.join("inputs");
+    let upper = trial.join("upper");
+    let work = trial.join("work");
+    for directory in [&lower, &upper, &work] {
+        fs::create_dir(directory)?;
+    }
+    let originals = paths
+        .iter()
+        .map(|path| physical(&args.source_store_root, path))
+        .collect::<Result<Vec<_>>>()?;
+    for chunk in originals.chunks(128) {
+        output(
+            Command::new("cp")
+                .args(["--archive", "--reflink=auto", "--target-directory"])
+                .arg(&lower)
+                .arg("--")
+                .args(chunk),
+        )?;
+    }
+
     let source = trial.join("machine");
     checkout(&args.prepared_machine, &source, change, &inputs.revision)?;
     for name in ["home", "cache", "tmp"] {
@@ -251,12 +274,16 @@ pub(super) fn run(
         .arg("--bind")
         .arg(store.join("nix"))
         .arg("/nix");
-    for path in paths {
-        let original = physical(&args.source_store_root, path)?;
-        if !original.is_symlink() {
-            command.arg("--ro-bind").arg(original).arg(path);
-        }
-    }
+    command
+        .arg("--ro-bind")
+        .arg(&lower)
+        .arg(&lower)
+        .arg("--overlay-src")
+        .arg(&lower)
+        .arg("--overlay")
+        .arg(&upper)
+        .arg(&work)
+        .arg("/nix/store");
     command
         .arg("--ro-bind")
         .arg(trial.join("etc"))
@@ -324,8 +351,7 @@ pub(super) fn run(
         .args(["--no-link", "--json"]);
     ensure!(
         command.get_args().count() < 9000,
-        "{name} needs too many bubblewrap arguments for {} pinned store paths",
-        paths.len()
+        "{name} needs too many sandbox arguments"
     );
 
     let started = Instant::now();
@@ -348,6 +374,12 @@ pub(super) fn run(
     );
 
     for path in paths {
+        let copied = upper.join(Path::new(path).file_name().context("store name")?);
+        ensure!(
+            fs::symlink_metadata(&copied)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+            "{name} replaced a pinned input: {path}"
+        );
         let staged = physical(&store, path)?;
         let original = physical(&args.source_store_root, path)?;
         let info = fs::symlink_metadata(&staged)?;
