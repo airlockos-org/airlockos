@@ -50,6 +50,11 @@ pub(super) fn outputs() -> NixValue {
                         crate::vm::authoring::dependencies(&pkgs, &workspace.root()),
                     ));
                     packages.push((
+                        "airlock-packer-dependencies",
+                        crate::vm::authoring::packer_dependencies(&pkgs, &workspace.root()),
+                    ));
+                    packages.push(("crate2nix", airlock_build::crate_graph::generator(&pkgs)));
+                    packages.push((
                         "default",
                         Application::ControllerGui
                             .build(&pkgs, &workspace)
@@ -76,7 +81,8 @@ pub(super) fn outputs() -> NixValue {
                         "AIRLOCK_TEST_PORTAL": nix_text!("{package}/libexec/xdg-desktop-portal", package = pkgs.clone().select("xdg-desktop-portal")),
                         "AIRLOCK_TEST_FONTS": pkgs.clone().select("adwaita-fonts").to_text(),
                         "AIRLOCK_TEST_ICONS": pkgs.clone().select("adwaita-icon-theme").to_text(),
-                        "nativeBuildInputs": NixValue::list([pkgs.clone().select("pkg-config")]),
+                        "AIRLOCK_CRATE2NIX": rusix::nix_text!("{generator}/bin/crate2nix", generator = airlock_build::crate_graph::generator(&pkgs)),
+                        "nativeBuildInputs": NixValue::list([pkgs.clone().select("pkg-config"), airlock_build::crate_graph::generator(&pkgs)]),
                         "PYO3_PYTHON": rusix::nix_text!(
                             "{python}/bin/python3",
                             python = pkgs.clone().select("python3"),

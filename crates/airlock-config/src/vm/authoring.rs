@@ -26,13 +26,19 @@ pub(super) fn module(machine: &NixPath, workspace: &Workspace) -> NixValue {
         );
         let settings = nix_record! {
             "environment": nix_record! {
-                "systemPackages": NixValue::list(
+                "systemPackages": NixValue::concat_lists([NixValue::list(
                     ["cargo", "rustc", "stdenv.cc", "pkg-config", "gitMinimal", "gnumake"]
                         .map(|name| context.pkgs.clone().select(name)),
-                ),
+                ), NixValue::list([airlock_build::crate_graph::generator(&context.pkgs)])]),
+                "variables": nix_record! {
+                    "AIRLOCK_CRATE2NIX": nix_text!("{generator}/bin/crate2nix", generator = airlock_build::crate_graph::generator(&context.pkgs)),
+                },
                 "etc": (nix_record! {
                     "airlock/authoring/vendor": nix_record! {
                         "source": dependencies(&context.pkgs, &workspace.root()),
+                    },
+                    "airlock/authoring/packer-vendor": nix_record! {
+                        "source": packer_dependencies(&context.pkgs, &workspace.root()),
                     },
                     "airlock/config-inputs/airlock-apps": nix_record! {
                         "source": workspace.root(),
@@ -87,4 +93,11 @@ pub(crate) fn dependencies(pkgs: &NixValue, applications: &NixPath) -> NixValue 
     pkgs.clone()
         .select("rustPlatform.importCargoLock")
         .call(Workspace::new(applications.clone()).cargo_lock())
+}
+
+/// Keep the store packer's independent lock and vendor tree outside application dependency churn.
+pub(crate) fn packer_dependencies(pkgs: &NixValue, applications: &NixPath) -> NixValue {
+    pkgs.clone().select("rustPlatform.importCargoLock").call(nix_record! {
+        "lockFile": applications.join_relative("tooling/airlock-store-packer/Cargo.lock").unwrap().snapshot(),
+    })
 }

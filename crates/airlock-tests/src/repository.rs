@@ -70,6 +70,31 @@ impl Repository {
         )?;
         git(&root, &["commit", "-qam", "Pin machine"])?;
         let machine = root.join("airlock-machine");
+        for (directory, name) in [
+            (root.join("crates"), "fixture-app"),
+            (
+                root.join("crates/tooling/airlock-store-packer"),
+                "fixture-packer",
+            ),
+        ] {
+            fs::create_dir_all(directory.join("src"))?;
+            fs::write(
+                directory.join("Cargo.toml"),
+                format!(
+                    r#"[package]
+name = "{name}"
+version = "0.1.0"
+edition = "2024"
+publish = false
+[workspace]
+"#
+                ),
+            )?;
+            fs::write(directory.join("Cargo.lock"), "version = 4\n")?;
+            fs::write(directory.join("src/lib.rs"), "")?;
+        }
+        git(&root, &["add", "crates"])?;
+        git(&root, &["commit", "-qm", "Capture fixture workspaces"])?;
         git(&machine, &["config", "user.name", "Fixture"])?;
         git(
             &machine,
@@ -78,8 +103,10 @@ impl Repository {
 
         let tools = temporary.path().join("tools");
         fs::create_dir(&tools)?;
+        fs::create_dir_all(temporary.path().join("data/cache/authoring-vendor"))?;
         for name in [
             "cargo",
+            "crate2nix",
             "nix",
             "nix-store",
             "ssh",
@@ -134,8 +161,13 @@ impl Repository {
         command.env("AIRLOCK_TEST_WORKSTATION", self.temporary.path());
         command.env("AIRLOCK_DATA_ROOT", self.path("data"));
         command.env("AIRLOCK_LOG_DIR", self.path("logs"));
+        command.env("AIRLOCK_CRATE2NIX", self.path("tools/crate2nix"));
         command.env(
             "AIRLOCK_CARGO_VENDOR",
+            self.path("data/cache/authoring-vendor"),
+        );
+        command.env(
+            "AIRLOCK_PACKER_CARGO_VENDOR",
             self.path("data/cache/authoring-vendor"),
         );
         // Preparation now maintains a real compiler mirror even with an inert

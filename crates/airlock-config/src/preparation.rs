@@ -5,6 +5,8 @@ pub mod cache;
 
 mod packaged;
 
+mod crates;
+
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
@@ -238,6 +240,7 @@ pub fn prepare_leased(
 /// Emit the application flake consumed by builds into an already captured source tree.
 pub fn applications(directory: &Path) -> Result<()> {
     fs::create_dir_all(directory)?;
+    crates::generate(directory)?;
     fs::write(
         directory.join("flake.nix"),
         crate::flake("applications")?.source,
@@ -384,6 +387,13 @@ fn compile_in(
 
     let status = Command::new("cargo")
         .current_dir(source)
+        .env(
+            "AIRLOCK_PREPARED_APPLICATIONS",
+            destination
+                .parent()
+                .ok_or("machine destination parent")?
+                .join("crates"),
+        )
         .args([
             "--config",
             &format!(
@@ -427,6 +437,27 @@ pub fn run_machine(
 ) -> Result<()> {
     let arguments: Vec<_> = std::env::args_os().skip(1).collect();
     let emit = |directory: &Path| {
+        // Installed machine inputs refer to an immutable application source. Capture
+        // it alongside the generated graph so relative crate paths remain portable.
+        // Development preparation already captures and generates that workspace.
+        if let Some(prepared) = std::env::var_os("AIRLOCK_PREPARED_APPLICATIONS") {
+            if !Path::new(&prepared).join("Cargo.nix").is_file() {
+                return Err("development application graph was not prepared".into());
+            }
+        } else {
+            let applications = std::env::var_os("AIRLOCK_APPS")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| "/etc/airlock/config-inputs/airlock-apps".into());
+            let applications = fs::canonicalize(applications)?;
+            if !applications.starts_with("/nix/store") {
+                return Err(
+                    "installed preparation requires admitted store application sources".into(),
+                );
+            }
+            let captured = directory.join("generated/crate2nix");
+            mirror(&applications, &captured)?;
+            crates::generate(&captured)?;
+        }
         crate::export_machine(
             snapshot,
             &crate::profiles::bootstrap::machine()?,

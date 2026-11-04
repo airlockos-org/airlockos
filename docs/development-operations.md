@@ -43,6 +43,15 @@ direct terminal prompts are not recorded. Logs are retained until removed.
 
 ## Deployment
 
+Source preparation consumes an explicitly provisioned crate2nix 0.15.0 executable
+and offline Cargo vendor trees. Authoring VMs receive these from their pinned
+Nixpkgs packages; workstation preparation uses `AIRLOCK_CRATE2NIX` (an absolute
+executable path), `AIRLOCK_CARGO_VENDOR` and `AIRLOCK_PACKER_CARGO_VENDOR`.
+Provision them from the locked Nixpkgs and independent Cargo locks before
+preparing source. Preparation never invokes Nix to install missing tools.
+The application and packer graphs are generated separately; ordinary package
+builds retain their own feature selections.
+
 Before editing system configuration, inspect its recorded deployed source and
 compare it with the checkout, including committed and uncommitted changes:
 

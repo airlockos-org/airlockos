@@ -89,14 +89,9 @@ impl Workspace {
     pub fn cargo_lock(&self) -> NixValue {
         nix_record! {
             "lockFile": self.file("Cargo.lock").snapshot(),
-            "outputHashes": nix_record! {
-                // Both Rusix crates share this Git tree, including its pinned Nixpkgs test input.
-                "rusix-0.1.1": "sha256-imwt8RWoAlhuKQCCXV5APCA8RPehaxEzOg5/5rPAFk4=",
-                // importCargoLock's Git fetch includes the upstream kernel submodule.
-                // The Hermit executable builder separately selects our patched kernel.
-                "hermit-0.13.2": "sha256-Doox+f2DRDn/J+PBLoiNAMoB9XgW3U3gqysw+mk61lw=",
-                "xen-transport-0.1.0": "sha256-hRL7acHeBAb4mIwXKSUqJ36p4C4aJjEuhh5O9C6EpOU=",
-            },
+            "outputHashes": NixValue::record(crate::git_sources::SOURCES.iter().map(|source| {
+                (source.package, NixValue::from(source.hash))
+            })),
         }
     }
 

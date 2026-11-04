@@ -29,6 +29,10 @@ pub mod native;
 
 mod workspace;
 
+pub mod git_sources;
+
+pub mod crate_graph;
+
 pub use applications::Application;
 
 pub use workspace::{CheckedPackageSource, Workspace};
