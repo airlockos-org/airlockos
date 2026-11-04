@@ -1,7 +1,8 @@
 //! Exercise the admitted clipboard from a controlled Linux participant.
 //! Run in an isolated Airlock guest with its desktop adapter stopped, because
 //! the existing GUI authority permits one live connection per principal. This
-//! peer uses ordinary Qubes provisioning and never supplies its own identity.
+//! peer normally uses ordinary Qubes provisioning. The explicit stress mode instead
+//! exercises a disposable guest boot-bound to a controlled laboratory authority.
 
 #[path = "../clipboard_stress.rs"]
 mod stress;
@@ -35,7 +36,7 @@ enum Case {
     Stress,
 }
 
-/// No endpoint coordinates or authorization claims are accepted as command-line inputs.
+/// Normal GUI provisioning or explicitly selected disposable laboratory stress.
 #[derive(Parser)]
 struct Args {
     /// Installed machine-derived membership, also used by the ordinary desktop adapter.
