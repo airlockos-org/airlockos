@@ -165,6 +165,16 @@ impl Client {
 
     /// Publish caller-selected metadata while generating data in fixed chunks.
     fn publish(&mut self, formats: &[Format], cancel: bool) -> Result<Generation> {
+        self.publish_with_progress(formats, cancel, || Ok(()))
+    }
+
+    /// Progress other independently owned channels during a long synthetic copy.
+    fn publish_with_progress(
+        &mut self,
+        formats: &[Format],
+        cancel: bool,
+        mut progress: impl FnMut() -> Result<()>,
+    ) -> Result<Generation> {
         let generation = self.reserve()?;
         self.mutate(Request::Declare {
             generation,
@@ -173,6 +183,7 @@ impl Client {
         let mut bytes = [0; DATA_CHUNK];
         for (format, representation) in formats.iter().enumerate() {
             for offset in (0..representation.size).step_by(DATA_CHUNK) {
+                progress()?;
                 let count = DATA_CHUNK.min(representation.size - offset);
                 pattern(format, offset, &mut bytes[..count]);
                 self.mutate(Request::Write {
@@ -197,6 +208,15 @@ impl Client {
 
     /// Compare canonical metadata and two complete reads without logging content.
     fn verify(&mut self, formats: &[Format]) -> Result<Generation> {
+        self.verify_with_progress(formats, || Ok(()))
+    }
+
+    /// Progress authority and idle peers without sharing the active channel across threads.
+    fn verify_with_progress(
+        &mut self,
+        formats: &[Format],
+        mut progress: impl FnMut() -> Result<()>,
+    ) -> Result<Generation> {
         let Reply::Offer(generation, Some(offer)) = self.request(Request::Offer)? else {
             bail!("no complete offer");
         };
@@ -208,6 +228,7 @@ impl Client {
         for _ in 0..2 {
             for (format, representation) in offer.formats.iter().enumerate() {
                 for offset in (0..representation.size).step_by(DATA_CHUNK) {
+                    progress()?;
                     let count = DATA_CHUNK.min(representation.size - offset);
                     let Reply::Data(bytes) = self.request(Request::Read {
                         generation,

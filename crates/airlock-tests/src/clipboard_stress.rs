@@ -195,6 +195,58 @@ fn partial_packets(peers: &mut [Client], round: usize) -> Result<()> {
     Ok(())
 }
 
+/// Respect the service's existing idle timeout while another connection transfers data.
+/// Only read-only Offer requests are used; no liveness request replaces the offer.
+fn keep_alive<'a>(
+    authority: &mut Client,
+    peers: impl Iterator<Item = &'a mut Client>,
+    previous: &mut Instant,
+) -> Result<()> {
+    if previous.elapsed() < Duration::from_secs(5) {
+        return Ok(());
+    }
+    ensure!(
+        matches!(authority.request(Request::Offer)?, Reply::Ok),
+        "authority keepalive failed"
+    );
+    for peer in peers {
+        ensure!(
+            matches!(peer.request(Request::Offer)?, Reply::Offer(_, _)),
+            "peer keepalive failed"
+        );
+    }
+    *previous = Instant::now();
+    Ok(())
+}
+
+/// Verify the maximum disk offer while keeping all 32 admitted peers operational.
+fn maximum_roundtrip(peers: &mut [Client], authority: &mut Client) -> Result<()> {
+    let layout = formats(DEFAULT_CAPACITY);
+    let mut previous = Instant::now();
+    {
+        let (writer, others) = peers.split_first_mut().context("missing bulk writer")?;
+        writer.publish_with_progress(&layout, false, || {
+            keep_alive(authority, others.iter_mut(), &mut previous)
+        })?;
+    }
+    {
+        let (before, after) = peers.split_at_mut(1);
+        let (reader, others) = after.split_first_mut().context("missing bulk reader")?;
+        reader.verify_with_progress(&layout, || {
+            keep_alive(
+                authority,
+                before.iter_mut().chain(others.iter_mut()),
+                &mut previous,
+            )
+        })?;
+    }
+    event(
+        "maximum-roundtrip",
+        serde_json::json!({"bytes": DEFAULT_CAPACITY, "live": peers.len()}),
+    );
+    Ok(())
+}
+
 /// Run admission, backpressure, retained mappings, reclamation and replacement stress.
 /// The input is a bounded trusted console record for this disposable guest only.
 pub(super) fn run(path: &Path, domain: u16, rounds: u16) -> Result<()> {
@@ -333,8 +385,7 @@ pub(super) fn run(path: &Path, domain: u16, rounds: u16) -> Result<()> {
             serde_json::json!({"round": round, "size": size, "formats": layout.len()}),
         );
     }
-    peers[0].copy(DEFAULT_CAPACITY, false)?;
-    peers[1].read(DEFAULT_CAPACITY)?;
+    maximum_roundtrip(&mut peers, &mut authority)?;
     peers[0].faults()?;
     peers[0].copy(RAM_LIMIT, false)?;
     peers[1].read(RAM_LIMIT)?;
