@@ -923,6 +923,7 @@ pub(super) fn status(root: &Path) -> Result<Value> {
         "open_segment_count": inventory.iter().filter(|v|v["sealed"]!=true).count(),
         "segment_bytes_total": inventory.iter().filter_map(|v|v["used_bytes"].as_u64()).sum::<u64>(),
         "segments": inventory,
+        "builder_cache": super::build_cache::summary(root)?,
         "domains": domains,
         "running": records::running_refs(root)?.iter().map(|(_,v)|v).collect::<Vec<_>>(),
         "stale_runtime_view_refs": stale,

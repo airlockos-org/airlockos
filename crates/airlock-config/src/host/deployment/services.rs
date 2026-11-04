@@ -93,6 +93,16 @@ pub(super) fn configuration(
 
     nix_record! {
         "systemd": nix_record! {
+            "timers": nix_record! {
+                "airlock-generation-maintenance": when(cfg.clone().select("generationRetention.enable"), nix_record! {
+                    "wantedBy": strings(&["timers.target"]),
+                    "timerConfig": nix_record! {
+                        "OnBootSec": "10min", "OnUnitInactiveSec": "30min",
+                        "RandomizedDelaySec": "5min",
+                        "Unit": "airlock-generation-maintenance.service",
+                    },
+                }),
+            },
             "paths": nix_record! {
                 "airlock-generation-maintenance": when(
                     cfg.clone().select("generationRetention.enable"),

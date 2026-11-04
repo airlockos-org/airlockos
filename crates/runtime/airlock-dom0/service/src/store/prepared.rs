@@ -248,6 +248,17 @@ pub(super) fn prepare_pool(
                 .strip_suffix("-build-store")
                 .context("invalid builder domain")?;
             files.insert(format!("builders/{role}.json"));
+            if path
+                .parent()
+                .context("missing builder directory")?
+                .join("build-seed.json")
+                .is_file()
+            {
+                files.insert(format!(
+                    "domains/{domain}/generations/{generation}/build-seed.json",
+                    generation = number(&manifest, "generation")?
+                ));
+            }
             files.insert(format!(
                 "running/{domain}/{}/builder-persistent.json",
                 number(&manifest, "generation")?
@@ -511,6 +522,7 @@ pub(super) fn prepare_host(
     registration: &Path,
     system: &str,
     choices: &Value,
+    builder_closure: Option<&Path>,
 ) -> Result<Value> {
     mkdir(output)?;
     let root = output.join("pool");
@@ -551,6 +563,16 @@ pub(super) fn prepare_host(
     })?;
 
     let registration_text = fs::read_to_string(registration)?;
+    let builder_registration = builder_closure
+        .map(|path| fs::read_to_string(path.join("registration")))
+        .transpose()?;
+    if let Some(source) = builder_closure {
+        let metadata: Value = crate::state::read(&source.join("build-seed.json"))?;
+        ensure!(
+            metadata["registration_sha256"] == hash(&source.join("registration"))?,
+            "builder seed registration differs from its input record"
+        );
+    }
     let mut systems = vec![system.to_owned()];
     systems.extend(
         choices
@@ -574,7 +596,18 @@ pub(super) fn prepare_host(
             .try_exists()?
         {
             progress::phase(&format!("Preparing {role}-build-store"), || {
-                host::refresh_builder(&root, role, &registration_text, false, None)
+                host::refresh_builder(
+                    &root,
+                    role,
+                    builder_registration
+                        .as_deref()
+                        .unwrap_or(&registration_text),
+                    false,
+                    None,
+                    builder_closure
+                        .map(|path| path.join("build-seed.json"))
+                        .as_deref(),
+                )
             })?;
         }
     }
@@ -623,7 +656,8 @@ pub(super) fn prepare_host(
     write(&output.join("pool-fingerprints.json"), &fingerprints, 0o644)?;
 
     progress::phase("Writing unified-store receipt", || {
-        let receipt = json!({"schema":"airlock.unified-seed.v1","systems":systems,"pool_allocated_bytes":host::allocated(&root)?,"registration_sha256":hash(registration)?});
+        let receipt = json!({"schema":"airlock.unified-seed.v1","systems":systems,"pool_allocated_bytes":host::allocated(&root)?,"registration_sha256":hash(registration)?,
+            "builder_cache":super::build_cache::summary(&root)?});
         write(&output.join("receipt.json"), &receipt, 0o644)?;
         Ok(receipt)
     })

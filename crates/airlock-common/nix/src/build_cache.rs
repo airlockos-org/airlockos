@@ -128,10 +128,29 @@ pub struct Inventory {
 }
 
 impl Tools<'_> {
-    /// Query a completed result's recorded derivation without evaluating or building anything.
+    /// Query a completed result's derivation without evaluating or building anything.
+    /// Image registrations may omit the recorded deriver; Nix then locates a retained recipe.
+    /// Ambiguous recipes fail closed before the inventory checks its declared output.
     pub fn deriver(&self, result: &StorePath) -> Result<StorePath> {
         let raw = self.run(self.nix_store, &["--query", "--deriver", result.as_str()])?;
-        Ok(std::str::from_utf8(&raw)?.trim().parse()?)
+        let recorded = std::str::from_utf8(&raw)?.trim();
+        if recorded != "unknown-deriver" && !recorded.is_empty() {
+            return Ok(recorded.parse()?);
+        }
+
+        let raw = self.run(
+            self.nix_store,
+            &["--query", "--valid-derivers", result.as_str()],
+        )?;
+        let mut recipes = std::str::from_utf8(&raw)?.lines();
+        let derivation = recipes
+            .next()
+            .context("seeded result has no retained recipe")?;
+        ensure!(
+            recipes.next().is_none(),
+            "seeded result has ambiguous retained recipes"
+        );
+        Ok(derivation.parse()?)
     }
 
     fn run(&self, program: &str, args: &[&str]) -> Result<Vec<u8>> {

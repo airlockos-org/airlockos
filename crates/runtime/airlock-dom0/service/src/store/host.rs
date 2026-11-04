@@ -352,6 +352,7 @@ pub(super) fn refresh_builder(
     host_registration: &str,
     incremental: bool,
     seed_role: Option<&str>,
+    seed_metadata: Option<&Path>,
 ) -> Result<Value> {
     ensure!(
         ["sys-ctrl", "usr-assistant"].contains(&role),
@@ -377,7 +378,21 @@ pub(super) fn refresh_builder(
         &fs::read_to_string(directory.join("registration"))?,
         host_registration,
     ])?;
-    if !fresh && previous["registration_sha256"] == hex(&Sha256::digest(&registration)) {
+    let old_seed = directory.join("build-seed.json");
+    let seed = seed_metadata.unwrap_or(&old_seed);
+    let seed_bytes = if seed.try_exists()? {
+        Some(fs::read(seed)?)
+    } else {
+        None
+    };
+    let old_seed_bytes = if old_seed.try_exists()? {
+        Some(fs::read(&old_seed)?)
+    } else {
+        None
+    };
+    let same_seed = seed_metadata.is_none() || seed_bytes == old_seed_bytes;
+    if !fresh && same_seed && previous["registration_sha256"] == hex(&Sha256::digest(&registration))
+    {
         return Ok(previous);
     }
     let old: Value = read(&old_path)?;
@@ -392,6 +407,16 @@ pub(super) fn refresh_builder(
     )?;
 
     let manifest = &result.manifest;
+    if let Some(bytes) = &seed_bytes {
+        atomic(
+            &manifest
+                .parent()
+                .context("missing builder directory")?
+                .join("build-seed.json"),
+            bytes,
+            0o444,
+        )?;
+    }
     builder::prepare(
         root,
         &result.manifest,
@@ -464,8 +489,15 @@ pub(super) fn publish_live(system: &str) -> Result<ValidatedHost> {
             &directory.join("seed-metadata.sqlite"),
         )?;
     }
-    refresh_builder(root, "sys-ctrl", &registration, true, None)?;
-    refresh_builder(root, "usr-assistant", &registration, true, Some("sys-ctrl"))?;
+    refresh_builder(root, "sys-ctrl", &registration, true, None, None)?;
+    refresh_builder(
+        root,
+        "usr-assistant",
+        &registration,
+        true,
+        Some("sys-ctrl"),
+        None,
+    )?;
     Ok(record)
 }
 

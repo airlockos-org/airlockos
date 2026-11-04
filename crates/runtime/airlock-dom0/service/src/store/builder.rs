@@ -25,6 +25,13 @@ pub(super) struct Registration {
     pub(super) references: BTreeSet<String>,
 }
 
+impl Registration {
+    /// Read Nix's registered uncompressed size for observation without changing registration.
+    pub(super) fn nar_size(&self) -> u64 {
+        self.size
+    }
+}
+
 pub(super) fn registration(source: &str) -> Result<BTreeMap<String, Registration>> {
     let lines: Vec<_> = source.lines().collect();
     let mut offset = 0;
@@ -207,6 +214,27 @@ pub(super) fn prepare(
         registered.keys().cloned().collect::<BTreeSet<_>>() == expected,
         "builder registration differs from frozen view"
     );
+    let seed_path = registration_source
+        .parent()
+        .context("missing builder source directory")?
+        .join("build-seed.json");
+    let seed: Option<Value> = crate::state::optional(&seed_path)?;
+    if let Some(seed) = &seed {
+        ensure!(
+            seed["schema"] == "airlock.build-seed.v1",
+            "unsupported builder seed metadata"
+        );
+        let roots: Vec<String> = serde_json::from_value(seed["inputs"]["roots"].clone())?;
+        ensure!(
+            !roots.is_empty() && roots.iter().all(|path| expected.contains(path)),
+            "seed inputs are absent from builder registration"
+        );
+        let _: airlock_nix_core::identity::LockHash =
+            serde_json::from_value(seed["registration_sha256"].clone())?;
+        number(seed, "builder_nar_bytes")?;
+        number(seed, "runtime_nar_bytes")?;
+        number(seed, "build_only_nar_bytes")?;
+    }
     let offline_bytes = match offline.filter(|path| path.exists()) {
         Some(path) => Some(fs::read(path)?),
         None => None,
@@ -296,6 +324,11 @@ pub(super) fn prepare(
         atomic(&metadata.join("flake-inputs.json"), bytes, 0o644)?;
     }
     write(&metadata.join("identity.json"), &identity, 0o644)?;
+    if let Some(seed) = &seed {
+        write(&metadata.join("build-seed.json"), seed, 0o444)?;
+        write(&directory.join("build-seed.json"), seed, 0o444)?;
+        manifest["build_seed"] = seed.clone();
+    }
     mkdir(temporary.path().join(".links"))?;
     command(
         &tool("mkfs.erofs", "AIRLOCK_MKFS_EROFS"),
@@ -511,8 +544,17 @@ pub(super) fn release_predecessors(root: &Path, role: &str, descriptor: &Value) 
     // Validate the whole history before releasing anything. A retry only needs
     // to finish entries whose retention flag or persistent pin still remains.
     for (generation, path, mut manifest) in pending {
-        manifest["retention"]["retain"] = json!(false);
-        write(&path, &manifest, 0o644)?;
+        use airlock_deployment_core::retention::Pin;
+        let pin = Pin::classify(
+            manifest["retention"]["retain"]
+                .as_bool()
+                .context("invalid builder retention")?,
+            manifest["retention"].get("updated_at").is_some(),
+        );
+        if matches!(pin, Pin::Automatic) {
+            manifest["retention"]["retain"] = json!(false);
+            write(&path, &manifest, 0o644)?;
+        }
         records::running(
             root,
             &format!("{role}-build-store"),

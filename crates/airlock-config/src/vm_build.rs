@@ -440,20 +440,36 @@ fn domain_constructor(sources: &Sources, pkgs: &NixValue) -> NixValue {
                 );
 
                 options.bind(|options| {
-                    nix_record! {
-                        "configuration": configuration.clone(),
-                        "configurationName": request.clone().select("configurationName"),
-                        "rootImageName": request.clone().select("rootImageName"),
-                        "storeArtifactName": request.clone().select("storeArtifactName"),
-                        "rootImage": images.root(root_capacity(sources, &request)),
-                        "storeArtifact": images.boot_manifest(
+                    let root = images
+                        .root(root_capacity(sources, &request))
+                        .as_expression();
+                    let manifest = images
+                        .boot_manifest(
                             request.clone().select("storeArtifactName"),
                             NixValue::list([configuration
                                 .clone()
                                 .select("config.system.build.toplevel")]),
                             request.clone().select("storeDevice"),
                             "/nix/store".into(),
-                        ),
+                        )
+                        .as_expression();
+                    let artifacts = airlock_build::crate_graph::artifacts(
+                        pkgs,
+                        NixValue::concat_lists([
+                            configuration
+                                .clone()
+                                .select("config.environment.systemPackages"),
+                            NixValue::list([root.clone(), manifest.clone()]),
+                        ]),
+                    );
+                    nix_record! {
+                        "configuration": configuration.clone(),
+                        "configurationName": request.clone().select("configurationName"),
+                        "rootImageName": request.clone().select("rootImageName"),
+                        "storeArtifactName": request.clone().select("storeArtifactName"),
+                        "rootImage": root,
+                        "storeArtifact": manifest,
+                        "buildArtifacts": artifacts,
                         "kernelopts": options.clone(),
                         "domain": descriptor(sources, &request, configuration, options),
                     }

@@ -48,6 +48,19 @@ pub fn package(pkgs: &NixValue, workspace: &Workspace, request: Build<'_>) -> Ni
         })
 }
 
+/// Retain declared compilation inputs of the selected packages, ignoring ordinary runtime packages.
+/// The upstream crate graph owns dependency/feature traversal; this adds no crate inventory.
+pub fn artifacts(pkgs: &NixValue, packages: NixValue) -> NixValue {
+    pkgs.clone().select("lib.unique").call(
+        pkgs.clone()
+            .select("lib.concatMap")
+            .call(NixValue::function(|package| {
+                package.attr_or("buildArtifacts", NixValue::list([]))
+            }))
+            .call(packages),
+    )
+}
+
 /// Describe the shared constructor emitted once beside each prepared Cargo graph.
 /// Package expressions import it so composing VM modules does not copy its implementation.
 pub fn constructor() -> NixValue {
@@ -251,6 +264,9 @@ pub fn constructor() -> NixValue {
                             dependency.clone(),
                             dependency.clone().select("lib"),
                             dependency.clone().select("src"),
+                            // Keep the recipe graph without realizing every upstream output.
+                            NixValue::builtin("unsafeDiscardOutputDependency")
+                                .call(dependency.clone().select("drvPath")),
                         ]),
                         dependency.clone().select("nativeBuildInputs"),
                         dependency.select("buildInputs"),

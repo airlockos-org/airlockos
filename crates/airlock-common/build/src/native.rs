@@ -25,7 +25,10 @@ pub fn package(pkgs: &NixValue, workspace: &Workspace, name: &str, contract: Nix
         pkgs.clone()
             .select("runCommand")
             .call(name)
-            .call(nix_record! { "passthru": nix_record! { "airlockCommand": contract.clone() } })
+            .call(nix_record! { "passthru": nix_record! {
+                "airlockCommand": contract.clone(),
+                "buildArtifacts": launcher.as_expression().select("buildArtifacts"),
+            } })
             .call(nix_text!(
                 r#"
             install -Dm555 {launcher}/bin/airlock-exec "$out/bin/{name}"
@@ -72,7 +75,10 @@ pub fn writer(pkgs: &NixValue, bin: bool) -> NixValue {
                 .clone()
                 .select("runCommand")
                 .call(name.clone())
-                .call(nix_record! { "passthru": nix_record! { "airlockCommand": body.clone() } })
+                .call(nix_record! { "passthru": nix_record! {
+                    "airlockCommand": body.clone(),
+                    "buildArtifacts": launcher.as_expression().select("buildArtifacts"),
+                } })
                 .call(nix_text!(
                     r#"
                 install -Dm555 {launcher}/bin/airlock-exec "$out/bin/{name}"

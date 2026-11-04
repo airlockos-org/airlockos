@@ -36,6 +36,10 @@ mod pool_cli;
 
 mod builder;
 
+mod build_cache;
+
+pub(crate) use build_cache::release as release_build_cache;
+
 mod builder_cli;
 
 mod database;
@@ -187,6 +191,7 @@ pub(crate) fn publish_build_cache(
             } else {
                 None
             },
+            None,
         )?;
         // Each descriptor points only to an already committed, pinned, reference-complete
         // generation. A second-role failure leaves the first valid and retryable.

@@ -75,6 +75,16 @@ impl Images<'_> {
     /// The separate `metadata` output contains the native service's root descriptor.
     pub fn root(&self, size_mib: NixValue) -> Package {
         let native = Application::PrepareBoot.build(self.pkgs, self.workspace);
+        let init = Application::VmInit.build(self.pkgs, self.workspace);
+        let dom0 = Application::Dom0.build(self.pkgs, self.workspace);
+        let artifacts = crate::crate_graph::artifacts(
+            self.pkgs,
+            NixValue::list([
+                native.as_expression(),
+                init.as_expression(),
+                dom0.as_expression(),
+            ]),
+        );
         let script = nix_text!(
             r#"
             exec {native}/bin/airlock-prepare-boot root --out "$out" --metadata "$metadata" \
@@ -84,8 +94,8 @@ impl Images<'_> {
             native = native,
             size = size_mib,
             busybox = self.pkgs.clone().select("pkgsStatic.busybox"),
-            init = Application::VmInit.build(self.pkgs, self.workspace),
-            dom0 = Application::Dom0.build(self.pkgs, self.workspace)
+            init = init,
+            dom0 = dom0
         );
 
         Package::from_expression(
@@ -95,6 +105,7 @@ impl Images<'_> {
                 .call("airlock-nix-closure-root-image")
                 .call(nix_record! {
                     "outputs": NixValue::list(["out".into(), "metadata".into()]),
+                    "passthru": nix_record! { "buildArtifacts": artifacts },
                     "nativeBuildInputs": self.packages(&[
                         "coreutils", "e2fsprogs", "fakeroot", "findutils",
                     ]),
@@ -137,6 +148,12 @@ impl Images<'_> {
         mountpoint: NixValue,
         boot: bool,
     ) -> Package {
+        let native = Application::PrepareBoot.build(self.pkgs, self.workspace);
+        let launcher = Application::Launcher.build(self.pkgs, self.workspace);
+        let artifacts = crate::crate_graph::artifacts(
+            self.pkgs,
+            NixValue::list([native.as_expression(), launcher.as_expression()]),
+        );
         let closure = self
             .pkgs
             .clone()
@@ -152,7 +169,7 @@ impl Images<'_> {
         let preflight: NixValue = if boot {
             nix_text!(
                 "--launcher {launcher}/bin/airlock-exec --readelf {binutils}/bin/readelf",
-                launcher = Application::Launcher.build(self.pkgs, self.workspace),
+                launcher = launcher,
                 binutils = self.pkgs.clone().select("binutils"),
             )
             .into()
@@ -165,7 +182,7 @@ impl Images<'_> {
               --paths {closure}/store-paths --settings {settings} \
               {preflight}
         "#,
-            native = Application::PrepareBoot.build(self.pkgs, self.workspace),
+            native = native,
             closure = closure,
             settings = settings,
             preflight = preflight,
@@ -177,6 +194,7 @@ impl Images<'_> {
                 .select("runCommand")
                 .call(nix_text!("{name}-store-closure", name = name))
                 .call(nix_record! {
+                    "passthru": nix_record! { "buildArtifacts": artifacts },
                     "nativeBuildInputs": self.packages(&["coreutils", "jq"]),
                     "preferLocalBuild": true,
                     "allowSubstitutes": false,

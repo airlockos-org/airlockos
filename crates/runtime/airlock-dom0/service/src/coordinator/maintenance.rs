@@ -194,7 +194,9 @@ impl Coordinator {
         }
 
         ProtectionInventory::machine(&releases, &journals)
-            .context("invalid machine generation protections")
+            .context("invalid machine generation protections")?
+            .with_references(self.build_cache_protections()?)
+            .context("invalid build preparation protections")
     }
 
     /// Include current intent even when its historical projection was not published.
@@ -773,7 +775,17 @@ impl Coordinator {
         let directory = self.state.join("maintenance");
         let pending = directory.join("pending.json");
         let Some(request) = state::optional::<Value>(&pending)? else {
-            return Ok(json!({"status":"idle"}));
+            let cache = self.maintain_build_cache()?;
+            if cache["status"] == "idle" {
+                return Ok(json!({"status":"idle"}));
+            }
+            let mut result = json!({"status":"passed","build_cache":cache});
+            if result["build_cache"]["collect"] == true {
+                result["gc"] = self
+                    .store()
+                    .collect_protected(&self.protected_generations()?)?;
+            }
+            return Ok(result);
         };
         let selected = self
             .selection()?
@@ -827,6 +839,7 @@ impl Coordinator {
                     .remove("pruning");
                 state::save(&journal, &result)?;
             }
+            result["build_cache"] = self.maintain_build_cache()?;
             let protected = self.protected_generations()?;
             for (name, generation) in storage {
                 let Some(info) = self.store().generation_record(&name, generation)? else {

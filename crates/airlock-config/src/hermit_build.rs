@@ -148,12 +148,20 @@ fn image(
                 "AIRLOCK_BUILD_ARTIFACT": "1",
             }
         }));
-    image.bind(|image| image.clone().merge_attrs(nix_record! {
+    image.bind(|image| {
+        image.clone().merge_attrs(nix_record! {
         "buildArtifacts": pkgs.clone().select("lib.unique").call(NixValue::concat_lists([
-            NixValue::list([vendor, integration.clone().select("packages.x86_64-linux.hermit-kernel")]),
+            NixValue::list([
+                vendor,
+                image.clone(),
+                image.clone().select("src"),
+                NixValue::builtin("unsafeDiscardOutputDependency").call(image.clone().select("drvPath")),
+                integration.clone().select("packages.x86_64-linux.hermit-kernel"),
+            ]),
             image.select("nativeBuildInputs"),
         ])),
-    }))
+    })
+    })
 }
 
 /// Produce an authenticated descriptor and domain definition for either application.

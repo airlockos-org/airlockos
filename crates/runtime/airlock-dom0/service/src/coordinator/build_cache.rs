@@ -11,6 +11,8 @@ use airlock_nix_core::{
 };
 use std::fs::File;
 
+mod retention;
+
 /// Temporary Nix roots are owned by protected preparation records, never by the guest.
 const METADATA_ROOTS: &str = "/nix/var/nix/gcroots/airlock-build-publications";
 
@@ -62,6 +64,7 @@ impl Coordinator {
         let roots = Path::new(METADATA_ROOTS);
         state::directory(&directory)?;
         state::directory(roots)?;
+        retention::capacity(&directory, roots, &fingerprint)?;
         let pin = roots.join(fingerprint.as_str());
         if pin.is_symlink() {
             ensure!(
@@ -107,6 +110,10 @@ impl Coordinator {
             .join(format!("{token}.json"));
         state::trusted(&journal)?;
         let mut record: Value = state::read(&journal)?;
+        ensure!(
+            record["status"] != "retiring",
+            "build preparation is retiring; prepare the approved build again"
+        );
         let request: Request = serde_json::from_value(record["request"].clone())?;
         request.validate()?;
         ensure!(

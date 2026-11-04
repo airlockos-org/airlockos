@@ -109,6 +109,9 @@ enum Operation {
         // Nix-built fragments for the host and refreshed builder closures.
         #[arg(long)]
         cache: Option<PathBuf>,
+        // Complete selected builder registration and source-bound seed metadata.
+        #[arg(long)]
+        builder_closure: Option<PathBuf>,
     },
     InstallHost {
         // Mounted image whose conventional bootstrap store is being discarded.
@@ -247,9 +250,17 @@ fn execute(command: Request) -> Result<Value> {
             system,
             choices,
             cache,
+            builder_closure,
         } => super::image_cache::with(cache.as_deref(), || {
             with_image_build(|| {
-                prepared::prepare_host(&seed, &output, &registration, &system, &read(&choices)?)
+                prepared::prepare_host(
+                    &seed,
+                    &output,
+                    &registration,
+                    &system,
+                    &read(&choices)?,
+                    builder_closure.as_deref(),
+                )
             })
         }),
         Operation::InstallHost {

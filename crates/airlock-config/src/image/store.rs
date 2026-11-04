@@ -17,6 +17,12 @@ pub(crate) fn prepared(
     offline: NixValue,
 ) -> NixValue {
     let lib = pkgs.clone().select("lib");
+    // Include Hermit's declared source/vendor/compiler/kernel roots before
+    // filtering Linux runtime stores. Runtime closures stay runtime-only.
+    let build_artifacts = airlock_build::crate_graph::artifacts(
+        pkgs,
+        NixValue::builtin("attrValues").call(entries.clone()),
+    );
     let entries = lib
         .clone()
         .select("filterAttrs")
@@ -80,17 +86,7 @@ pub(crate) fn prepared(
     let sources = lib.clone().select("unique").call(
         lib.clone()
             .select("mapAttrsToList")
-            .call(NixValue::function(|_| {
-                NixValue::function(|source| {
-                    NixValue::builtin("elemAt")
-                        .call(
-                            NixValue::builtin("match")
-                                .call("(/nix/store/[^/]+)(/.*)?")
-                                .call(source),
-                        )
-                        .call(0_i64)
-                })
-            }))
+            .call(NixValue::function(|_| NixValue::function(store_root)))
             .call(offline.clone().select("inputs")),
     );
     let sources = NixValue::if_else(
@@ -107,42 +103,24 @@ pub(crate) fn prepared(
             entry.select("configuration.config.system.build.toplevel")
         }))
         .call(NixValue::builtin("attrValues").call(entries.clone()));
-    let roots = NixValue::concat_lists([
-        systems,
+    let roots = lib.clone().select("unique").call(NixValue::concat_lists([
+        systems.clone(),
+        build_artifacts,
+        NixValue::list([NixValue::builtin("storePath")
+            .call(store_root(workspace.root().as_expression().to_text()))]),
         NixValue::if_else(
             entries.clone().has_attr("usr-assistant"),
             NixValue::concat_lists([routine, sources]),
             NixValue::list([]),
         ),
-    ]);
-    let closure = pkgs.clone().select("closureInfo").call(nix_record! {
-        "rootPaths": roots.clone(),
-    });
-    let copy_inputs = NixValue::if_else(
-        offline.clone().equals(NixValue::null()),
-        "",
-        nix_text!(
-            r#"
-            cp {inputs} "$out/flake-inputs.json"
-        "#,
-            inputs = json(pkgs, "airlock-offline-inputs.json", offline),
-        ),
+    ]));
+    let closure = builder_manifest(
+        pkgs,
+        workspace,
+        roots.clone(),
+        systems.clone(),
+        offline.clone(),
     );
-    let manifest = pkgs
-        .clone()
-        .select("runCommand")
-        .call("usr-assistant-build-store-closure")
-        .call(nix_record! {})
-        .call(nix_text!(
-            r#"
-            mkdir -p "$out"
-            cp {closure}/store-paths {closure}/registration "$out/"
-            echo '{{}}' > "$out/manifest.json"
-            {copy_inputs}
-        "#,
-            closure = closure.clone(),
-            copy_inputs = copy_inputs,
-        ));
     let builders = NixValue::builtin("filter")
         .call(NixValue::function(|role| entries.clone().has_attr(role)))
         .call(NixValue::list(["usr-assistant".into(), "sys-ctrl".into()]));
@@ -161,7 +139,7 @@ pub(crate) fn prepared(
                     .to_text(),
                 "root_source": "",
                 "kernel_name": "",
-                "closure_source": manifest.to_text(),
+                "closure_source": closure.clone().to_text(),
                 "builder": true,
             }
         }))
@@ -203,6 +181,8 @@ pub(crate) fn prepared(
             "passthru": nix_record! {
                 "builderInputClosure": closure,
                 "builderInputRoots": roots,
+                "builderRuntimeRoots": systems,
+                "builderOfflineInputs": offline,
                 "builderNix": entries.select("usr-assistant.configuration.pkgs.nix"),
             },
             "AIRLOCK_CLOSURE_STORE_INDEX_SOURCE": "file",
@@ -247,6 +227,80 @@ pub(crate) fn prepared(
     })
 }
 
+/// Freeze the selected build graph and its Nix registration independently of runtime closures.
+/// Nix computes reference closure and NAR size; jq serializes build-time observations only.
+fn builder_manifest(
+    pkgs: &NixValue,
+    workspace: &Workspace,
+    roots: NixValue,
+    runtime_roots: NixValue,
+    offline: NixValue,
+) -> NixValue {
+    let closure = pkgs
+        .clone()
+        .select("closureInfo")
+        .call(nix_record! {"rootPaths":roots.clone()});
+    let runtime = pkgs
+        .clone()
+        .select("closureInfo")
+        .call(nix_record! {"rootPaths":runtime_roots});
+    let identity = json(
+        pkgs,
+        "airlock-builder-seed-inputs.json",
+        nix_record! {
+            "applications": workspace.root().as_expression().to_text(),
+            "cargo_lock_sha256": NixValue::builtin("hashFile").call("sha256").call(workspace.file("Cargo.lock")),
+            "crate_graph_sha256": NixValue::builtin("hashFile").call("sha256").call(workspace.file("Cargo.nix")),
+            "offline_inputs": offline.clone(),
+            "roots": NixValue::builtin("map").call(NixValue::function(|root| store_root(root.to_text()))).call(roots),
+        },
+    );
+    let copy_inputs = NixValue::if_else(
+        offline.clone().equals(NixValue::null()),
+        "",
+        nix_text!(
+            r#"
+            cp {inputs} "$out/flake-inputs.json"
+        "#,
+            inputs = json(pkgs, "airlock-offline-inputs.json", offline)
+        ),
+    );
+    pkgs.clone()
+        .select("runCommand")
+        .call("airlock-builder-input-closure")
+        .call(nix_record! {"nativeBuildInputs":NixValue::list([pkgs.clone().select("jq")])})
+        .call(nix_text!(
+            r#"
+            mkdir -p "$out"
+            cp {closure}/store-paths {closure}/registration "$out/"
+            echo '{{}}' > "$out/manifest.json"
+            jq -n --slurpfile inputs {identity} \
+              --arg registration "$(sha256sum "$out/registration" | cut -d' ' -f1)" \
+              --argjson builder "$(cat {closure}/total-nar-size)" \
+              --argjson runtime "$(cat {runtime}/total-nar-size)" \
+              '{{schema:"airlock.build-seed.v1",inputs:$inputs[0],registration_sha256:$registration,
+                builder_nar_bytes:$builder,runtime_nar_bytes:$runtime,
+                build_only_nar_bytes:($builder-$runtime)}}' > "$out/build-seed.json"
+            {copy_inputs}
+        "#,
+            closure = closure,
+            runtime = runtime,
+            identity = identity,
+            copy_inputs = copy_inputs
+        ))
+}
+
+/// Normalize a contextual store subdirectory to the Nix object retained by closureInfo.
+fn store_root(path: NixValue) -> NixValue {
+    NixValue::builtin("elemAt")
+        .call(
+            NixValue::builtin("match")
+                .call("(/nix/store/[^/]+)(/.*)?")
+                .call(path),
+        )
+        .call(0_i64)
+}
+
 /// Select the normal USB boot topology rather than the carrier's recovery-only declarations.
 pub(super) fn boot_topology(config: &NixValue) -> NixValue {
     NixValue::if_else(
@@ -270,16 +324,42 @@ pub(super) fn unified(
     let closure = pkgs.clone().select("closureInfo").call(nix_record! {
         "rootPaths": NixValue::list([system.clone()]),
     });
-    let builder_closure = pkgs.clone().select("closureInfo").call(nix_record! {
-        "rootPaths": NixValue::concat_lists([
+    let builder_roots = pkgs
+        .clone()
+        .select("lib.unique")
+        .call(NixValue::concat_lists([
             vm_store.clone().select("builderInputRoots"),
             NixValue::list([system.clone()]),
+            airlock_build::crate_graph::artifacts(
+                pkgs,
+                NixValue::concat_lists([
+                    config.clone().select("environment.systemPackages"),
+                    pkgs.clone()
+                        .select("lib.concatMap")
+                        .call(NixValue::function(|entry| {
+                            entry.select("configuration.environment.systemPackages")
+                        }))
+                        .call(
+                            NixValue::builtin("attrValues")
+                                .call(config.clone().select("specialisation")),
+                        ),
+                ]),
+            ),
+        ]));
+    let builder_closure = builder_manifest(
+        pkgs,
+        workspace,
+        builder_roots.clone(),
+        NixValue::concat_lists([
+            vm_store.clone().select("builderRuntimeRoots"),
+            NixValue::list([system.clone()]),
         ]),
-    });
+        vm_store.clone().select("builderOfflineInputs"),
+    );
     let cache = airlock_build::store::image_cache(
         pkgs,
         workspace,
-        NixValue::list([closure.clone(), builder_closure]),
+        NixValue::list([closure.clone(), builder_closure.clone()]),
     );
     let choices = pkgs
         .clone()
@@ -325,7 +405,7 @@ pub(super) fn unified(
             },
             "buildInputs": NixValue::list([vm_store.clone().select("builderInputClosure")]),
             "exportReferencesGraph": nix_record! {
-                "builder": vm_store.clone().select("builderInputRoots"),
+                "builder": builder_roots,
             },
             "nativeBuildInputs": NixValue::list([native.clone()]),
             "AIRLOCK_CLOSURE_STORE_INDEX_SOURCE": "file",
@@ -336,7 +416,7 @@ pub(super) fn unified(
           --paths {closure}/store-paths --settings {preflight} \
           --launcher {launcher}/bin/airlock-exec --readelf {binutils}/bin/readelf
         airlock-dom0-service storage image prepare-host {vm_store} "$out" \
-          {closure}/registration {system} {choices} --cache {cache}
+          {closure}/registration {system} {choices} --cache {cache} --builder-closure {builder_closure}
         cp "$TMPDIR/airlock-host-preflight/boot-preflight.json" "$out/boot-preflight.json"
     "#,
             vm_store = vm_store.clone(),
@@ -344,6 +424,7 @@ pub(super) fn unified(
             system = system,
             choices = json(pkgs, "airlock-host-boot-choices.json", choices),
             cache = cache.clone(),
+            builder_closure = builder_closure,
             preparer = Application::PrepareBoot.build(pkgs, workspace),
             launcher = Application::Launcher.build(pkgs, workspace),
             binutils = pkgs.clone().select("binutils"),
