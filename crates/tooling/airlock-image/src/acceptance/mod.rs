@@ -555,16 +555,33 @@ fn run_gate(args: &Args, report: &mut Value, output: Option<&Path>) -> Result<()
         let temporary = tempfile::Builder::new()
             .prefix("offline-builder-gate-")
             .tempdir_in(&args.temporary_root)?;
-        for (name, change) in SCENARIOS {
-            report["scenarios"][name] = serde_json::to_value(trial::run(
-                args,
-                name,
-                change,
-                &inputs,
-                &logs,
-                temporary.path(),
-            )?)?;
-        }
+        let trials = (|| -> Result<()> {
+            for (name, change) in SCENARIOS {
+                report["scenarios"][name] = serde_json::to_value(trial::run(
+                    args,
+                    name,
+                    change,
+                    &inputs,
+                    &logs,
+                    temporary.path(),
+                )?)?;
+            }
+
+            Ok(())
+        })();
+
+        // Archive copies retain read-only store permissions. Restore owner write
+        // permission after the child exits, including failed trials, so cleanup
+        // removes the selected inputs rather than silently leaving extra copies.
+        crate::support::output(
+            Command::new("chmod")
+                .args(["--recursive", "u+rwX", "--"])
+                .arg(temporary.path()),
+        )?;
+        temporary
+            .close()
+            .context("remove temporary offline build stores")?;
+        trials?;
 
         report["evidence"] = json!(SCENARIOS.iter().map(|(name,_)| Ok((*name,json!({"stdout":fs::canonicalize(logs.join(format!("{name}.stdout")))?,"stderr":fs::canonicalize(logs.join(format!("{name}.stderr")))?})))).collect::<Result<BTreeMap<_,_>>>()?);
 

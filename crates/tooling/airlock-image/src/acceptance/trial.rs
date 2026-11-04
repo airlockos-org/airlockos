@@ -89,6 +89,14 @@ pub(crate) fn checkout(
     fs::create_dir(target)?;
     tar::Archive::new(archive).unpack(target)?;
 
+    // Prepared sources may come from the read-only store. Only this private
+    // copy needs editing; recursive chmod ignores encountered symlinks.
+    output(
+        Command::new("chmod")
+            .args(["--recursive", "u+rwX", "--"])
+            .arg(target),
+    )?;
+
     let module = target.join(MODULE);
     let baseline = module.with_file_name("usr-home-offline-baseline.nix");
     ensure!(
