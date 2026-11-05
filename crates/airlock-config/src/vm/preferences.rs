@@ -30,7 +30,8 @@ pub(super) fn module() -> NixValue {
             "description": "Follow the assigned GUI VM's desktop preferences",
             "wantedBy": NixValue::list(["qubes-graphical-session.target".into()]),
             "partOf": NixValue::list(["qubes-graphical-session.target".into(), "graphical-session.target".into()]),
-            "after": NixValue::list(["graphical-session-pre.target".into(), "dbus.socket".into()]),
+            // Reverse shutdown ordering keeps the bus alive for ExecStopPost's dconf restore.
+            "after": NixValue::list(["graphical-session-pre.target".into(), "dbus.service".into()]),
             "path": NixValue::list([package("python3.pkgs.qubes-core-qrexec.domU")]),
             "environment": nix_record! {
                 "GIO_EXTRA_MODULES": nix_text!("{dconf}/lib/gio/modules", dconf = package("dconf.lib")),

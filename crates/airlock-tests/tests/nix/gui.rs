@@ -8,6 +8,13 @@ use super::*;
 fn preferences_installation_follows_gui_sessions() -> Result<()> {
     let nix = context()?;
     let report = super::configuration::inspect(&nix, "preferences/installation", json!({}))?;
+    assert_eq!(
+        report["policy"],
+        concat!(
+            "airlock.DesktopPreferences + @tag:guivm-sys-gui sys-gui allow autostart=no\n",
+            "airlock.DesktopPreferences * @anyvm @anyvm deny\n",
+        )
+    );
     assert!(report["sys-net"]["unit"].is_null());
     assert!(report["sys-net"]["binding"].is_null());
     let publisher = &report["sys-gui"];
@@ -47,6 +54,12 @@ fn preferences_installation_follows_gui_sessions() -> Result<()> {
                 .contains(&json!("qubes-graphical-session.target"))
         );
         assert_eq!(unit["serviceConfig"]["Type"], "notify");
+        assert!(
+            unit["after"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("dbus.service"))
+        );
         assert_eq!(unit["serviceConfig"]["KillMode"], "control-group");
         assert_eq!(unit["serviceConfig"]["TimeoutStopSec"], "15s");
         assert!(
