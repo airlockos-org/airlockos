@@ -18,9 +18,10 @@ pub(crate) fn release(protections: Vec<Protection>) -> Result<Value> {
     ensure_pool(root)?;
     let _lock = PoolLock::acquire(&root.join("admission.lock"))?;
     let protected = ProtectedGenerations::new(protections).context("invalid build protections")?;
+    let domain = super::runtime_namespace(DOMAIN);
     let mut released = Vec::new();
     let mut kept = 0;
-    for directory in children(&root.join("domains").join(DOMAIN).join("generations"))? {
+    for directory in children(&root.join("domains").join(&domain).join("generations"))? {
         let path = directory.join("manifest.json");
         pool_path(root, &path)?;
         if !path.try_exists()? {
@@ -32,8 +33,8 @@ pub(crate) fn release(protections: Vec<Protection>) -> Result<Value> {
         }
         let generation = number(&manifest, "generation")?;
         ensure!(
-            manifest["domain"] == DOMAIN
-                && path == records::manifest_path(root, DOMAIN, generation)?,
+            manifest["domain"] == domain
+                && path == records::manifest_path(root, &domain, generation)?,
             "build admission generation differs"
         );
         let pin = Pin::classify(
@@ -45,7 +46,7 @@ pub(crate) fn release(protections: Vec<Protection>) -> Result<Value> {
         if let Some(request) = protected.release(
             Candidate {
                 generation: Generation {
-                    domain: DOMAIN.into(),
+                    domain: domain.clone(),
                     number: generation,
                 },
                 system: text(&manifest, "system")?,

@@ -4,6 +4,7 @@
 //! overlays are deliberately retired. This pass never prunes a writable builder store.
 
 use super::*;
+use airlock_deployment_core::attachment::runtime_namespace;
 use airlock_deployment_core::retention::Protection;
 use airlock_machine_planning::build_publication::{self as policy, Retirement};
 use serde::Deserialize;
@@ -124,7 +125,7 @@ impl Coordinator {
             let request = request(&record, &identity)?;
             if maximum == 0 {
                 inventory.protections.push(Protection::System {
-                    domain: airlock_nix_core::build_cache::DOMAIN.into(),
+                    domain: runtime_namespace(airlock_nix_core::build_cache::DOMAIN),
                     system: request.derivation.to_string(),
                 });
                 continue;
@@ -160,7 +161,7 @@ impl Coordinator {
                 inventory.retire.push(retirement);
             } else {
                 inventory.protections.push(Protection::System {
-                    domain: airlock_nix_core::build_cache::DOMAIN.into(),
+                    domain: runtime_namespace(airlock_nix_core::build_cache::DOMAIN),
                     system: request.derivation.to_string(),
                 });
             }
@@ -189,7 +190,7 @@ impl Coordinator {
         let directory = self.state.join("build-publications");
         let roots = Path::new(METADATA_ROOTS);
         let pool = Path::new("/var/lib/airlock/closure-store/domains")
-            .join(airlock_nix_core::build_cache::DOMAIN);
+            .join(runtime_namespace(airlock_nix_core::build_cache::DOMAIN));
         if !directory.try_exists()? && !roots.try_exists()? && !pool.try_exists()? {
             return Ok(json!({"status":"idle","collect":false}));
         }
