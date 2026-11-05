@@ -103,7 +103,7 @@ publish = false
 
         let tools = temporary.path().join("tools");
         fs::create_dir(&tools)?;
-        fs::create_dir_all(temporary.path().join("data/cache/authoring-vendor"))?;
+        fs::create_dir(temporary.path().join("vendor"))?;
         for name in [
             "cargo",
             "crate2nix",
@@ -162,14 +162,8 @@ publish = false
         command.env("AIRLOCK_DATA_ROOT", self.path("data"));
         command.env("AIRLOCK_LOG_DIR", self.path("logs"));
         command.env("AIRLOCK_CRATE2NIX", self.path("tools/crate2nix"));
-        command.env(
-            "AIRLOCK_CARGO_VENDOR",
-            self.path("data/cache/authoring-vendor"),
-        );
-        command.env(
-            "AIRLOCK_PACKER_CARGO_VENDOR",
-            self.path("data/cache/authoring-vendor"),
-        );
+        command.env("AIRLOCK_CARGO_VENDOR", self.path("vendor"));
+        command.env("AIRLOCK_PACKER_CARGO_VENDOR", self.path("vendor"));
         // Preparation now maintains a real compiler mirror even with an inert
         // Cargo peer. Keep that output outside both committed fixture checkouts.
         command.env("CARGO_TARGET_DIR", self.path("cargo-target"));
