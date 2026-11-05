@@ -3,7 +3,9 @@
 
 #![cfg(feature = "desktop-preferences")]
 
-use airlock_desktop_preferences::{ColorScheme, FontName, Setting, Snapshot, encode_frame};
+use airlock_desktop_preferences::{
+    ColorScheme, FontName, HEADER_LEN, MAX_FRAME_LEN, Setting, Snapshot, encode_frame,
+};
 use anyhow::{Context, Result, ensure};
 use gio::{glib, prelude::*};
 use std::cell::Cell;
@@ -14,6 +16,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
+use x11rb::{
+    connection::Connection,
+    protocol::xproto::{AtomEnum, ConnectionExt, CreateWindowAux, PropMode, WindowClass},
+    wrapper::ConnectionExt as _,
+};
 
 /// A process group owned solely by this scenario, including daemon subprocesses.
 struct Process {
@@ -89,9 +96,34 @@ fn replace(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Start a private bus without host service activation directories.
+fn private_bus(root: &Path) -> Result<(Process, String)> {
+    let address = format!("unix:path={path}/bus", path = root.display());
+    let config = root.join("bus.conf");
+    fs::write(
+        &config,
+        format!(
+            r#"<busconfig>
+      <type>session</type><listen>{address}</listen>
+      <policy context="default"><allow send_destination="*"/><allow receive_sender="*"/><allow own="*"/></policy>
+    </busconfig>"#
+        ),
+    )?;
+    let mut bus = Process::start(
+        Command::new("dbus-daemon")
+            .args(["--nofork", "--print-address=1", "--config-file"])
+            .arg(config)
+            .stdout(Stdio::piped()),
+    )?;
+    let mut actual = String::new();
+    BufReader::new(bus.child.stdout.take().unwrap()).read_line(&mut actual)?;
+    ensure!(!actual.is_empty(), "private bus did not start");
+    Ok((bus, actual.trim().to_owned()))
+}
+
 /// Launch disposable desktop services and a bounded child test with no live session environment.
 #[test]
-#[ignore = "requires explicitly prepared desktop shell and preferences_peer example"]
+#[ignore = "requires prepared desktop shell, preferences_peer, publisher executable and bubblewrap"]
 fn isolated_preferences_session() -> Result<()> {
     let root = tempfile::tempdir()?;
     for directory in [
@@ -118,30 +150,8 @@ fn isolated_preferences_session() -> Result<()> {
     )?;
     let mut screen = String::new();
     BufReader::new(display.child.stdout.take().unwrap()).read_line(&mut screen)?;
-    let address = format!("unix:path={path}/bus", path = root.path().display());
-    let bus_config = root.path().join("bus.conf");
-    // No service directories: automatic activation must never inherit host-session paths.
-    fs::write(
-        &bus_config,
-        format!(
-            r#"<busconfig>
-      <type>session</type><listen>{address}</listen>
-      <policy context="default"><allow send_destination="*"/><allow receive_sender="*"/><allow own="*"/></policy>
-    </busconfig>"#
-        ),
-    )?;
-    let mut bus = Process::start(
-        Command::new("dbus-daemon")
-            .args(["--nofork", "--print-address=1", "--config-file"])
-            .arg(bus_config)
-            .stdout(Stdio::piped()),
-    )?;
-    let mut actual = String::new();
-    BufReader::new(bus.child.stdout.take().unwrap()).read_line(&mut actual)?;
-    ensure!(
-        !actual.is_empty() && !screen.is_empty(),
-        "private display/session did not start"
-    );
+    let (_bus, actual) = private_bus(root.path())?;
+    ensure!(!screen.is_empty(), "private display did not start");
     let profile = root.path().join("dconf-profile");
     fs::write(&profile, "user-db:user\n")?;
     let fonts = tool("AIRLOCK_TEST_FONTS")?;
@@ -261,17 +271,281 @@ fn agent(root: &Path) -> Result<Process> {
     )
 }
 
+/// Give the source its own bus, runtime and database, including dconf's invalidation files.
+fn source_command(root: &Path, executable: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut command = Command::new(executable);
+    command
+        .env("DCONF_PROFILE", root.join("publisher-profile"))
+        .env("XDG_RUNTIME_DIR", root.join("publisher-runtime"))
+        .env(
+            "DBUS_SESSION_BUS_ADDRESS",
+            format!(
+                "unix:path={path}/bus",
+                path = root.join("publisher-runtime").display()
+            ),
+        );
+    command
+}
+
+/// Invoke GSettings against the source database, independent of guest convergence.
+fn source_setting(root: &Path, arguments: &[&str]) -> Result<String> {
+    let output = airlock_vm_service::support::run(
+        source_command(root, "gsettings").args(arguments),
+        None,
+        Duration::from_secs(5),
+    )?
+    .checked()?;
+    Ok(String::from_utf8(output)?.trim().to_owned())
+}
+
+/// Start the actual GNOME publisher with fixture-owned settings and runtime directories.
+fn publisher(root: &Path) -> Result<Process> {
+    Process::start(
+        source_command(root, tool("AIRLOCK_TEST_PREFERENCES_PUBLISHER")?)
+            .args(["preferences", "publish"]),
+    )
+}
+
+/// Keep representative Qubes identity properties on a window across appearance updates.
+/// This checks property integrity; recognizable host decorations require live acceptance.
+fn security_marker() -> Result<impl Fn() -> Result<()>> {
+    let (connection, screen) = x11rb::connect(None)?;
+    let window = connection.generate_id()?;
+    connection
+        .create_window(
+            x11rb::COPY_DEPTH_FROM_PARENT,
+            window,
+            connection.setup().roots[screen].root,
+            0,
+            0,
+            100,
+            100,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            0,
+            &CreateWindowAux::new(),
+        )?
+        .check()?;
+    let name = connection
+        .intern_atom(false, b"_QUBES_VMNAME")?
+        .reply()?
+        .atom;
+    let label = connection
+        .intern_atom(false, b"_QUBES_LABEL")?
+        .reply()?
+        .atom;
+    let color = connection
+        .intern_atom(false, b"_QUBES_LABEL_COLOR")?
+        .reply()?
+        .atom;
+    connection
+        .change_property8(
+            PropMode::REPLACE,
+            window,
+            name,
+            AtomEnum::STRING,
+            b"usr-fixture",
+        )?
+        .check()?;
+    connection
+        .change_property8(PropMode::REPLACE, window, label, AtomEnum::CARDINAL, &[1])?
+        .check()?;
+    connection
+        .change_property32(
+            PropMode::REPLACE,
+            window,
+            color,
+            AtomEnum::CARDINAL,
+            &[0xff0000],
+        )?
+        .check()?;
+    Ok(move || {
+        assert_eq!(
+            connection
+                .get_property(false, window, name, AtomEnum::STRING, 0, 32)?
+                .reply()?
+                .value,
+            b"usr-fixture"
+        );
+        assert_eq!(
+            connection
+                .get_property(false, window, label, AtomEnum::CARDINAL, 0, 1)?
+                .reply()?
+                .value,
+            [1]
+        );
+        assert_eq!(
+            connection
+                .get_property(false, window, color, AtomEnum::CARDINAL, 0, 1)?
+                .reply()?
+                .value32()
+                .unwrap()
+                .next(),
+            Some(0xff0000)
+        );
+        Ok(())
+    })
+}
+
+/// Join production publisher, sandbox and guest adapters; only qrexec establishment is substituted.
+fn production_subscription(
+    root: &Path,
+    view: &gio::Settings,
+    bus: &gio::DBusConnection,
+    check_markings: &impl Fn() -> Result<()>,
+) -> Result<()> {
+    fs::write(root.join("publisher-profile"), "user-db:publisher\n")?;
+    fs::create_dir(root.join("publisher-runtime"))?;
+    fs::set_permissions(
+        root.join("publisher-runtime"),
+        fs::Permissions::from_mode(0o700),
+    )?;
+    let (_source_bus, address) = private_bus(&root.join("publisher-runtime"))?;
+    let _source_dconf = Process::start(&mut source_command(
+        root,
+        tool("AIRLOCK_TEST_DCONF_SERVICE")?,
+    ))?;
+    let connection = gio::DBusConnection::for_address_sync(
+        &address,
+        gio::DBusConnectionFlags::AUTHENTICATION_CLIENT
+            | gio::DBusConnectionFlags::MESSAGE_BUS_CONNECTION,
+        None,
+        gio::Cancellable::NONE,
+    )?;
+    wait("source dconf writer", || {
+        let reply = connection.call_sync(
+            Some("org.freedesktop.DBus"),
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus",
+            "NameHasOwner",
+            Some(&("ca.desrt.dconf",).to_variant()),
+            None,
+            gio::DBusCallFlags::NONE,
+            1000,
+            gio::Cancellable::NONE,
+        )?;
+        Ok(reply.get::<(bool,)>() == Some((true,)))
+    })?;
+    let interface = "org.gnome.desktop.interface";
+    let accessibility = "org.gnome.desktop.a11y.interface";
+    source_setting(root, &["set", interface, "font-name", "Adwaita Sans 17"])?;
+    source_setting(root, &["set", interface, "color-scheme", "prefer-dark"])?;
+    source_setting(root, &["set", interface, "clock-show-seconds", "false"])?;
+    let mut source = publisher(root)?;
+    configure(root, "sys-gui", true)?;
+    let start_guest = || -> Result<Process> {
+        Process::start(
+            Command::new(env!("CARGO_BIN_EXE_airlock-vm-service"))
+                .args(["preferences", "--config"])
+                .arg(root.join("binding.json"))
+                .arg("run")
+                .env(
+                    "AIRLOCK_TEST_EXPORTER_RUNTIME",
+                    root.join("publisher-runtime"),
+                ),
+        )
+    };
+    let mut guest = start_guest()?;
+    wait("production initial snapshot", || {
+        Ok(view.string("font-name") == "Adwaita Sans 17"
+            && portal(bus, "org.freedesktop.appearance", "color-scheme")?.get::<u32>() == Some(1)
+            && !status(root)["applied"].is_null())
+    })?;
+    check_markings()?;
+    source_setting(root, &["set", interface, "text-scaling-factor", "1.5"])?;
+    source_setting(root, &["set", accessibility, "high-contrast", "true"])?;
+    wait("production accessibility notification", || {
+        Ok(view.double("text-scaling-factor") == 1.5
+            && portal(bus, "org.freedesktop.appearance", "contrast")?.get::<u32>() == Some(1)
+            && status(root)["applied"]["high_contrast"]["supported"] == true)
+    }).with_context(|| format!("source scale={scale}, contrast={contrast}; guest scale={guest_scale}, portal={portal:?}, status={status}",
+        scale = source_setting(root, &["get", interface, "text-scaling-factor"]).unwrap_or_default(),
+        contrast = source_setting(root, &["get", accessibility, "high-contrast"]).unwrap_or_default(),
+        guest_scale = view.double("text-scaling-factor"),
+        portal = portal(bus, "org.freedesktop.appearance", "contrast"),
+        status = status(root)))?;
+    check_markings()?;
+    // Native convergence checks the actual XSettings property, including separate
+    // text/window scale. User styles and unrelated dconf settings remain local.
+    assert!(view.boolean("clock-show-seconds"));
+    assert_eq!(
+        source_setting(root, &["get", interface, "clock-show-seconds"])?,
+        "false"
+    );
+    view.set_string("font-name", "Sans 29")?;
+    wait("production drift repair", || {
+        Ok(view.string("font-name") == "Adwaita Sans 17")
+    })?;
+    assert_eq!(
+        source_setting(root, &["get", interface, "font-name"])?,
+        "'Adwaita Sans 17'"
+    );
+
+    // A killed publisher stops refreshing its feed. The surviving agent retains
+    // valid state, observes expiration, and recovers from a fresh source process.
+    source.stop()?;
+    wait("publisher expiration", || {
+        Ok(!status(root)["error"].is_null())
+    })?;
+    assert_eq!(view.string("font-name"), "Adwaita Sans 17");
+    source_setting(root, &["set", interface, "font-name", "Adwaita Sans 19"])?;
+    source = publisher(root)?;
+    wait("publisher restart", || {
+        Ok(view.string("font-name") == "Adwaita Sans 19" && status(root)["error"].is_null())
+    })?;
+
+    guest.stop()?;
+    assert_eq!(view.string("font-name"), "Sans 31");
+    source_setting(root, &["set", interface, "color-scheme", "prefer-light"])?;
+    source_setting(root, &["set", accessibility, "high-contrast", "false"])?;
+    guest = start_guest()?;
+    wait("late guest receives changes made offline", || {
+        Ok(view.string("font-name") == "Adwaita Sans 19"
+            && portal(bus, "org.freedesktop.appearance", "color-scheme")?.get::<u32>() == Some(2)
+            && portal(bus, "org.freedesktop.appearance", "contrast")?.get::<u32>() == Some(0)
+            && !status(root)["applied"].is_null())
+    })?;
+    check_markings()?;
+    source_setting(root, &["reset", interface, "font-name"])?;
+    let default_font = glib::Variant::parse(
+        None,
+        &source_setting(root, &["get", interface, "font-name"])?,
+    )?
+    .get::<String>()
+    .context("source default font")?;
+    wait("source reset sends effective default", || {
+        Ok(view.string("font-name") == default_font)
+    })?;
+    configure(root, "sys-gui", false)?;
+    wait("production subscription revoked", || {
+        Ok(status(root)["phase"] == "disabled" && view.string("font-name") == "Sans 31")
+    })?;
+    source_setting(root, &["set", interface, "font-name", "Adwaita Sans 23"])?;
+    guest.stop()?;
+    source.stop()?;
+    assert_eq!(view.string("font-name"), "Sans 31");
+    assert!(view.boolean("clock-show-seconds"));
+    Ok(())
+}
+
 /// Isolated child scenario: notification updates, portal signals, failures, reassignment and restoration.
 #[test]
 #[ignore = "child of isolated_preferences_session; never run against a live desktop"]
 fn session_probe() -> Result<()> {
     let root = tool("AIRLOCK_TEST_SESSION_ROOT")?;
-    let notifications = std::os::unix::net::UnixDatagram::bind(root.join("notify.sock"))?;
-    notifications.set_nonblocking(true)?;
     ensure!(
         std::env::var("DBUS_SESSION_BUS_ADDRESS")?.contains(root.to_str().unwrap()),
         "test requires its private session bus"
     );
+    let check_markings = security_marker()?;
+    let stylesheet = root.join("config/gtk-4.0/gtk.css");
+    fs::create_dir_all(stylesheet.parent().unwrap())?;
+    let local_style = br#"/* local Qubes compatibility styles */
+popover { box-shadow: none; }
+"#;
+    fs::write(&stylesheet, local_style)?;
+    let notifications = std::os::unix::net::UnixDatagram::bind(root.join("notify.sock"))?;
+    notifications.set_nonblocking(true)?;
     let _dconf = Process::start(&mut Command::new(tool("AIRLOCK_TEST_DCONF_SERVICE")?))?;
     let gtk = tool("AIRLOCK_TEST_GTK_PORTAL")?;
     let portals = root.join("data/xdg-desktop-portal/portals");
@@ -417,16 +691,30 @@ fn session_probe() -> Result<()> {
     wait("second supported value", || {
         Ok(view.string("font-name") == "Sans 14")
     })?;
-    replace(&root.join("feed/sys-gui.frame"), b"malformed snapshot")?;
-    wait("malformed frame rejected", || {
-        Ok(!status(&root)["error"].is_null())
-    })?;
-    assert_eq!(view.string("font-name"), "Sans 14");
-    publish(&root, "sys-gui", &light)?;
-    wait("full snapshot after reconnect", || {
-        Ok(status(&root)["error"].is_null()
-            && portal(&bus, "org.freedesktop.appearance", "color-scheme")?.get::<u32>() == Some(2))
-    })?;
+    let mut version = encode_frame(&dark)?;
+    version[4..6].copy_from_slice(&u16::MAX.to_be_bytes());
+    let mut oversized = version[..HEADER_LEN].to_vec();
+    oversized[4..6].copy_from_slice(&1_u16.to_be_bytes());
+    oversized[6..8].copy_from_slice(&(MAX_FRAME_LEN as u16).to_be_bytes());
+    let mut invalid = serde_json::to_value(&dark)?;
+    invalid["text_scale"] = serde_json::json!({"supported": 99.0});
+    let payload = serde_json::to_vec(&invalid)?;
+    let mut invalid = encode_frame(&dark)?[..HEADER_LEN].to_vec();
+    invalid[6..8].copy_from_slice(&(payload.len() as u16).to_be_bytes());
+    invalid.extend(payload);
+    for rejected in [b"malformed snapshot".to_vec(), version, oversized, invalid] {
+        replace(&root.join("feed/sys-gui.frame"), &rejected)?;
+        wait("invalid update rejected", || {
+            Ok(!status(&root)["error"].is_null())
+        })?;
+        assert_eq!(view.string("font-name"), "Sans 14");
+        publish(&root, "sys-gui", &light)?;
+        wait("full snapshot after reconnect", || {
+            Ok(status(&root)["error"].is_null()
+                && portal(&bus, "org.freedesktop.appearance", "color-scheme")?.get::<u32>()
+                    == Some(2))
+        })?;
+    }
     fs::write(root.join("feed/offline"), b"")?;
     wait("interrupted stream retained", || {
         Ok(!status(&root)["error"].is_null())
@@ -496,6 +784,9 @@ fn session_probe() -> Result<()> {
     })?;
     assert_eq!(view.string("document-font-name"), "Serif 21");
     recovered.stop()?;
+    production_subscription(&root, &view, &bus, &check_markings)?;
+    check_markings()?;
+    assert_eq!(fs::read(stylesheet)?, local_style);
     drop(subscription);
     Ok(())
 }

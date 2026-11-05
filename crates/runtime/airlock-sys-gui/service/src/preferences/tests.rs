@@ -122,6 +122,38 @@ fn subscribers_receive_initial_changes_and_reconnect_state() -> Result<()> {
     Ok(())
 }
 
+/// An idle connection expires even with a fresh feed, forcing the next caller through policy again.
+#[test]
+fn subscription_lease_requires_fresh_admission_without_losing_current_state() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let publisher = feed::Publisher::new(root.path())?;
+    let directory = root.path().join("feed");
+    for high_contrast in [false, true, false] {
+        let snapshot = Snapshot {
+            high_contrast: Setting::Supported(high_contrast),
+            ..Snapshot::default()
+        };
+        publisher.publish(&snapshot)?;
+        let (mut peer, mut output) = UnixStream::pair()?;
+        let mut input = output.try_clone()?;
+        let directory = directory.clone();
+        let started = std::time::Instant::now();
+        let worker = std::thread::spawn(move || {
+            export::pump(
+                &directory,
+                &mut input,
+                &mut output,
+                Duration::from_millis(100),
+            )
+        });
+        assert_eq!(receive(&mut peer)?, snapshot);
+        worker.join().unwrap()?;
+        assert!(started.elapsed() >= Duration::from_millis(100));
+        assert_eq!(peer.read(&mut [0])?, 0);
+    }
+    Ok(())
+}
+
 /// Idle streams do no file reads; atomic replacement wakes them and watch loss closes them.
 #[test]
 fn exporter_waits_for_changes_without_periodic_snapshot_reads() -> Result<()> {

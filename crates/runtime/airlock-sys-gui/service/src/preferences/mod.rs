@@ -24,7 +24,7 @@ use clap::Subcommand;
 use std::path::PathBuf;
 use std::time::Duration;
 
-/// Polling coalesces settings bursts without building a replay queue.
+/// One notification-triggered delay coalesces settings bursts without a replay queue.
 const TICK: Duration = Duration::from_millis(100);
 
 /// Refresh even unchanged preferences so crashed/logged-out sessions expire.

@@ -160,7 +160,7 @@ fn preferences_policy_uses_upstream_gui_tags() {
     other.add_module(desktop::gnome());
     f.machine.add(&other).unwrap();
     let snapshot = f.machine.finish().unwrap();
-    let request = json!({
+    let mut request = json!({
         "policy": preferences::policy(snapshot.vms()),
         "domains":["dom0","sys-gui","sys-other-gui","sys-net",
             {"name":"usr-home", "tags":["guivm-sys-gui"]},
@@ -180,28 +180,47 @@ fn preferences_policy_uses_upstream_gui_tags() {
             ["admin.vm.feature.Set","+","usr-home","sys-gui"],
             ["airlock.DesktopPreferences","+","usr-home","dom0"]]
     });
-    let mut child = Command::new(std::env::var_os("AIRLOCK_QUBES_PROBE_BIN").unwrap())
-        .arg("policy")
-        .env(
-            "PYTHONPATH",
-            std::env::var_os("AIRLOCK_POLICY_PYTHONPATH").unwrap(),
-        )
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(&serde_json::to_vec(&request).unwrap())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(output.status.success());
+    let evaluate = |request: &serde_json::Value| {
+        let mut child = Command::new(std::env::var_os("AIRLOCK_QUBES_PROBE_BIN").unwrap())
+            .arg("policy")
+            .env(
+                "PYTHONPATH",
+                std::env::var_os("AIRLOCK_POLICY_PYTHONPATH").unwrap(),
+            )
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(&serde_json::to_vec(&request).unwrap())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
     assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
+        evaluate(&request),
         json!([
             true, true, true, false, false, false, false, false, false, false, false
+        ])
+    );
+    // Policy evaluates current Qubes membership on every new subscription. Existing
+    // streams are closed by GUI lifecycle changes or their bounded exporter lease.
+    request["domains"][4]["tags"] = json!(["guivm-sys-other-gui"]);
+    assert_eq!(
+        evaluate(&request),
+        json!([
+            false, true, true, false, true, false, false, false, false, false, false
+        ])
+    );
+    request["domains"][4]["tags"] = json!([]);
+    assert_eq!(
+        evaluate(&request),
+        json!([
+            false, true, true, false, false, false, false, false, false, false, false
         ])
     );
 }

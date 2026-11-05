@@ -4,7 +4,9 @@
 use anyhow::{Context, Result, ensure};
 use std::fs;
 use std::io::{Read, Write};
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
+use std::process::Command;
 
 /// Stream the selected fixture on file changes, with EOF-only stdin proving no write-back protocol.
 fn main() -> Result<()> {
@@ -14,6 +16,22 @@ fn main() -> Result<()> {
         "unexpected RPC arguments"
     );
     let source: airlock_nix_core::identity::GuestName = args[1].parse()?;
+    // Only the test launcher selects this mode. The production guest still invokes
+    // the fixed qrexec service; replace transport establishment with a local exec
+    // so the real exporter, including its sandbox, handles all subsequent bytes.
+    if let Some(runtime) = std::env::var_os("AIRLOCK_TEST_EXPORTER_RUNTIME") {
+        ensure!(source.as_str() == "sys-gui", "unexpected publisher");
+        return Err(Command::new(
+            std::env::var_os("AIRLOCK_TEST_PREFERENCES_PUBLISHER")
+                .context("prepared publisher executable")?,
+        )
+        .args(["preferences", "export"])
+        .env("XDG_RUNTIME_DIR", runtime)
+        .env("QREXEC_REMOTE_DOMAIN", "usr-session-fixture")
+        .env_remove("QREXEC_SERVICE_ARGUMENT")
+        .exec()
+        .into());
+    }
     let root = PathBuf::from(
         std::env::var_os("AIRLOCK_TEST_PREFERENCES_FEED").context("fixture directory")?,
     );
