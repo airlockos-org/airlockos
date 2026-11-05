@@ -17,19 +17,23 @@ impl Deployment {
     /// reconnects pass through Qubes policy; immediate revocation needs lifecycle
     /// teardown in the machine integration, not just a policy-file update.
     pub fn desktop_preferences(&self) -> Application {
-        self.installation()
-            .etc_text("qubes-rpc/airlock.DesktopPreferences", nix_text!(
+        // Boot preflight and the read-only /etc image need an executable store source.
+        let exporter = self
+            .pkgs
+            .clone()
+            .select("writeShellScript")
+            .call("airlock-desktop-preferences-export")
+            .call(nix_text!(
                 r#"
-                    #!{shell}
                     exec {executable} preferences export "$@"
                 "#,
-                shell = self.pkgs.clone().select("runtimeShell"),
                 executable = self.executable(),
-            ))
-            .module(ModuleBody::new(nix_record! {
+            ));
+
+        self.installation().module(ModuleBody::new(nix_record! {
                 "environment": nix_record! {
                     "etc": nix_record! {
-                        "qubes-rpc/airlock.DesktopPreferences": nix_record! { "mode": "0555" },
+                        "qubes-rpc/airlock.DesktopPreferences": nix_record! { "source": exporter },
                     },
                 },
                 "systemd": nix_record! {
