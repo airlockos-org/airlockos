@@ -7,6 +7,8 @@ mod development;
 
 mod app_gui;
 
+mod preferences;
+
 mod personal;
 
 mod minimal;

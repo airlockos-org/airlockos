@@ -66,6 +66,8 @@ struct Agent {
     startup: Option<glib::SourceId>,
     /// Whether a converged state or bounded fallback decision is available to launchers.
     ready: bool,
+    /// Notify systemd once initial convergence or bounded fallback releases graphical autostart.
+    notified: Cell<bool>,
     /// Local asset/capability limitations from the last convergence attempt.
     limitations: Vec<String>,
     /// Last failure or transport interruption, separately from applied state.
@@ -138,6 +140,12 @@ impl Agent {
         };
         if let Err(error) = self.paths.status(&status) {
             eprintln!("desktop preferences status: {error}");
+        }
+        if self.ready && !self.notified.get() {
+            match super::notify_ready() {
+                Ok(()) => self.notified.set(true),
+                Err(error) => eprintln!("desktop preferences readiness: {error}"),
+            }
         }
     }
 
@@ -517,6 +525,7 @@ pub(super) fn run(config_path: &Path, paths: Paths) -> Result<()> {
         retry: None,
         startup: None,
         ready: false,
+        notified: Cell::new(false),
         limitations: Vec::new(),
         error: None,
         queued: Rc::new(Cell::new(false)),

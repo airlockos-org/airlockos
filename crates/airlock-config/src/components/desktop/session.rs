@@ -97,6 +97,14 @@ pub(super) fn configuration(
         },
         "environment": nix_record! {
             "systemPackages": NixValue::list(packages),
+            "etc": nix_record! {
+                "qubes/rpc-config/airlock.DesktopPreferences": nix_record! {
+                    "text": nix_text!(r#"
+                        force-user='{user}'
+                    "#, user = inputs.config.clone().select("airlock.qubeGuest.user")),
+                    "mode": "0444",
+                },
+            },
             // First-login tours are disabled while the welcome flow is being revised.
             "gnome": nix_record! {
                 "excludePackages": NixValue::list([inputs.pkgs.clone().select("gnome-tour")]),

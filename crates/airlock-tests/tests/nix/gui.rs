@@ -2,6 +2,74 @@
 
 use super::*;
 
+/// Real NixOS units bind notification readiness, cleanup and toolkit discovery to the graphical user.
+#[test]
+#[ignore = "requires explicitly prepared offline Nix sources"]
+fn preferences_installation_follows_gui_sessions() -> Result<()> {
+    let nix = context()?;
+    let report = super::configuration::inspect(&nix, "preferences/installation", json!({}))?;
+    assert!(report["sys-net"]["unit"].is_null());
+    assert!(report["sys-net"]["binding"].is_null());
+    let publisher = &report["sys-gui"];
+    assert!(publisher["binding"].is_null());
+    assert_eq!(
+        publisher["unit"]["wantedBy"],
+        json!(["gnome-session.target"])
+    );
+    assert!(
+        publisher["unit"]["serviceConfig"]["ExecStart"]
+            .as_str()
+            .unwrap()
+            .ends_with(" preferences publish")
+    );
+    assert_eq!(
+        publisher["rpc"]["text"],
+        format!(
+            "force-user='{user}'\n",
+            user = publisher["user"].as_str().unwrap()
+        )
+    );
+    for name in ["usr-home", "usr-assistant", "sys-ctrl"] {
+        let guest = &report[name];
+        let binding: Value = serde_json::from_str(guest["binding"]["text"].as_str().unwrap())?;
+        assert_eq!(binding["enabled"], true);
+        assert_eq!(binding["gui_domain"], "sys-gui");
+        assert!((1..=4).contains(&binding["window_scale"].as_u64().unwrap()));
+        assert_eq!(guest["binding"]["mode"], "0444");
+        assert!(guest["rpc"].is_null());
+        assert_eq!(guest["portal"], true);
+        let unit = &guest["unit"];
+        assert_eq!(unit["wantedBy"], json!(["qubes-graphical-session.target"]));
+        assert!(
+            unit["partOf"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("qubes-graphical-session.target"))
+        );
+        assert_eq!(unit["serviceConfig"]["Type"], "notify");
+        assert_eq!(unit["serviceConfig"]["KillMode"], "control-group");
+        assert_eq!(unit["serviceConfig"]["TimeoutStopSec"], "15s");
+        assert!(
+            unit["serviceConfig"]["ExecStopPost"]
+                .as_str()
+                .unwrap()
+                .ends_with(" preferences restore")
+        );
+        assert!(
+            unit["environment"]["GIO_EXTRA_MODULES"]
+                .as_str()
+                .unwrap()
+                .ends_with("/lib/gio/modules")
+        );
+        assert!(
+            guest["environment"]["XDG_DATA_DIRS"]
+                .to_string()
+                .contains("gsettings-schemas")
+        );
+    }
+    Ok(())
+}
+
 /// Resolve feature graphs without compiling or provisioning either side of the service boundary.
 #[test]
 fn authoring_does_not_require_runtime_dependencies() -> Result<()> {

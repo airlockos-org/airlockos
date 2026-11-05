@@ -1393,6 +1393,21 @@ impl Machine {
             vms.push(vm.snapshot(guivm));
         }
 
+        let publishers = self
+            .vms
+            .iter()
+            .filter(|vm| {
+                matches!(vm.definition.role, Role::Gui { .. })
+                    && vm
+                        .definition
+                        .modules
+                        .borrow()
+                        .iter()
+                        .any(|module| module.gnome)
+            })
+            .map(|vm| vm.definition.name.clone())
+            .collect::<Vec<_>>();
+        crate::components::preferences::configure(&mut vms, &publishers, host.as_ref());
         crate::components::screen_capture::configure(&mut vms, &captures);
         crate::components::clipboard::configure(&mut vms, &mut clipboards, host.as_ref())?;
         if let Some(observer) = &self.diagnostic_observer {

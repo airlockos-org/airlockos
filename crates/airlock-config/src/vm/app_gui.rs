@@ -18,6 +18,11 @@ pub(super) fn module() -> NixValue {
             "options": nix_record! {
                 "airlock": nix_record! {
                     "appGui": nix_record! {
+                        "preferencesSource": context.lib.clone().select("mkOption").call(nix_record! {
+                            "type": context.lib.clone().select("types.nullOr").call(context.lib.clone().select("types.str")),
+                            "default": NixValue::null(),
+                            "description": "Machine-derived GNOME GUI provider; null leaves local preferences unmanaged.",
+                        }),
                         "scale": context.lib.clone().select("mkOption").call(nix_record! {
                             "type": context.lib.clone().select("types.ints.between").call(1_i64).call(4_i64),
                             "default": 1_i64,
@@ -31,6 +36,7 @@ pub(super) fn module() -> NixValue {
         ModuleBody::new(configuration(&context))
             .key("airlock.vm.app-gui")
             .import_value(declaration)
+            .import_value(super::preferences::module())
     })
     .into_expression()
 }

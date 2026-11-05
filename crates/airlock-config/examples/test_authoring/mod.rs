@@ -4,6 +4,8 @@ use super::*;
 
 mod desktop;
 
+mod preferences;
+
 mod authoring_boundary;
 
 mod physical;
@@ -83,6 +85,7 @@ pub(super) fn fixture(
                 settings["case"].as_str().ok_or("expected topology case")?,
             )?,
             "desktop" => desktop::expression().call(inputs),
+            "preferences/installation" => preferences::installation(inputs),
             "physical" => physical::expression().call(inputs),
             "host" => host::expression().call(inputs),
             "machine" => machine::expression().call(inputs),

@@ -43,10 +43,17 @@ fn body(inputs: ModuleContext) -> ModuleBody {
     let windows = ModuleBody::new(windows::configuration(&inputs, &service));
     let setup =
         ModuleBody::new(setup::configuration(&inputs, &service)).key("airlock-config.gnome.setup");
+    let preferences = rusix::installation::compose(
+        "gnome-preferences",
+        rusix::installation::CollisionChecks::Enabled,
+        [service.desktop_preferences()],
+    )
+    .expect("fixed GNOME preferences installation");
 
     // NixOS collects imports in reverse order: setup packages precede session packages.
     let gnome = ModuleBody::empty()
         .key("airlock-config.gnome")
+        .module(preferences)
         .module(windows)
         .module(session)
         .module(setup);

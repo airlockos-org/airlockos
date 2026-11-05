@@ -74,6 +74,8 @@ pub(super) fn outputs() -> NixValue {
                         "AIRLOCK_TEST_DCONF_SERVICE": nix_text!("{package}/libexec/dconf-service", package = pkgs.clone().select("dconf.lib")),
                         "AIRLOCK_TEST_GTK_PORTAL": nix_text!("{package}/libexec/xdg-desktop-portal-gtk", package = pkgs.clone().select("xdg-desktop-portal-gtk")),
                         "AIRLOCK_TEST_PORTAL": nix_text!("{package}/libexec/xdg-desktop-portal", package = pkgs.clone().select("xdg-desktop-portal")),
+                        "AIRLOCK_TEST_FONTS": pkgs.clone().select("adwaita-fonts").to_text(),
+                        "AIRLOCK_TEST_ICONS": pkgs.clone().select("adwaita-icon-theme").to_text(),
                         "nativeBuildInputs": NixValue::list([pkgs.clone().select("pkg-config")]),
                         "PYO3_PYTHON": rusix::nix_text!(
                             "{python}/bin/python3",

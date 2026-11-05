@@ -40,6 +40,12 @@ impl Deployment {
                                 "wantedBy": NixValue::list(["gnome-session.target".into()]),
                                 "partOf": NixValue::list(["graphical-session.target".into()]),
                                 "after": NixValue::list(["graphical-session-pre.target".into()]),
+                                // Preserve GNOME's imported schema/override search path;
+                                // explicitly load its ordinary writable dconf backend locally.
+                                "environment": nix_record! {
+                                    "GIO_EXTRA_MODULES": nix_text!("{dconf}/lib/gio/modules", dconf = self.pkgs.clone().select("dconf.lib")),
+                                },
+                                "unitConfig": nix_record! { "StartLimitIntervalSec": 0_i64 },
                                 "serviceConfig": nix_record! {
                                     "ExecStart": nix_text!("{executable} preferences publish", executable = self.executable()),
                                     "Restart": "on-failure",
@@ -47,6 +53,8 @@ impl Deployment {
                                     "UMask": "0077",
                                     "NoNewPrivileges": true,
                                     "RestrictSUIDSGID": true,
+                                    "KillMode": "control-group",
+                                    "TimeoutStopSec": "15s",
                                 },
                             },
                         },

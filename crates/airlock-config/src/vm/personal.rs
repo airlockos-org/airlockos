@@ -72,14 +72,6 @@ pub(super) fn module() -> NixValue {
                     "enable": false,
                 },
             },
-            "programs": nix_record! {
-                "dconf": nix_record! {
-                    "enable": true,
-                },
-            },
-            "fonts": nix_record! {
-                "packages": packages(&["adwaita-fonts"]),
-            },
             // Qubes supplies Xorg; WebKit still needs Mesa/EGL for software rendering.
             "hardware": nix_record! {
                 "graphics": nix_record! {
@@ -106,15 +98,11 @@ pub(super) fn module() -> NixValue {
                 ]),
             },
             "xdg": nix_record! {
-                // This backend reads VM-local GSettings; it does not import sys-gui preferences.
-                // X11 font and cursor updates also need a local XSettings provider.
                 "portal": nix_record! {
-                    "enable": true,
-                    "extraPortals": packages(&["xdg-desktop-portal-gtk"]),
-                    // The X-QUBES session has no local GNOME Shell to provide its portal.
+                    // Common GUI integration supplies the Settings portal. Personal
+                    // applications additionally use this session's keyring backend.
                     "config": nix_record! {
                         "common": nix_record! {
-                            "default": NixValue::list(["gtk".into()]),
                             "org.freedesktop.impl.portal.Secret": NixValue::list(["gnome-keyring".into()]),
                         },
                     },

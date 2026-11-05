@@ -144,6 +144,36 @@ fn isolated_preferences_session() -> Result<()> {
     );
     let profile = root.path().join("dconf-profile");
     fs::write(&profile, "user-db:user\n")?;
+    let fonts = tool("AIRLOCK_TEST_FONTS")?;
+    let fontconfig = root.path().join("fonts.conf");
+    fs::write(
+        &fontconfig,
+        format!(
+            r#"<?xml version="1.0"?>
+        <!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
+        <fontconfig><dir>{fonts}/share/fonts</dir><cachedir>{cache}</cachedir></fontconfig>
+        "#,
+            fonts = fonts.display(),
+            cache = root.path().join("font-cache").display()
+        ),
+    )?;
+    for family in ["Adwaita Sans", "Adwaita Mono"] {
+        let output = Command::new("fc-match")
+            .args(["--format=%{file}", family])
+            .env("FONTCONFIG_FILE", &fontconfig)
+            .output()?;
+        ensure!(output.status.success(), "font lookup failed");
+        let matched = PathBuf::from(String::from_utf8(output.stdout)?);
+        ensure!(
+            matched.starts_with(&fonts) && matched.is_file(),
+            "baseline font unavailable: {family}"
+        );
+    }
+    let icons = tool("AIRLOCK_TEST_ICONS")?.join("share");
+    ensure!(
+        icons.join("icons/Adwaita/cursors/left_ptr").is_file(),
+        "baseline cursor unavailable"
+    );
     let peer = tool("AIRLOCK_TEST_PREFERENCES_PEER")?;
     let mut command = Command::new(std::env::current_exe()?);
     command
@@ -157,6 +187,8 @@ fn isolated_preferences_session() -> Result<()> {
         .env("XDG_STATE_HOME", root.path().join("state"))
         .env("XDG_CACHE_HOME", root.path().join("cache"))
         .env("XDG_DATA_HOME", root.path().join("data"))
+        .env("XDG_DATA_DIRS", icons)
+        .env("FONTCONFIG_FILE", fontconfig)
         .env("XDG_CURRENT_DESKTOP", "GNOME")
         .env_remove("WAYLAND_DISPLAY")
         .env_remove("GTK_THEME")
@@ -224,7 +256,8 @@ fn agent(root: &Path) -> Result<Process> {
         Command::new(env!("CARGO_BIN_EXE_airlock-vm-service"))
             .args(["preferences", "--config"])
             .arg(root.join("binding.json"))
-            .arg("run"),
+            .arg("run")
+            .env("NOTIFY_SOCKET", root.join("notify.sock")),
     )
 }
 
@@ -233,6 +266,8 @@ fn agent(root: &Path) -> Result<Process> {
 #[ignore = "child of isolated_preferences_session; never run against a live desktop"]
 fn session_probe() -> Result<()> {
     let root = tool("AIRLOCK_TEST_SESSION_ROOT")?;
+    let notifications = std::os::unix::net::UnixDatagram::bind(root.join("notify.sock"))?;
+    notifications.set_nonblocking(true)?;
     ensure!(
         std::env::var("DBUS_SESSION_BUS_ADDRESS")?.contains(root.to_str().unwrap()),
         "test requires its private session bus"
@@ -312,6 +347,22 @@ fn session_probe() -> Result<()> {
             .as_str()
             .is_some_and(|error| error.contains("another XSettings provider")))
     })?;
+    assert!(status(&root)["applied"].is_null());
+    // A competing owner must not stall the graphical target indefinitely.
+    // Readiness reports the bounded fallback, then convergence can recover live.
+    let mut notification = [0; 64];
+    wait("systemd readiness notification", || {
+        match notifications.recv(&mut notification) {
+            Ok(length) => {
+                assert_eq!(&notification[..length], b"READY=1");
+                Ok(true)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    })
+    .with_context(|| format!("readiness status: {status}", status = status(&root)))?;
+    assert!(status(&root)["ready"].as_bool().unwrap());
     assert!(status(&root)["applied"].is_null());
     competitor.stop()?;
     wait("partial failure recovery", || {

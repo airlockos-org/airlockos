@@ -77,6 +77,32 @@ pub fn execute(request: Request) -> Result<()> {
     }
 }
 
+/// Release a Type=notify user service only after its initial outcome is known.
+/// Manual invocations have no notification socket; both systemd socket forms are supported.
+fn notify_ready() -> Result<()> {
+    use std::os::{
+        linux::net::SocketAddrExt,
+        unix::{
+            ffi::OsStrExt,
+            net::{SocketAddr, UnixDatagram},
+        },
+    };
+    let Some(path) = std::env::var_os("NOTIFY_SOCKET") else {
+        return Ok(());
+    };
+    let bytes = path.as_bytes();
+    let address = if let Some(name) = bytes.strip_prefix(b"@") {
+        SocketAddr::from_abstract_name(name)?
+    } else {
+        SocketAddr::from_pathname(path)?
+    };
+    let socket = UnixDatagram::unbound()?;
+    socket.set_write_timeout(Some(std::time::Duration::from_secs(1)))?;
+    socket.connect_addr(&address)?;
+    socket.send(b"READY=1")?;
+    Ok(())
+}
+
 /// Gate normal application launch only when preferences are configured for this VM.
 ///
 /// The agent's initial synchronization has a ten-second budget. A missing agent

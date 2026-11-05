@@ -59,6 +59,153 @@ fn fixture() -> Fixture {
     fixture
 }
 
+/// GUI association supplies both the read authority and the publisher's revocation lifetime.
+#[test]
+fn preferences_membership_restarts_publishers_without_waking_stopped_guests() {
+    use airlock_config::components::{desktop, preferences};
+    use airlock_machine_core::{model::Topology, planning};
+    use serde_json::json;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    /// Project declared features and GUI links into real planner inputs with inert artifact paths.
+    fn topology(snapshot: &model::MachineSnapshot) -> Topology {
+        let system = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-test-system";
+        let domains = snapshot.vms().map(|vm| (vm.name.to_string(), json!({
+            "class":"StandaloneVM", "netvm":null, "template":null,
+            "features":vm.features, "prefs":{"guivm":match &vm.guivm {
+                ReferenceSetting::Named(name) => json!(name),
+                _ => serde_json::Value::Null,
+            }},
+            "backend":{
+                "type":"nix-closure", "system":{"source":system},
+                "root":{"source":format!("{system}/root.img")}, "kernel":{"name":"test"},
+                "store":{"source":system,"mode":"shared-closure","mountpoint":"/nix/store",
+                    "device":"/dev/xvde","blobDevice":"/dev/xvdf","viewBackend":"erofs-objectmap"}
+            }
+        }))).collect::<BTreeMap<_, _>>();
+        serde_json::from_value(json!({"schema":"airlock.qubes-topology.v1","domains":domains}))
+            .unwrap()
+    }
+
+    let mut f = fixture();
+    f.gui.add_module(desktop::gnome());
+    let other = Vm::gui("sys-other-gui", &f.home).unwrap();
+    other.add_module(desktop::gnome());
+    f.machine.add(&other).unwrap();
+    let plain = Vm::gui("sys-plain-gui", &f.home).unwrap();
+    f.machine.add(&plain).unwrap();
+    let before = f.machine.finish().unwrap();
+    let sources = before
+        .vms()
+        .filter(|vm| !vm.features["airlock-desktop-preferences-source"].is_empty())
+        .map(|vm| vm.name.as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(sources, BTreeSet::from(["usr-home", "sys-ctrl"]));
+    assert_eq!(
+        preferences::policy(before.vms()),
+        concat!(
+            "airlock.DesktopPreferences + @tag:guivm-sys-gui sys-gui allow autostart=no\n",
+            "airlock.DesktopPreferences + @tag:guivm-sys-other-gui sys-other-gui allow autostart=no\n",
+            "airlock.DesktopPreferences * @anyvm @anyvm deny\n",
+        )
+    );
+
+    f.home.set_gui(&other);
+    let after = f.machine.finish().unwrap();
+    let running = [
+        f.gui.name().clone(),
+        other.name().clone(),
+        f.home.name().clone(),
+    ]
+    .into_iter()
+    .collect();
+    let plan = planning::plan(&topology(&before), &topology(&after), &running, &[], false).unwrap();
+    assert!(plan.stop.contains(f.gui.name()));
+    assert!(plan.stop.contains(other.name()));
+    assert!(plan.stop.contains(f.home.name()));
+    assert!(!plan.start.contains(f.controller.name()));
+    // A provider without GNOME clears the source, preserving planner reset semantics.
+    f.home.set_gui(&plain);
+    let disabled = f.machine.finish().unwrap();
+    assert!(
+        disabled
+            .vms()
+            .find(|vm| vm.name == *f.home.name())
+            .unwrap()
+            .features["airlock-desktop-preferences-source"]
+            .is_empty()
+    );
+    planning::plan(
+        &topology(&after),
+        &topology(&disabled),
+        &running,
+        &[],
+        false,
+    )
+    .unwrap();
+}
+
+/// Evaluate the generated policy with Qubes' own parser and real disposable caller identities.
+#[test]
+#[ignore = "requires explicitly prepared Qubes parser and AIRLOCK_QUBES_PROBE_BIN"]
+fn preferences_policy_uses_upstream_gui_tags() {
+    use airlock_config::components::{desktop, preferences};
+    use serde_json::json;
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut f = fixture();
+    f.gui.add_module(desktop::gnome());
+    let other = Vm::gui("sys-other-gui", &f.home).unwrap();
+    other.add_module(desktop::gnome());
+    f.machine.add(&other).unwrap();
+    let snapshot = f.machine.finish().unwrap();
+    let request = json!({
+        "policy": preferences::policy(snapshot.vms()),
+        "domains":["dom0","sys-gui","sys-other-gui","sys-net",
+            {"name":"usr-home", "tags":["guivm-sys-gui"]},
+            {"name":"disp7421", "type":"DispVM", "tags":["guivm-sys-gui"]},
+            {"name":"reassigned", "tags":["guivm-sys-other-gui"]},
+            {"name":"disp-unrelated", "type":"DispVM", "tags":[]}],
+        "queries":[
+            ["airlock.DesktopPreferences","+","usr-home","sys-gui"],
+            ["airlock.DesktopPreferences","+","disp7421","sys-gui"],
+            ["airlock.DesktopPreferences","+","reassigned","sys-other-gui"],
+            ["airlock.DesktopPreferences","+","reassigned","sys-gui"],
+            ["airlock.DesktopPreferences","+","usr-home","sys-other-gui"],
+            ["airlock.DesktopPreferences","+","disp-unrelated","sys-gui"],
+            ["airlock.DesktopPreferences","+","sys-net","sys-gui"],
+            ["airlock.DesktopPreferences","+write","usr-home","sys-gui"],
+            ["airlock.DesktopPreferences","+query","usr-home","sys-gui"],
+            ["admin.vm.feature.Set","+","usr-home","sys-gui"],
+            ["airlock.DesktopPreferences","+","usr-home","dom0"]]
+    });
+    let mut child = Command::new(std::env::var_os("AIRLOCK_QUBES_PROBE_BIN").unwrap())
+        .arg("policy")
+        .env(
+            "PYTHONPATH",
+            std::env::var_os("AIRLOCK_POLICY_PYTHONPATH").unwrap(),
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&serde_json::to_vec(&request).unwrap())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
+        json!([
+            true, true, true, false, false, false, false, false, false, false, false
+        ])
+    );
+}
+
 /// Diagnostic authority follows declaration ownership and frozen inventories, not equal-looking names.
 #[test]
 fn diagnostics_validate_membership_and_freeze_component_sources() {
@@ -705,6 +852,7 @@ fn capture_reconnection_does_not_mutate_frozen_artifacts() {
         "other-files"
     );
     assert!(!screen_capture::policy(after.capture_connections()).contains("usr-home"));
+    // Only the capture receiver disappears; independent GUI components remain.
     assert_eq!(
         before
             .vms()
@@ -712,15 +860,13 @@ fn capture_reconnection_does_not_mutate_frozen_artifacts() {
             .unwrap()
             .modules
             .len(),
-        1
-    );
-    assert!(
         after
             .vms()
             .find(|vm| vm.name.as_str() == "usr-home")
             .unwrap()
             .modules
-            .is_empty()
+            .len()
+            + 1
     );
 }
 

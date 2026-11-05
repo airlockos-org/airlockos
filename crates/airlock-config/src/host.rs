@@ -128,6 +128,9 @@ pub(crate) fn modules(host: &HostSnapshot, machine: &MachineSnapshot) -> Package
         };
 
         let mut modules = vec![nested::vm(true), configuration];
+        modules.push(crate::components::preferences::host_module(
+            crate::components::preferences::policy(machine.vms()),
+        ));
         modules.push(crate::components::clipboard::host_module(
             machine.clipboard_connections(),
             airlock_build::Workspace::new(inputs.airlock_apps()),

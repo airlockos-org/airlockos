@@ -4,6 +4,8 @@ pub mod desktop;
 
 pub mod clipboard;
 
+pub mod preferences;
+
 #[path = "machine-source.rs"]
 mod machine_source;
 

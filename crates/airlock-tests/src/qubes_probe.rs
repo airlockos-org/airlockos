@@ -217,17 +217,21 @@ fn policy(py: Python<'_>, request: &Value) -> Result<Value> {
     kwargs.set_item("policy", request["policy"].as_str().context("policy text")?)?;
     let policy = parser.getattr("StringPolicy")?.call((), Some(&kwargs))?;
     let mut domains = serde_json::Map::new();
-    for (index, name) in request["domains"]
+    for (index, domain) in request["domains"]
         .as_array()
         .context("policy domains")?
         .iter()
         .enumerate()
     {
-        let name = name.as_str().context("policy domain name")?;
+        let name = domain
+            .as_str()
+            .or_else(|| domain["name"].as_str())
+            .context("policy domain name")?;
         domains.insert(
             name.into(),
             json!({
-                "name":name, "type":"StandaloneVM", "tags":[],
+                "name":name, "type":domain["type"].as_str().unwrap_or("StandaloneVM"),
+                "tags":domain.get("tags").cloned().unwrap_or(json!([])),
                 "uuid":index.to_string(), "power_state":"Running",
             }),
         );
