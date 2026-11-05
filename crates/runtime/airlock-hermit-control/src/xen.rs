@@ -22,10 +22,12 @@ use xen_transport::{
 #[derive(Debug)]
 pub enum Error {
     /// The original native Xen connection failed.
-    Transport(
+    Transport {
+        /// Native stream operation, without any control payload.
+        operation: &'static str,
         /// Original native failure code, without control payloads.
-        XenError,
-    ),
+        source: XenError,
+    },
     /// A native interface operation failed or its completion is uncertain.
     Interface {
         /// Fixed adapter operation, never copied from a peer's data.
@@ -102,9 +104,17 @@ impl Session {
                 }
                 Err(XenError::Platform(-2)) => {
                     endpoint::wait(observed, deadline.min(now.saturating_add(100_000_000)))
-                        .map_err(Error::Transport)?
+                        .map_err(|source| Error::Transport {
+                            operation: "wait_for_setup",
+                            source,
+                        })?
                 }
-                Err(error) => return Err(Error::Transport(error)),
+                Err(source) => {
+                    return Err(Error::Transport {
+                        operation: "open",
+                        source,
+                    });
+                }
             }
         }
         let native = connected.ok_or(Error::Protocol)?;
@@ -136,10 +146,13 @@ impl Session {
         for _ in 0..1024 {
             match self.control.step() {
                 Step::Send => {
-                    let count = self
-                        .native
-                        .try_write(self.control.outgoing())
-                        .map_err(Error::Transport)?;
+                    let count =
+                        self.native
+                            .try_write(self.control.outgoing())
+                            .map_err(|source| Error::Transport {
+                                operation: "write",
+                                source,
+                            })?;
                     if count == 0 {
                         return Ok(Event::Progress);
                     }
@@ -148,10 +161,12 @@ impl Session {
                     }
                 }
                 Step::Receive => {
-                    let count = self
-                        .native
-                        .try_read(&mut self.input)
-                        .map_err(Error::Transport)?;
+                    let count = self.native.try_read(&mut self.input).map_err(|source| {
+                        Error::Transport {
+                            operation: "read",
+                            source,
+                        }
+                    })?;
                     if count == 0 {
                         return Ok(Event::Idle);
                     }
@@ -183,7 +198,10 @@ impl Session {
             }
             Err(error) => {
                 self.control.disconnect();
-                Err(Error::Transport(error))
+                Err(Error::Transport {
+                    operation: "status",
+                    source: error,
+                })
             }
         }
     }
@@ -317,7 +335,10 @@ impl Session {
             Ok(value) => value,
             Err(error) => {
                 self.control.disconnect();
-                return Err(Error::Transport(error));
+                return Err(Error::Transport {
+                    operation: "drain",
+                    source: error,
+                });
             }
         };
         if count > 0 {
@@ -345,7 +366,10 @@ impl Session {
     /// uncertain release remains quarantined by the kernel until VM teardown.
     pub fn close(mut self) -> Result<(), Error> {
         self.control.disconnect();
-        self.native.close().map_err(Error::Transport)
+        self.native.close().map_err(|source| Error::Transport {
+            operation: "close",
+            source,
+        })
     }
 }
 

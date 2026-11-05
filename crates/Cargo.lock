@@ -204,6 +204,7 @@ dependencies = [
  "serde_json",
  "sha1",
  "sha2",
+ "shlex 2.0.1",
  "signal-hook",
  "tar",
  "tempfile",
@@ -408,8 +409,10 @@ dependencies = [
  "airlock-firewall-core",
  "airlock-hermit-control",
  "airlock-qubes-network",
+ "env_logger",
  "getrandom 0.3.4",
  "hermit",
+ "log",
  "serde_json",
  "xen-transport",
 ]
@@ -1331,6 +1334,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "491bdf728bf25ddd9ad60d4cf1c48588fa82c013a2440b91aa7fc43e34a07c32"
 dependencies = [
  "bytemuck",
+]
+
+[[package]]
+name = "env_filter"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "900d271a03799a1ee8d1ca9b19893b48ca674a9284fefcfb85f05e74ed314217"
+dependencies = [
+ "log",
+ "regex",
+]
+
+[[package]]
+name = "env_logger"
+version = "0.11.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "de671bd27a75a797dc9ae289ba1e77276e75e2026408aab65185384e2d5cd3f6"
+dependencies = [
+ "env_filter",
+ "log",
 ]
 
 [[package]]
@@ -3328,6 +3351,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "regex"
+version = "1.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f020237b6c8eed93db2e2cb53c00c60a8e1bc73da7d073199a1180401450218d"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
 name = "regex-automata"
 version = "0.4.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4980,9 +5015,10 @@ checksum = "213b7324336b53d2414b2db8537e56544d981803139155afa84f76eeebb7a546"
 [[package]]
 name = "xen-transport"
 version = "0.1.0"
-source = "git+https://github.com/airlockos-org/hermit-xen?rev=7a4fada0fbe415822c13812d00ea31db29f9a71b#7a4fada0fbe415822c13812d00ea31db29f9a71b"
+source = "git+https://github.com/airlockos-org/hermit-xen?rev=3e7fa593380e8044c73e2a3cadc8a9f58775e91e#3e7fa593380e8044c73e2a3cadc8a9f58775e91e"
 dependencies = [
  "libc",
+ "log",
 ]
 
 [[package]]

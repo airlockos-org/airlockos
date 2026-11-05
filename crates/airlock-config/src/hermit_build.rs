@@ -8,7 +8,7 @@ use rusix::{
 };
 
 /// Reviewed integration including native networking, secure entropy and Linux checksum support.
-pub(crate) const INTEGRATION_REVISION: &str = "7a4fada0fbe415822c13812d00ea31db29f9a71b";
+pub(crate) const INTEGRATION_REVISION: &str = "3e7fa593380e8044c73e2a3cadc8a9f58775e91e";
 
 /// Portable integration identity; local overrides must preserve its exact Git revision.
 pub(crate) fn input() -> NixValue {

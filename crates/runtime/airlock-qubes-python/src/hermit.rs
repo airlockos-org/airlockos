@@ -1,5 +1,9 @@
 //! Hermit lifecycle with an optional, explicitly admitted encrypted scratch disk.
 //! The feature holding the executable is installed by the checked configuration plan.
+//! For networking guests, the root-controlled `airlock-hermit-log-filter` feature
+//! supplies an upstream `RUST_LOG`/kernel filter at next boot, for example
+//! `info,airlock_sys_firewall=debug,xen_transport=debug`. Omission defaults to info;
+//! trace includes packet lengths, never payloads. Logging grants no control rights.
 
 use crate::argument;
 use airlock_nix_core::hermit_artifact::{AuthorityMode, Descriptor, ScratchDisk};
@@ -449,8 +453,17 @@ fn invoke(
                         "upstream changed during firewall startup",
                     ));
                 }
+                let log_filter = vm
+                    .getattr("features")?
+                    .call_method1("get", ("airlock-hermit-log-filter",))?
+                    .extract::<Option<String>>()?;
                 airlock_dom0_service::hermit::boot_xml_with_network(
-                    &xml, &image, memory, &nonce, &upstream,
+                    &xml,
+                    &image,
+                    memory,
+                    &nonce,
+                    &upstream,
+                    log_filter.as_deref(),
                 )
             } else {
                 airlock_dom0_service::hermit::boot_xml_with_scratch(

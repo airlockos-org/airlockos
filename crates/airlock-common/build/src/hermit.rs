@@ -26,7 +26,7 @@ pub const APPLICATIONS: [Source; 2] = [
             "airlock-common/clipboard",
             "runtime/airlock-sys-clipboard",
         ],
-        vendor_hash: "sha256-pkZvninHmnaHhDxQhd1GDpHb98PSe5QUwOfBM1RKMOc=",
+        vendor_hash: "sha256-f05LS5ZwBQpTJoWNKQRclyCk0+6VaRlT8/qcLUu95+c=",
     },
     Source {
         profile: "firewall",
@@ -40,6 +40,6 @@ pub const APPLICATIONS: [Source; 2] = [
             "runtime/airlock-hermit-control",
             "runtime/airlock-sys-firewall",
         ],
-        vendor_hash: "sha256-f7zTE7XPgNx18fMC7TbMn5ZJYq5WLTJVXXAawbKpsFE=",
+        vendor_hash: "sha256-Dr/n09ZQJUwrMVfDnXsqQJLxSYDGlhxkDZMRkk2iL5o=",
     },
 ];

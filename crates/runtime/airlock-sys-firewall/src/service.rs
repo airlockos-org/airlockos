@@ -32,10 +32,12 @@ pub enum Error {
         airlock_hermit_control::xen::Error,
     ),
     /// Native networking or XenStore operation failed.
-    Transport(
+    Transport {
+        /// Application operation whose native resource became uncertain.
+        operation: &'static str,
         /// Original error code, without packet contents.
-        xen_transport::Error,
-    ),
+        source: xen_transport::Error,
+    },
     /// Native directory/backend metadata was malformed or outside capacity.
     Discovery,
     /// The core rejected a clock/control transition or ownership reservation.
@@ -46,13 +48,6 @@ impl From<airlock_hermit_control::xen::Error> for Error {
     /// Preserve the control failure without treating it as a recoverable packet drop.
     fn from(error: airlock_hermit_control::xen::Error) -> Self {
         Self::Control(error)
-    }
-}
-
-impl From<xen_transport::Error> for Error {
-    /// Preserve native resource uncertainty; caller terminates the guest.
-    fn from(error: xen_transport::Error) -> Self {
-        Self::Transport(error)
     }
 }
 
@@ -91,11 +86,22 @@ pub fn run(challenge: Challenge, seed: [u8; 32]) -> Result<(), Error> {
     let boot = core::str::from_utf8(challenge.as_bytes())
         .map_err(|_| Error::State)?
         .to_owned();
+    log::debug!("operation=control.open peer=0 port=111");
     let mut control = Session::open(challenge)?;
-    let mut poweroff = Poweroff::new(endpoint::now_ns().saturating_add(CONTROL_TIMEOUT_NS))?;
+    let mut poweroff = Poweroff::new(endpoint::now_ns().saturating_add(CONTROL_TIMEOUT_NS))
+        .map_err(|source| Error::Transport {
+            operation: "subscribe_poweroff",
+            source,
+        })?;
     let mut scratch = [0; 4096];
     let deadline = endpoint::now_ns().saturating_add(5_000_000_000);
-    let length = store::value("device/vif/0/backend-id", &mut scratch, deadline)?;
+    let length =
+        store::value("device/vif/0/backend-id", &mut scratch, deadline).map_err(|source| {
+            Error::Transport {
+                operation: "read_upstream_peer",
+                source,
+            }
+        })?;
     let upstream_peer = core::str::from_utf8(&scratch[..length])
         .ok()
         .and_then(|text| text.parse::<u16>().ok())
@@ -103,20 +109,35 @@ pub fn run(challenge: Challenge, seed: [u8; 32]) -> Result<(), Error> {
         // identity is separate from admission of untrusted downstream clients.
         .filter(|peer| *peer < 0x7ff0)
         .ok_or(Error::Discovery)?;
-    let mut upstream = Netfront::open(upstream_peer)?;
+    log::debug!("operation=upstream.discovered peer={upstream_peer} interface=0");
+    let mut upstream = Netfront::open(upstream_peer).map_err(|source| Error::Transport {
+        operation: "attach_upstream",
+        source,
+    })?;
     let mut watch = store::Watch::new(
         "backend/vif",
         endpoint::now_ns().saturating_add(5_000_000_000),
-    )?;
+    )
+    .map_err(|source| Error::Transport {
+        operation: "watch_clients",
+        source,
+    })?;
     let mut clients: Vec<Client> = Vec::new();
     let mut engine = Engine::new(seed);
     let mut discovery_at = 0;
     let mut announced = false;
     let mut status_at = 0;
+    let mut previous_status = None;
     loop {
         // Capture the event generation before work to avoid a lost wakeup.
         let observed = endpoint::generation();
-        if poweroff.requested(endpoint::now_ns().saturating_add(CONTROL_TIMEOUT_NS))? {
+        if poweroff
+            .requested(endpoint::now_ns().saturating_add(CONTROL_TIMEOUT_NS))
+            .map_err(|source| Error::Transport {
+                operation: "poll_poweroff",
+                source,
+            })?
+        {
             // All firewall state is volatile. Stop admitting packets now; Xen
             // owns final grant/device teardown when the application exits.
             println!("AIRLOCK_FIREWALL_STOP reason=ToolstackPoweroff boot={boot}");
@@ -130,6 +151,15 @@ pub fn run(challenge: Challenge, seed: [u8; 32]) -> Result<(), Error> {
                 return Err(Error::State);
             }
             let idle = matches!(event, Event::Idle);
+            if matches!(
+                event,
+                Event::Synchronized | Event::Changed | Event::Barrier { .. }
+            ) {
+                log::debug!(
+                    "operation=control.poll event={event:?} revision={revision}",
+                    revision = control.projection().generation()
+                );
+            }
             if let Event::Barrier { serial } = event {
                 for client in &mut clients {
                     if matches!(&client.admission, Admission::Barrier(pending) if pending.serial() == serial)
@@ -143,6 +173,12 @@ pub fn run(challenge: Challenge, seed: [u8; 32]) -> Result<(), Error> {
                                 if !engine.attach(certificate.binding()) {
                                     return Err(Error::State);
                                 }
+                                log::debug!(
+                                    "operation=client.admit peer={peer} handle={handle:?} revision={revision}",
+                                    peer = client.interface.peer(),
+                                    handle = client.interface.handle(),
+                                    revision = control.projection().generation()
+                                );
                                 client.owner = Some(Owner::from_binding(certificate.binding()));
                                 client.admission = Admission::Ready(certificate);
                                 client.revision = control.projection().generation();
@@ -170,24 +206,45 @@ pub fn run(challenge: Challenge, seed: [u8; 32]) -> Result<(), Error> {
         }
         // Watch hints are not peer identities. Periodic rereads cover coalescing
         // and failed client startup without spinning on absent native records.
-        let hint = watch.changed(endpoint::now_ns().saturating_add(CONTROL_TIMEOUT_NS))?;
+        let hint = watch
+            .changed(endpoint::now_ns().saturating_add(CONTROL_TIMEOUT_NS))
+            .map_err(|source| Error::Transport {
+                operation: "poll_client_watch",
+                source,
+            })?;
         if hint || now >= discovery_at {
             discover(&mut clients, &mut engine, &mut scratch, now)?;
             discovery_at = now.saturating_add(1_000_000_000);
         }
         retire_closed(&mut clients, &mut engine, now)?;
         for client in &mut clients {
-            let status = client.interface.progress()?;
+            let status = client
+                .interface
+                .progress()
+                .map_err(|source| Error::Transport {
+                    operation: "progress_client",
+                    source,
+                })?;
             if status != Status::Ready {
                 continue;
             }
             let revision = control.projection().generation();
             if client.revision != revision && matches!(client.admission, Admission::Ready(_)) {
+                log::debug!(
+                    "operation=client.invalidate peer={peer} previous_revision={previous} revision={revision}",
+                    peer = client.interface.peer(),
+                    previous = client.revision
+                );
                 client.admission = Admission::Waiting;
                 client.revision = revision;
             }
             if matches!(client.admission, Admission::Waiting) {
                 if let Some(pending) = control.prepare(&mut client.interface)? {
+                    log::debug!(
+                        "operation=client.barrier peer={peer} serial={serial} revision={revision}",
+                        peer = client.interface.peer(),
+                        serial = pending.serial()
+                    );
                     client.admission = Admission::Barrier(pending);
                 }
             }
@@ -237,7 +294,13 @@ pub fn run(challenge: Challenge, seed: [u8; 32]) -> Result<(), Error> {
             }
         }
         for _ in 0..16 {
-            let Some(length) = upstream.poll(&mut scratch)? else {
+            let Some(length) = upstream
+                .poll(&mut scratch)
+                .map_err(|source| Error::Transport {
+                    operation: "receive_upstream",
+                    source,
+                })?
+            else {
                 break;
             };
             let Some(observation) = control.observation()? else {
@@ -270,22 +333,28 @@ pub fn run(challenge: Challenge, seed: [u8; 32]) -> Result<(), Error> {
             return Err(Error::State);
         }
         let now = endpoint::now_ns();
-        // One bounded heartbeat per second, even when control updates arrive
-        // continuously. Packet traffic cannot turn status logging into a flood.
-        if now >= status_at {
+        // Publish transitions immediately; idle service progress has a quieter
+        // heartbeat. The host uses the same interval to bound status freshness.
+        if previous_status != Some(status) || now >= status_at {
             let report = airlock_qubes_network::status::Report {
                 boot: boot.clone(),
                 snapshot: status,
             };
             let report = serde_json::to_string(&report).map_err(|_| Error::State)?;
             println!("AIRLOCK_FIREWALL_STATUS {report}");
-            status_at = now.saturating_add(1_000_000_000);
+            previous_status = Some(status);
+            status_at = now.saturating_add(airlock_qubes_network::status::HEARTBEAT_NS);
         }
         // Maintenance wakeups also drive grant revocation and deadlines when a
         // peer stops producing events. The event counter makes this race safe.
         match endpoint::wait(observed, endpoint::now_ns().saturating_add(1_000_000)) {
             Ok(()) | Err(xen_transport::Error::Timeout) => (),
-            Err(error) => return Err(error.into()),
+            Err(source) => {
+                return Err(Error::Transport {
+                    operation: "wait_for_event",
+                    source,
+                });
+            }
         }
     }
 }
@@ -373,7 +442,12 @@ fn send_upstream(
             ) {
                 return Ok(true);
             }
-            return Ok(upstream.try_send(output.bytes())?);
+            return Ok(upstream
+                .try_send(output.bytes())
+                .map_err(|source| Error::Transport {
+                    operation: "send_upstream",
+                    source,
+                })?);
         }
         return Ok(true);
     }
@@ -383,7 +457,12 @@ fn send_upstream(
     if !output.authorized(observation.projection(), None, endpoint::now_ns()) {
         return Ok(true);
     }
-    Ok(upstream.try_send(output.bytes())?)
+    Ok(upstream
+        .try_send(output.bytes())
+        .map_err(|source| Error::Transport {
+            operation: "send_upstream",
+            source,
+        })?)
 }
 
 /// Retire completed native closures every turn, before selecting queued output.
@@ -391,8 +470,21 @@ fn send_upstream(
 fn retire_closed(clients: &mut Vec<Client>, engine: &mut Engine, now: u64) -> Result<(), Error> {
     let mut index = 0;
     while index < clients.len() {
-        if clients[index].interface.progress()? == Status::Closed {
+        if clients[index]
+            .interface
+            .progress()
+            .map_err(|source| Error::Transport {
+                operation: "retire_client",
+                source,
+            })?
+            == Status::Closed
+        {
             let client = clients.remove(index);
+            log::debug!(
+                "operation=client.retire peer={peer} handle={handle:?}",
+                peer = client.interface.peer(),
+                handle = client.interface.handle()
+            );
             if let Some(owner) = client.owner {
                 engine.retire(owner, now);
             }
@@ -416,22 +508,45 @@ fn discover(
     let length = match store::directory("backend/vif", scratch, deadline) {
         Ok(length) => length,
         Err(xen_transport::Error::Platform(-2)) => 0,
-        Err(error) => return Err(error.into()),
+        Err(source) => {
+            return Err(Error::Transport {
+                operation: "discover_clients",
+                source,
+            });
+        }
     };
     let mut peers =
         airlock_qubes_network::backend::peers(&scratch[..length]).ok_or(Error::Discovery)?;
     let mut index = 0;
     while index < clients.len() {
-        let closed = clients[index].interface.progress()? == Status::Closed;
+        let closed = clients[index]
+            .interface
+            .progress()
+            .map_err(|source| Error::Transport {
+                operation: "retire_client",
+                source,
+            })?
+            == Status::Closed;
         if closed || !peers.contains(&clients[index].interface.peer()) {
             let client = clients.remove(index);
+            log::debug!(
+                "operation=client.retire peer={peer} handle={handle:?}",
+                peer = client.interface.peer(),
+                handle = client.interface.handle()
+            );
             if let Some(owner) = client.owner {
                 engine.retire(owner, now);
             }
             let retired_peer = client.interface.peer();
             // A Closed native owner has already consumed its handle in progress.
             if !closed {
-                client.interface.close()?;
+                client
+                    .interface
+                    .close()
+                    .map_err(|source| Error::Transport {
+                        operation: "close_client",
+                        source,
+                    })?;
             }
             // A native close can remove this backend node after the directory
             // read above. Do not immediately reopen it from that stale hint;
@@ -456,13 +571,22 @@ fn discover(
         ) {
             Ok(1) if scratch[0] == b'1' => (),
             Ok(_) | Err(xen_transport::Error::Platform(-2)) => continue,
-            Err(error) => return Err(error.into()),
+            Err(source) => {
+                return Err(Error::Transport {
+                    operation: "read_client_online",
+                    source,
+                });
+            }
         }
         if clients.len() >= MAX_CLIENTS {
             return Err(Error::Discovery);
         }
+        log::debug!("operation=client.discovered peer={peer} interface=0");
         clients.push(Client {
-            interface: Netback::attach(peer)?,
+            interface: Netback::attach(peer).map_err(|source| Error::Transport {
+                operation: "attach_client",
+                source,
+            })?,
             admission: Admission::Waiting,
             owner: None,
             revision: 0,

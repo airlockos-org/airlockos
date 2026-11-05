@@ -30,7 +30,7 @@ pub const SOURCES: &[GitSource] = &[
     GitSource {
         alias: "xen-transport",
         repository: "https://github.com/airlockos-org/hermit-xen",
-        revision: "7a4fada0fbe415822c13812d00ea31db29f9a71b",
-        hash: "sha256-hRL7acHeBAb4mIwXKSUqJ36p4C4aJjEuhh5O9C6EpOU=",
+        revision: "3e7fa593380e8044c73e2a3cadc8a9f58775e91e",
+        hash: "sha256-hl+CC4ZdgsD0VrysjQ9GGkVTm5+cP6Bd+iVtU8x9HXc=",
     },
 ];

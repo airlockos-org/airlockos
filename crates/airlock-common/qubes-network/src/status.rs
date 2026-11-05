@@ -2,6 +2,12 @@
 //! reachability. A decoded report is an observation; dom0 must bind it to the
 //! selected artifact, protected boot challenge and current Xen incarnation.
 
+/// Maximum interval between unchanged native firewall status publications.
+pub const HEARTBEAT_NS: u64 = 30_000_000_000;
+
+/// Host freshness allowance includes one heartbeat plus scheduling/console slack.
+pub const FRESHNESS_SECONDS: u64 = 45;
+
 #[cfg(not(verus_keep_ghost))]
 use alloc::string::String;
 use vstd::prelude::*;

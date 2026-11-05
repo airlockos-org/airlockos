@@ -37,7 +37,7 @@ ini_core = "0.2"
 freedesktop-icons = "0.4"
 airlock-clipboard-core = { path = "../../../airlock-common/clipboard" }
 airlock-sys-clipboard = { path = "../../airlock-sys-clipboard" }
-xen-transport = { git = "https://github.com/airlockos-org/hermit-xen", rev = "7a4fada0fbe415822c13812d00ea31db29f9a71b", features = ["linux"] }
+xen-transport = { git = "https://github.com/airlockos-org/hermit-xen", rev = "3e7fa593380e8044c73e2a3cadc8a9f58775e91e", features = ["linux"] }
 x11rb = { version = "0.13", features = ["xfixes"] }
 
 [lib]

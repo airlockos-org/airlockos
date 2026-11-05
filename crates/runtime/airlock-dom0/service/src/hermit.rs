@@ -362,10 +362,11 @@ pub fn ready(name: &str, artifact: &Descriptor, xid: u32) -> Result<()> {
     file.take(256 * 1024).read_to_string(&mut output)?;
     if artifact.application.networking() {
         use airlock_qubes_network::status::{Report, State, classify};
-        // The app republishes at least once per second. A live Xen domain with
-        // an old ready line is insufficient evidence of a progressing service.
+        // Allow one unchanged heartbeat plus scheduling/console slack. A live
+        // Xen domain with an old ready line is insufficient progress evidence.
         ensure!(
-            metadata.modified()?.elapsed()?.as_secs() <= 10,
+            metadata.modified()?.elapsed()?.as_secs()
+                <= airlock_qubes_network::status::FRESHNESS_SECONDS,
             "firewall status has expired"
         );
         let latest = output
@@ -560,18 +561,49 @@ pub fn boot_xml_with_scratch(
         &airlock_nix_core::identity::GuestName,
     )>,
 ) -> Result<String> {
-    boot_xml_context(xml, artifact, memory, nonce, authority, scratch, None)
+    boot_xml_context(
+        xml,
+        artifact,
+        memory,
+        BootParameters {
+            nonce,
+            log_filter: None,
+        },
+        authority,
+        scratch,
+        None,
+    )
 }
 
 /// Admit the one standard Qubes upstream vif belonging to this captured relationship.
+/// An optional root-controlled upstream log filter configures application and
+/// kernel diagnostics at boot without changing the immutable executable.
 pub fn boot_xml_with_network(
     xml: &str,
     artifact: &Descriptor,
     memory: u64,
     nonce: &str,
     network: &NetworkAttachment,
+    log_filter: Option<&str>,
 ) -> Result<String> {
-    boot_xml_context(xml, artifact, memory, nonce, None, None, Some(network))
+    boot_xml_context(
+        xml,
+        artifact,
+        memory,
+        BootParameters { nonce, log_filter },
+        None,
+        None,
+        Some(network),
+    )
+}
+
+/// Kernel environment and application identity are encoded separately. Logging
+/// selects diagnostics only and cannot add application arguments or authority.
+struct BootParameters<'a> {
+    /// Fresh execution challenge retained by the host's startup verifier.
+    nonce: &'a str,
+    /// Optional upstream log filter from the root-controlled Qubes feature.
+    log_filter: Option<&'a str>,
 }
 
 /// Keep both profiles on the existing bounded XML reader/writer and loader checks.
@@ -579,7 +611,7 @@ fn boot_xml_context(
     xml: &str,
     artifact: &Descriptor,
     memory: u64,
-    nonce: &str,
+    parameters: BootParameters<'_>,
     authority: Option<u16>,
     scratch: Option<(
         &airlock_nix_core::hermit_artifact::ScratchDisk,
@@ -587,6 +619,20 @@ fn boot_xml_context(
     )>,
     network: Option<&NetworkAttachment>,
 ) -> Result<String> {
+    let BootParameters { nonce, log_filter } = parameters;
+    let mut environment = String::new();
+    if let Some(filter) = log_filter {
+        ensure!(filter.len() <= 256, "Hermit log filter exceeds boot limit");
+        // The kernel parses boot words with upstream shlex before `--`. Quote
+        // each complete word so whitespace/metacharacters cannot add boot flags.
+        for name in ["RUST_LOG", "HERMIT_LOG_LEVEL_FILTER"] {
+            let word = format!("env={name}={filter}");
+            let quoted = shlex::try_quote(&word).context("invalid Hermit log filter")?;
+            environment.push_str(&quoted);
+            environment.push(' ');
+        }
+    }
+
     artifact.validate(false)?;
     ensure!(
         artifact.application.networking() == network.is_some()
@@ -846,7 +892,7 @@ fn boot_xml_context(
                     ensure!(path == ["domain", "os"], "unexpected Hermit OS node");
                     writer.write_event(Event::Start(BytesStart::new("cmdline")))?;
                     writer.write_event(Event::Text(BytesText::new(&format!(
-                        "-- airlock.boot={nonce}{authority_argument}{scratch_argument}"
+                        "{environment}-- airlock.boot={nonce}{authority_argument}{scratch_argument}"
                     ))))?;
                     writer.write_event(Event::End(BytesEnd::new("cmdline")))?;
                     command += 1;

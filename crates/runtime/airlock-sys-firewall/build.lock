@@ -37,6 +37,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 version = "0.8.12"
 
 [[package]]
+checksum = "c982642fa9e8606056828ee9a8505737230110bb1099153c79efe865c59d12ba"
+name = "aho-corasick"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+version = "1.1.5"
+
+[[package]]
 checksum = "4ac6c08a67736554282858203cd9b7ff53cf55f54c34e85689962748a350cbf0"
 name = "align-address"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -538,6 +544,12 @@ checksum = "900d271a03799a1ee8d1ca9b19893b48ca674a9284fefcfb85f05e74ed314217"
 name = "env_filter"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 version = "2.0.0"
+
+[[package]]
+checksum = "de671bd27a75a797dc9ae289ba1e77276e75e2026408aab65185384e2d5cd3f6"
+name = "env_logger"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+version = "0.11.11"
 
 [[package]]
 checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
@@ -1347,6 +1359,24 @@ checksum = "6d94dd2f7cd932d4dc02cc8b2b50dfd38bd079a4e5d79198b99743d7fcf9a4b4"
 name = "redox_syscall"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 version = "0.7.2"
+
+[[package]]
+checksum = "f020237b6c8eed93db2e2cb53c00c60a8e1bc73da7d073199a1180401450218d"
+name = "regex"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+version = "1.13.1"
+
+[[package]]
+checksum = "ad8553b9b26413251cbf30e620595c7a41b3887f03da04579c0e6b0d6a06b4b2"
+name = "regex-automata"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+version = "0.4.18"
+
+[[package]]
+checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
+name = "regex-syntax"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+version = "0.8.11"
 
 [[package]]
 checksum = "a4689e6c2294d81e88dc6261c768b63bc4fcdb852be6d1352498b114f61383b7"
