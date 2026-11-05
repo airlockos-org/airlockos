@@ -86,7 +86,7 @@ impl Instance {
         let digest = Sha256::digest(root.as_os_str().as_encoded_bytes());
         let key = format!("{digest:x}");
         let key = &key[..12];
-        let data = path("AIRLOCK_DATA_ROOT", root.join(".airlock"));
+        let data = airlock_dev_paths::root()?;
         let directory = data.join("qemu-lab").join(key).join(instance);
         ensure!(
             directory
@@ -102,7 +102,10 @@ impl Instance {
             "QEMU lab path cannot contain a comma"
         );
         fs::create_dir_all(&directory)?;
-        let logs = root.join(".airlock-logs/qemu-lab").join(instance);
+        let logs = airlock_dev_paths::path("AIRLOCK_LOG_DIR", "logs")?
+            .join("qemu-lab")
+            .join(key)
+            .join(instance);
         fs::create_dir_all(&logs)?;
         Ok(Self {
             context: Context { root, logs },

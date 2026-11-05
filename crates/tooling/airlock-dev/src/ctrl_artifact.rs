@@ -131,7 +131,7 @@ fn record(root: &Path, binary: &Path, before: &str) -> Result<()> {
         "GUI sources changed during the build; rebuild before testing"
     );
     let binary = fs::canonicalize(binary)?;
-    let receipt = root.join(".airlock-logs/ctrl-build.json");
+    let receipt = airlock_dev_paths::path("AIRLOCK_LOG_DIR", "logs")?.join("ctrl-build.json");
     fs::create_dir_all(receipt.parent().unwrap())?;
     let record =
         json!({"binary": binary, "source_sha256": before, "binary_sha256": digest(&binary)?});
@@ -143,7 +143,8 @@ fn record(root: &Path, binary: &Path, before: &str) -> Result<()> {
 pub(crate) fn execute(root: &Path, action: Action) -> Result<()> {
     match action {
         Action::Verify { binary } => {
-            let receipt = root.join(".airlock-logs/ctrl-build.json");
+            let receipt =
+                airlock_dev_paths::path("AIRLOCK_LOG_DIR", "logs")?.join("ctrl-build.json");
             let record = support::json(&receipt)
                 .context("GUI build receipt missing; run make ctrl-build")?;
             support::print(&json!({"binary": verify(root, &record, binary.as_deref())?}))
@@ -156,6 +157,10 @@ pub(crate) fn execute(root: &Path, action: Action) -> Result<()> {
                     ensure!(
                         Command::new("cargo")
                             .current_dir(root)
+                            .env(
+                                "CARGO_TARGET_DIR",
+                                airlock_dev_paths::path("CARGO_TARGET_DIR", "build/cargo")?
+                            )
                             .args([
                                 "build",
                                 "--locked",
@@ -168,9 +173,7 @@ pub(crate) fn execute(root: &Path, action: Action) -> Result<()> {
                             .success(),
                         "GUI Cargo build failed"
                     );
-                    std::env::var_os("CARGO_TARGET_DIR")
-                        .map(PathBuf::from)
-                        .unwrap_or_else(|| root.join("crates/target"))
+                    airlock_dev_paths::path("CARGO_TARGET_DIR", "build/cargo")?
                         .join("debug/airlock-sys-ctrl-gui")
                 }
                 Builder::Nix => {

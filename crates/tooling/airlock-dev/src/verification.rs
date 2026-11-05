@@ -26,7 +26,9 @@ pub(crate) fn run(root: &Path, prepare: bool) -> Result<u8> {
         "the pinned Verus distribution currently supports x86_64 Linux"
     );
     let pin: Pin = serde_json::from_slice(&fs::read(root.join("crates/verus.json"))?)?;
-    let cache = root.join(".airlock-cache/verus").join(&pin.version);
+    let cache = airlock_dev_paths::root()?
+        .join("cache/verus")
+        .join(&pin.version);
     let provisioned = std::env::var_os("AIRLOCK_VERUS_ROOT").map(std::path::PathBuf::from);
     let tools = provisioned
         .clone()
@@ -122,7 +124,7 @@ pub(crate) fn run(root: &Path, prepare: bool) -> Result<u8> {
             "--locked",
         ])
         .arg("--target-dir")
-        .arg(root.join("target/verus"))
+        .arg(airlock_dev_paths::root()?.join("build/verus"))
         .status()
         .context("run pinned Verus")?;
     Ok(if status.success() { 0 } else { 1 })

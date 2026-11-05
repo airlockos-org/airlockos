@@ -55,6 +55,7 @@ const MANIFESTS: &[(&str, &str)] = manifests![
     "runtime/airlock-cli",
     "tooling/airlock-image",
     "tooling/airlock-dev",
+    "tooling/airlock-dev/paths",
     "runtime/airlock-dom0/service",
     "runtime/airlock-sys-ctrl/gui",
     "runtime/airlock-sys-ctrl/service",

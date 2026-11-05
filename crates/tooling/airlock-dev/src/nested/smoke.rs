@@ -99,7 +99,7 @@ impl Drop for Cancellation {
 }
 
 /// Download into the explicit workstation cache, publishing only a complete transfer.
-fn download(context: &Context, url: &str) -> Result<PathBuf> {
+fn download(url: &str) -> Result<PathBuf> {
     let name = url
         .split('?')
         .next()
@@ -111,7 +111,7 @@ fn download(context: &Context, url: &str) -> Result<PathBuf> {
         .context("URL has no filename")?;
     let directory = path(
         "AIRLOCK_QUBES_CACHE_DIR",
-        context.root.join(".airlock-cache/rpms"),
+        airlock_dev_paths::root()?.join("cache/rpms"),
     );
     fs::create_dir_all(&directory)?;
     let destination = directory.join(name);
@@ -161,7 +161,7 @@ fn assets(context: &Context) -> Result<BTreeMap<String, String>> {
         selected.push(("AIRLOCK_QUBES_TEMPLATE_RPM","AIRLOCK_QUBES_TEMPLATE_URL","https://ftp.qubes-os.org/repo/yum/r4.3/templates-itl/rpm/qubes-template-fedora-43-xfce-4.3.0-202601041226.noarch.rpm"));
     }
     for (key, url, default) in selected {
-        let source = download(context, &setting(url, default))?;
+        let source = download(&setting(url, default))?;
         let guest = format!(
             "/var/cache/airlock/qubes-rpms/{name}",
             name = source
@@ -438,7 +438,8 @@ fn scenario(
     let output = context.logs.join(format!("{prefix}.json"));
     let reporter = path(
         "AIRLOCK_TEST_REPORT_BIN",
-        context.root.join("crates/target/debug/airlock-test-report"),
+        airlock_dev_paths::path("CARGO_TARGET_DIR", "build/cargo")?
+            .join("debug/airlock-test-report"),
     );
     let extracted = support::output(
         Command::new(reporter)

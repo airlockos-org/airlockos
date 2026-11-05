@@ -108,7 +108,7 @@ fn flow(name: &str, serial: bool, warm: bool, baseline: bool) -> Result<()> {
         .unwrap_or_else(|_| "1".into())
         .parse::<usize>()?;
     let root = common::root();
-    let logs = system::logs(&root, &format!("vm-lanes/{lane}/{name}", lane = lease.lane))?;
+    let logs = system::logs(&format!("vm-lanes/{lane}/{name}", lane = lease.lane))?;
     let mut command = Command::new("make");
     command
         .arg("-C")
@@ -203,7 +203,7 @@ fn staged_configuration() -> Result<()> {
     );
     let _lease = Lease::acquire(true)?;
     let root = common::root();
-    let logs = system::logs(&root, "vm-staged")?;
+    let logs = system::logs("vm-staged")?;
     let message = std::env::var("AIRLOCK_CONFIG_APPLY_MESSAGE").unwrap_or_else(|_| {
         format!(
             "rust-staged-{timestamp}",
@@ -331,7 +331,7 @@ fn gpu_lab_vm() -> Result<()> {
     );
     let _lease = Lease::acquire(true)?;
     let root = common::root();
-    let logs = system::logs(&root, "gpu-lab-vm")?;
+    let logs = system::logs("gpu-lab-vm")?;
     let data = PathBuf::from(std::env::var_os("AIRLOCK_DATA_ROOT").context("Airlock data root")?);
     fs::create_dir_all(data.join("gpu-lab-tests"))?;
     let vm = tempfile::Builder::new()

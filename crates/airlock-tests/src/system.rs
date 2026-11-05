@@ -71,10 +71,8 @@ impl Drop for Job {
 }
 
 /// Resolve the explicitly selected evidence directory without changing deployed state.
-pub fn logs(root: &Path, name: &str) -> Result<PathBuf> {
-    let base = std::env::var_os("AIRLOCK_LOG_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| root.join(".airlock-logs"));
+pub fn logs(name: &str) -> Result<PathBuf> {
+    let base = airlock_dev_paths::path("AIRLOCK_LOG_DIR", "logs")?;
     let path = base.join(name);
     fs::create_dir_all(&path)?;
     Ok(path)

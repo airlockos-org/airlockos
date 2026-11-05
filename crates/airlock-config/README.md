@@ -16,12 +16,13 @@ ordinary host package/file changes from arbitrary modules, whose automatic
 activation is staged for the next boot. Commit Rust declarations and dependency
 locks for review. Preparation never applies a machine change.
 
-Generated Nix is an inspectable build interface kept in the ignored
-`target/nix/<hash>/` directory of each checkout. `make prepare` emits this
+Generated Nix is an inspectable build interface kept in the disposable
+`$AIRLOCK_DATA_ROOT/cache/prepared/<hash>/` directory. `make prepare` emits this
 content-addressed source tree and prints its `path:` flake reference. Set
-`AIRLOCK_PREPARED_CACHE` to use another ignored directory or an external cache. Its receipt records the source revision, working source contents and
-prepared file hashes. Nix evaluates that tree after Rust compilation finishes;
-it never compiles the authoring program during evaluation. Build and deployment
-records retain the required artifacts independently of disposable build output.
-Source maps remain available through inspection exports. Evidence belongs in
-`.airlock-logs/`.
+`AIRLOCK_PREPARED_CACHE` to select another directory explicitly. Its receipt
+records the source revision, working source contents and prepared file hashes.
+Nix evaluates that tree after Rust compilation finishes; it never compiles the
+authoring program during evaluation. Production build and deployment records
+retain required artifacts independently of disposable workstation output.
+Source maps remain available through inspection exports. Raw development logs
+and receipts live under `$AIRLOCK_LOG_DIR`; lasting findings belong in Git.

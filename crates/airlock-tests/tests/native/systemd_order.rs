@@ -143,7 +143,7 @@ ExecStart={peer} systemd-order-start {marker}
             None,
         )?
         .checked()?;
-        let logs = common::root().join(".airlock-logs/gui-gpu-boot-order");
+        let logs = airlock_dev_paths::path("AIRLOCK_LOG_DIR", "logs")?.join("gui-gpu-boot-order");
         fs::create_dir_all(&logs)?;
         fs::write(
             logs.join(format!("{dependency}-{setup_ok}-{daemon_ok}.json")),

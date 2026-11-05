@@ -21,6 +21,7 @@ path = "src/qubes_probe.rs"
 required-features = ["qubes"]
 
 [dependencies]
+airlock-dev-paths = { path = "../tooling/airlock-dev/paths" }
 clap = { version = "4.5", features = ["derive"] }
 airlock-nix-core = { path = "../airlock-common/nix", features = ["runtime"] }
 airlock-dom0-service = { path = "../runtime/airlock-dom0/service", default-features = false, optional = true }

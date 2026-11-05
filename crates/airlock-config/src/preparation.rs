@@ -283,18 +283,19 @@ pub fn inspection(directory: &Path) -> Result<()> {
 /// Cargo build output stays outside the prepared tree; its resulting program receives the export path.
 /// A locked, stable source mirror preserves Cargo fingerprints across Nix-only edits and new snapshots.
 /// Cargo still tracks real compiler inputs, including files explicitly embedded by Rust code.
+/// Requires absolute `AIRLOCK_CARGO_VENDOR` and `CARGO_TARGET_DIR` paths supplied
+/// by the workstation environment; missing configuration never selects checkout output.
 pub fn compile(source: &Path, applications: &Path, destination: &Path) -> Result<()> {
-    let vendor = std::env::var("AIRLOCK_CARGO_VENDOR").unwrap_or_else(|_| {
-        applications
-            .parent()
-            .unwrap_or(applications)
-            .join(".airlock-cache/authoring-vendor")
-            .to_string_lossy()
-            .into_owned()
-    });
-    let target = std::env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| applications.join("target"));
+    let vendor = std::env::var("AIRLOCK_CARGO_VENDOR")
+        .map_err(|_| "set AIRLOCK_CARGO_VENDOR or invoke preparation through make")?;
+    let target = PathBuf::from(
+        std::env::var_os("CARGO_TARGET_DIR")
+            .ok_or("set CARGO_TARGET_DIR or invoke preparation through make")?,
+    );
+    if !Path::new(&vendor).is_absolute() || !target.is_absolute() {
+        return Err("authoring vendor and Cargo output directories must be absolute".into());
+    }
+
     compile_in(source, applications, destination, &target, &vendor)
 }
 

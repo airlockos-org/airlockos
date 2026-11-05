@@ -1,11 +1,12 @@
 SHELL := bash
 .SHELLFLAGS := -euo pipefail -c
 ROOT := $(abspath ../..)
-LOG_DIR := $(ROOT)/.airlock-logs/rusix-topology
-TARGET_DIR := $(ROOT)/crates/target
-CAPTURE_SENDER ?= $(ROOT)/crates/target/debug/airlock-sys-gui-service
-CAPTURE_RECEIVER ?= $(ROOT)/crates/target/debug/airlock-vm-service
-PLANNER ?= $(ROOT)/crates/target/debug/airlock-dom0-service
+include $(ROOT)/development.mk
+LOG_DIR := $(AIRLOCK_LOG_DIR)/rusix-topology
+TARGET_DIR := $(CARGO_TARGET_DIR)
+CAPTURE_SENDER ?= $(TARGET_DIR)/debug/airlock-sys-gui-service
+CAPTURE_RECEIVER ?= $(TARGET_DIR)/debug/airlock-vm-service
+PLANNER ?= $(TARGET_DIR)/debug/airlock-dom0-service
 # An explicit inspection scenario, not an observation of the running machine.
 RUNNING_VMS ?= sys-net sys-firewall sys-gui sys-ctrl usr-assistant usr-home
 
@@ -14,8 +15,6 @@ RUNNING_VMS ?= sys-net sys-firewall sys-gui sys-ctrl usr-assistant usr-home
 build:
 	@mkdir -p "$(LOG_DIR)"
 	cargo build -p airlock-config --examples --bin airlock-config --locked --target-dir "$(TARGET_DIR)" --message-format=json > "$(LOG_DIR)/build-artifacts.jsonl" 2> "$(LOG_DIR)/build.log"
-
-AIRLOCK_PREPARED_CACHE ?= $(ROOT)/target/nix
 
 prepare generate generate-packages generate-desktop generate-machine generate-flakes generate-runtime generate-all: build
 	"$(TARGET_DIR)/debug/airlock-config" prepare "$(ROOT)" "$(AIRLOCK_PREPARED_CACHE)"

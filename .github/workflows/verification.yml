@@ -11,6 +11,10 @@ jobs:
   deployment-planning:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    env:
+      AIRLOCK_DATA_ROOT: ${{ runner.temp }}/airlock
+      AIRLOCK_LOG_DIR: ${{ runner.temp }}/airlock/logs
+      CARGO_TARGET_DIR: ${{ runner.temp }}/airlock/build/cargo
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -22,18 +26,18 @@ jobs:
         run: rustup toolchain install stable --profile minimal
       - name: Verify production deployment, planning, diagnostics, provisioning and build-source logic
         run: |
-          mkdir -p .airlock-logs/verus
+          mkdir -p "$AIRLOCK_LOG_DIR/verus"
           set -o pipefail
-          make verify-prepare 2>&1 | tee .airlock-logs/verus/verification.log
+          make verify-prepare 2>&1 | tee "$AIRLOCK_LOG_DIR/verus/verification.log"
       - name: Prepare Cargo sources for offline profile comparisons
         run: cargo fetch --locked --manifest-path crates/Cargo.toml
       - name: Exercise ordinary Cargo compilation, planning and gate behavior
         run: cargo test --locked --manifest-path crates/Cargo.toml -p airlock-machine-planning -p airlock-deployment-core -p airlock-machine-core -p airlock-nix-core -p airlock-diagnostics -p airlock-provisioning-core -p airlock-build-plan -p airlock-build --features airlock-diagnostics/runtime,airlock-machine-planning/wire
-      - name: Retain verification output
+      - name: Upload temporary verification output
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: verus-verification
-          path: .airlock-logs/verus/
+          path: ${{ runner.temp }}/airlock/logs/verus/
           include-hidden-files: true
           retention-days: 7

@@ -154,7 +154,7 @@ fn execute(args: Args) -> Result<u8> {
         Action::BuildPhase { stage, arguments } => install_log::phase(&stage, &arguments),
         Action::QemuLab(args) => nested::qemu_lab::execute(&root, args),
         Action::HermitLocks { integration } => hermit_locks::run(&root, &integration),
-        Action::BuildBudget { arguments } => build_budget::run(&root, &arguments),
+        Action::BuildBudget { arguments } => build_budget::run(&arguments),
         Action::Nested { command } => nested::execute(&root, command),
         Action::WithEnvironment { arguments } => {
             environment::Environment::load()?.run(&root, &arguments)

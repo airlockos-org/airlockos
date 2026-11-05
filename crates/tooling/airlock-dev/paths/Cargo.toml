@@ -1,0 +1,11 @@
+[package]
+name = "airlock-dev-paths"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+publish = false
+license = "MIT"
+description = "Disposable workstation artifact paths for Airlock development tools"
+
+[lib]
+path = "src/lib.rs"

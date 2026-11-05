@@ -591,8 +591,8 @@ pub(crate) fn execute(root: &Path, mode: Mode) -> Result<()> {
         "Airlock store directory is missing: {store}",
         store = store.display()
     );
-    let logs = env.path("AIRLOCK_LOG_DIR", root.join(".airlock-logs"));
-    let vm = env.path("AIRLOCK_VM_DIR", root.join(".airlock-vm"));
+    let logs = airlock_dev_paths::path("AIRLOCK_LOG_DIR", "logs")?;
+    let vm = env.path("AIRLOCK_VM_DIR", data.join("vm"));
     let links = env.path("AIRLOCK_RESULT_LINK_DIR", data.join("result-links"));
     ensure!(
         enabled("AIRLOCK_GC_ALLOW_RUNNING_VM") || !vm_running(&vm)?,

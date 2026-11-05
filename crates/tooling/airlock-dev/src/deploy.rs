@@ -164,7 +164,9 @@ fn build(root: &Path, profile: Profile) -> Result<(String, String, String)> {
         clean(root)? == (dev.clone(), machine.clone()),
         "repository changed during build; retry from a clean commit"
     );
-    let logs = root.join(".airlock-logs/machine-deploy").join(&dev);
+    let logs = airlock_dev_paths::path("AIRLOCK_LOG_DIR", "logs")?
+        .join("machine-deploy")
+        .join(&dev);
     fs::create_dir_all(&logs)?;
     let (mut pin, _source) = repository::command(
         root,
@@ -245,8 +247,8 @@ fn repair(
 ) -> Result<(String, String, String)> {
     let starting = clean(root)?;
     let snapshot = repair_snapshot(root, profile, session)?;
-    let logs = root
-        .join(".airlock-logs/machine-host-repair")
+    let logs = airlock_dev_paths::path("AIRLOCK_LOG_DIR", "logs")?
+        .join("machine-host-repair")
         .join(&starting.0);
     fs::create_dir_all(&logs)?;
     let path = logs.join("snapshot.json");
@@ -379,7 +381,8 @@ pub(crate) fn execute(root: &Path, args: Args) -> Result<u8> {
     };
     let updated = if args.update_coordinator {
         let starting = clean(root)?;
-        fs::create_dir_all(root.join(".airlock-logs"))?;
+        let logs = airlock_dev_paths::path("AIRLOCK_LOG_DIR", "logs")?;
+        fs::create_dir_all(&logs)?;
         let package = built_path(&nix(
             root,
             &[
@@ -387,7 +390,7 @@ pub(crate) fn execute(root: &Path, args: Args) -> Result<u8> {
                 &format!("{}/airlock-machine#airlock-dom0-service", root.display()),
                 "--json",
                 "--out-link",
-                root.join(".airlock-logs/machine-coordinator")
+                logs.join("machine-coordinator")
                     .to_str()
                     .context("coordinator link")?,
             ],

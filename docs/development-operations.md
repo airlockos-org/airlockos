@@ -1,5 +1,14 @@
 # Development operations
 
+Workstation artifacts are disposable. `AIRLOCK_DATA_ROOT` defaults to
+`/run/media/user/data/airlock`; when that volume is absent, select an absolute
+root explicitly. Logs, dependency caches, Cargo outputs, prepared sources and
+test VM state default underneath it and are recreated as needed. Git holds
+source and lasting development findings. Deleting the data root resets test VMs
+and may require preparing dependencies and rebuilding tools; it must not lose
+work, credentials, unique inputs or persistent user data. No checkout symlink or
+checkout-local fallback is used.
+
 Run from the parent airlock checkout. Both repositories must be committed, and
 `airlock-machine` must match the parent pin. `DEPLOY_TARGET` is the confirmed
 SSH target for the machine's usr-assistant VM. The workstation commands require
@@ -26,9 +35,10 @@ The combined command streams stdout and stderr to the terminal and to
 and elapsed seconds. `summary.json` records the command, source revisions, phase
 timings and exit status; it is updated while the command runs. `latest` points to
 the newest started run and `latest-failed` to the most recently finished failed
-or interrupted run. Without `AIRLOCK_LOG_DIR`, logs use `.airlock-logs/usb-install/`
-in the checkout. Logging starts after the workstation launcher has bootstrapped
-itself, before source validation and image-tool compilation. Password input and
+or interrupted run. Logs default to `$AIRLOCK_DATA_ROOT/logs/usb-install/`;
+`AIRLOCK_LOG_DIR` explicitly selects another log directory. Logging starts after
+the workstation launcher has bootstrapped itself, before source validation and
+image-tool compilation. Password input and
 direct terminal prompts are not recorded. Logs are retained until removed.
 
 ## Deployment
@@ -93,8 +103,8 @@ a stopped instance's writable disk and EFI variables.
 
 Instances are isolated by worktree and `QEMU_LAB_INSTANCE`; select a distinct
 `QEMU_LAB_SSH_PORT` when running several concurrently. Logs live under
-`.airlock-logs/qemu-lab/`. The native `airlock-dev qemu-lab` command also exposes
-headless startup and explicit forced shutdown. A changed image requires a reset
+`$AIRLOCK_LOG_DIR/qemu-lab/<worktree>/<instance>/`. The native `airlock-dev qemu-lab`
+command also exposes headless startup and explicit forced shutdown. A changed image requires a reset
 or a new instance, so rebuilding cannot silently replace a development disk.
 Image build output is retained in the instance's log directory. Ordinary updates
 use the `qemu-lab` release profile through the existing reviewed deployment path.

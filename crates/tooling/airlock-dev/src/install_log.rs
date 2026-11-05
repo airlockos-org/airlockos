@@ -205,10 +205,7 @@ pub(crate) fn phase(stage: &str, arguments: &[OsString]) -> Result<u8> {
 /// Start a private transcript before source checks, and retain its outcome even if spawning fails.
 pub(crate) fn run(root: &Path, arguments: &[OsString]) -> Result<u8> {
     ensure!(!arguments.is_empty(), "USB install log requires a command");
-    let parent = std::env::var_os("AIRLOCK_LOG_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| root.join(".airlock-logs"))
-        .join("usb-install");
+    let parent = airlock_dev_paths::path("AIRLOCK_LOG_DIR", "logs")?.join("usb-install");
     fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)

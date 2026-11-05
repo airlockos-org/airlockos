@@ -388,7 +388,7 @@ pub(crate) fn execute(root: &Path, action: Action) -> Result<()> {
             let (tree, _lease) = repository::prepare_leased(root)?;
             if let Some(name) = pin {
                 airlock_config::preparation::cache::pin(
-                    &repository::prepared_cache(root),
+                    &repository::prepared_cache()?,
                     &tree,
                     &name,
                 )
@@ -398,24 +398,16 @@ pub(crate) fn execute(root: &Path, action: Action) -> Result<()> {
             json!({"source": tree, "flake": format!("path:{path}", path = tree.display())})
         }
         Action::Prune { keep, apply } => serde_json::to_value(
-            airlock_config::preparation::cache::prune(
-                &repository::prepared_cache(root),
-                keep,
-                apply,
-            )
-            .map_err(|error| anyhow::anyhow!("{error}"))?,
+            airlock_config::preparation::cache::prune(&repository::prepared_cache()?, keep, apply)
+                .map_err(|error| anyhow::anyhow!("{error}"))?,
         )?,
         Action::Pin { tree, name } => {
-            airlock_config::preparation::cache::pin(
-                &repository::prepared_cache(root),
-                &tree,
-                &name,
-            )
-            .map_err(|error| anyhow::anyhow!("{error}"))?;
+            airlock_config::preparation::cache::pin(&repository::prepared_cache()?, &tree, &name)
+                .map_err(|error| anyhow::anyhow!("{error}"))?;
             json!({"pin": name, "source": tree})
         }
         Action::Unpin { name } => {
-            airlock_config::preparation::cache::unpin(&repository::prepared_cache(root), &name)
+            airlock_config::preparation::cache::unpin(&repository::prepared_cache()?, &name)
                 .map_err(|error| anyhow::anyhow!("{error}"))?;
             json!({"released": name})
         }

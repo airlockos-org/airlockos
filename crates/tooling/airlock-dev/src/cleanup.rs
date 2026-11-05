@@ -73,11 +73,11 @@ pub(crate) fn execute(root: &Path, mode: Mode) -> Result<()> {
         return Ok(());
     }
     let environment = Environment::load()?;
-    let data = environment.path("AIRLOCK_DATA_ROOT", root.join(".airlock"));
-    let vm = environment.path("AIRLOCK_VM_DIR", root.join(".airlock-vm"));
-    let logs = environment.path("AIRLOCK_LOG_DIR", root.join(".airlock-logs"));
+    let data = airlock_dev_paths::root()?;
+    let vm = environment.path("AIRLOCK_VM_DIR", data.join("vm"));
+    let logs = airlock_dev_paths::path("AIRLOCK_LOG_DIR", "logs")?;
     let links = environment.path("AIRLOCK_RESULT_LINK_DIR", data.join("result-links"));
-    let cache = environment.path("AIRLOCK_QUBES_CACHE_DIR", root.join(".airlock-cache/rpms"));
+    let cache = environment.path("AIRLOCK_QUBES_CACHE_DIR", data.join("cache/rpms"));
     let cache = if cache.file_name().is_some_and(|name| name == "rpms") {
         cache.parent().unwrap().to_owned()
     } else {

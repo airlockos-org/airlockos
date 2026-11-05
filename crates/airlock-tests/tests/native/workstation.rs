@@ -229,7 +229,7 @@ fn combined_usb_build_prepares_once_and_provisions_only_its_successful_image() -
         let vendor = if outcome == "source_change" {
             fixture.path("authoring input with spaces")
         } else {
-            fixture.root.join(".airlock-cache/authoring-vendor")
+            fixture.path("data/cache/authoring-vendor")
         };
         if outcome != "vendor_missing" {
             fs::create_dir_all(&vendor)?;
@@ -431,12 +431,7 @@ fn image_build_rejects_stale_application_content_before_prerequisites() -> Resul
         assert!(String::from_utf8_lossy(&output.stderr).contains("is stale"));
     }
 
-    assert!(
-        !fixture
-            .root
-            .join(".airlock-logs/build-cpu-budget.json")
-            .exists()
-    );
+    assert!(!fixture.path("logs/build-cpu-budget.json").exists());
     assert!(fixture.calls("nix")?.is_empty());
     assert!(fixture.calls("cargo")?.is_empty());
     let run = fixture.path("install logs/usb-install/latest-failed");
@@ -549,6 +544,7 @@ prerequisite:
             .arg(fixture.path())
             .args(["build-budget", "--", "make", "--no-print-directory", "-f"])
             .arg(&makefile)
+            .env("AIRLOCK_LOG_DIR", fixture.path().join("logs"))
             .env("NIX_CONFIG", config)
             .env("CARGO_BUILD_JOBS", "999"),
         None,
@@ -562,7 +558,7 @@ prerequisite:
     assert_eq!(observations[0]["stage"], "prerequisite");
     assert_eq!(observations[1]["stage"], "all");
     let budget: Value = serde_json::from_slice(&fs::read(
-        fixture.path().join(".airlock-logs/build-cpu-budget.json"),
+        fixture.path().join("logs/build-cpu-budget.json"),
     )?)?;
     let cpus = budget["build_cpus"].as_array().context("build CPUs")?;
     let reserved = budget["reserved_core_cpus"]
@@ -590,7 +586,7 @@ prerequisite:
 
     // GNU Make executes recursive recipe lines under --dry-run. The outer wrapper
     // therefore runs, while every actual image-build prerequisite remains inert.
-    let budget_path = fixture.path().join(".airlock-logs/build-cpu-budget.json");
+    let budget_path = fixture.path().join("logs/build-cpu-budget.json");
     for goal in [
         "usb-dev-image",
         "usb-dom0-console-image",
@@ -612,6 +608,7 @@ prerequisite:
                     dev = quote(&dev),
                     root = quote(fixture.path())
                 ))
+                .env("AIRLOCK_LOG_DIR", fixture.path().join("logs"))
                 .env_remove("AIRLOCK_IMAGE_BUILD_LIMITED"),
             None,
         )?
@@ -731,6 +728,7 @@ fn image_build_budget_is_inherited_by_nix_builders() -> Result<()> {
         Command::new(binary("AIRLOCK_DEV_BIN", "airlock-dev"))
             .arg("--repository-root")
             .arg(fixture.path())
+            .env("AIRLOCK_LOG_DIR", fixture.path().join("logs"))
             .args(["build-budget", "--"])
             .arg(common::tool("nix")?)
             .args(["--extra-experimental-features", "nix-command", "--store"])
@@ -750,7 +748,7 @@ fn image_build_budget_is_inherited_by_nix_builders() -> Result<()> {
         std::str::from_utf8(&result)?.trim().parse()?;
     let observed = fs::read_to_string(store.join(output.as_str().trim_start_matches('/')))?;
     let budget: Value = serde_json::from_slice(&fs::read(
-        fixture.path().join(".airlock-logs/build-cpu-budget.json"),
+        fixture.path().join("logs/build-cpu-budget.json"),
     )?)?;
     let list = observed
         .lines()
@@ -948,7 +946,7 @@ fn local_nix_keeps_prepared_source_leased_until_exit() -> Result<()> {
     .canonicalize()?;
     assert_eq!(
         prepared.parent(),
-        Some(fixture.root.join("target/nix").as_path())
+        Some(fixture.path("data/cache/prepared").as_path())
     );
     assert!(!prepared.join(".git").exists());
     assert!(!prepared.join("target").exists());
@@ -1080,7 +1078,7 @@ fn workstation_nix_requires_guarded_store_selection() -> Result<()> {
     let mut command = Command::new("bash");
     for (key, _) in std::env::vars_os() {
         if key.to_string_lossy().starts_with("AIRLOCK_")
-            || ["NIX_CONFIG", "TMPDIR", "XDG_CACHE_HOME"]
+            || ["NIX_CONFIG", "TMPDIR", "XDG_CACHE_HOME", "CARGO_TARGET_DIR"]
                 .iter()
                 .any(|name| key == *name)
         {
@@ -1108,6 +1106,23 @@ fn workstation_nix_requires_guarded_store_selection() -> Result<()> {
             store = data.join("nix-root").display()
         )
     );
+    assert!(data.join("logs").is_dir());
+    assert!(data.join("cache/prepared").is_dir());
+    assert!(data.join("build/cargo").is_dir());
+    fs::remove_dir_all(&data)?;
+    run(&mut command, None)?.checked()?;
+    assert!(data.join("logs").is_dir());
+    assert!(!fixture.root.join(".airlock-logs").exists());
+    assert!(!fixture.root.join(".airlock-cache").exists());
+
+    let rejected = run(
+        fixture
+            .command(&["environment", "exports"])
+            .env("AIRLOCK_DATA_ROOT", "relative"),
+        None,
+    )?;
+    assert!(!rejected.status.success());
+    assert!(fixture.calls("nix")?.is_empty());
     let mut command = fixture.command(&["nix", "--", "--version"]);
     command
         .env_remove("AIRLOCK_USE_HOST_NIX_STORE")
@@ -1296,7 +1311,7 @@ fn host_repair_preserves_recorded_image_source() -> Result<()> {
         None,
     )?
     .checked()?;
-    let directory = fs::read_dir(fixture.root.join(".airlock-logs/machine-host-repair"))?
+    let directory = fs::read_dir(fixture.path("logs/machine-host-repair"))?
         .next()
         .context("repair evidence")??
         .path();

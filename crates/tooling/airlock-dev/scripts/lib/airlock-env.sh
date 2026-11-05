@@ -3,7 +3,7 @@
 ROOT="${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
 if [[ -z "${AIRLOCK_DEV_BIN:-}" ]]; then
     make --no-print-directory -C "$ROOT" dev-tools-bootstrap || return
-    _AIRLOCK_ENV_NATIVE="$(cd "$ROOT" && realpath "${CARGO_TARGET_DIR:-crates/target}/debug/airlock-dev")" || return
+    _AIRLOCK_ENV_NATIVE="$(make --silent --no-print-directory -C "$ROOT" dev-tools-path)" || return
 else
     _AIRLOCK_ENV_NATIVE="$AIRLOCK_DEV_BIN"
 fi

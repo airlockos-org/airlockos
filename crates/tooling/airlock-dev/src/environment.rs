@@ -55,56 +55,55 @@ fn value(key: &str) -> Option<OsString> {
 impl Environment {
     /// Select defaults and create only the configured Airlock data directories.
     pub fn load() -> Result<Self> {
-        let data = value("AIRLOCK_DATA_ROOT").map(PathBuf::from).or_else(|| {
-            let media = Path::new("/run/media/user/data");
-            (media.is_dir() && rustix::fs::access(media, rustix::fs::Access::WRITE_OK).is_ok())
-                .then(|| media.join("airlock"))
-        });
+        let data = airlock_dev_paths::root()?;
         let host = std::env::var("AIRLOCK_USE_HOST_NIX_STORE").as_deref() == Ok("1");
-        ensure!(
-            data.is_some() || host,
-            "/run/media/user/data is not available; refusing to use the host Nix store by default; set AIRLOCK_DATA_ROOT or explicitly set AIRLOCK_USE_HOST_NIX_STORE=1"
-        );
         let mut values = BTreeMap::new();
-        if let Some(data) = data {
-            let defaults = [
-                ("AIRLOCK_DATA_ROOT", data.clone()),
-                ("AIRLOCK_VM_DIR", data.join("vm")),
-                ("AIRLOCK_LOG_DIR", data.join("logs")),
-                ("AIRLOCK_QUBES_CACHE_DIR", data.join("cache/rpms")),
-                ("AIRLOCK_RESULT_LINK_DIR", data.join("result-links")),
-                ("AIRLOCK_NIX_ROOT", data.join("nix-root")),
-                ("TMPDIR", data.join("tmp")),
-                ("XDG_CACHE_HOME", data.join("cache/xdg")),
-            ];
-            for (key, fallback) in defaults {
-                let path = value(key).map(PathBuf::from).unwrap_or(fallback);
-                ensure!(path.is_absolute(), "{key} must be absolute");
-                fs::create_dir_all(&path)?;
-                values.insert(OsString::from(key), path.into_os_string());
-            }
-            let root = values.get(OsStr::new("AIRLOCK_NIX_ROOT")).unwrap().clone();
-            values.insert(
-                "AIRLOCK_NIX_STORE".into(),
-                value("AIRLOCK_NIX_STORE").unwrap_or(root),
+        let defaults = [
+            ("AIRLOCK_DATA_ROOT", data.clone()),
+            ("AIRLOCK_VM_DIR", data.join("vm")),
+            ("AIRLOCK_LOG_DIR", data.join("logs")),
+            ("AIRLOCK_QUBES_CACHE_DIR", data.join("cache/rpms")),
+            ("AIRLOCK_RESULT_LINK_DIR", data.join("result-links")),
+            ("AIRLOCK_NIX_ROOT", data.join("nix-root")),
+            ("AIRLOCK_PREPARED_CACHE", data.join("cache/prepared")),
+            ("CARGO_TARGET_DIR", data.join("build/cargo")),
+            ("AIRLOCK_TMPDIR", data.join("tmp")),
+            ("TMPDIR", data.join("tmp")),
+            ("XDG_CACHE_HOME", data.join("cache/xdg")),
+        ];
+        for (key, fallback) in defaults {
+            let path = value(key).map(PathBuf::from).unwrap_or(fallback);
+            ensure!(path.is_absolute(), "{key} must be absolute");
+            fs::create_dir_all(&path)?;
+            values.insert(OsString::from(key), path.into_os_string());
+        }
+        values.insert(
+            "AIRLOCK_CARGO_VENDOR".into(),
+            airlock_dev_paths::path("AIRLOCK_CARGO_VENDOR", "cache/authoring-vendor")?
+                .into_os_string(),
+        );
+
+        let root = values.get(OsStr::new("AIRLOCK_NIX_ROOT")).unwrap().clone();
+        values.insert(
+            "AIRLOCK_NIX_STORE".into(),
+            value("AIRLOCK_NIX_STORE").unwrap_or(root),
+        );
+        if !host && std::env::var("AIRLOCK_NIX_CONFIGURED").as_deref() != Ok("1") {
+            let store = values.get(OsStr::new("AIRLOCK_NIX_STORE")).unwrap();
+            let store = store
+                .to_str()
+                .context("private Nix store path is not UTF-8")?;
+            ensure!(
+                !store.contains(['\n', '\r']),
+                "private Nix store path contains a line break"
             );
-            if !host && std::env::var("AIRLOCK_NIX_CONFIGURED").as_deref() != Ok("1") {
-                let store = values.get(OsStr::new("AIRLOCK_NIX_STORE")).unwrap();
-                let store = store
-                    .to_str()
-                    .context("private Nix store path is not UTF-8")?;
-                ensure!(
-                    !store.contains(['\n', '\r']),
-                    "private Nix store path contains a line break"
-                );
-                let mut config = std::env::var("NIX_CONFIG").unwrap_or_default();
-                if !config.is_empty() {
-                    config.push('\n');
-                }
-                config.push_str(&format!("store = {store}"));
-                values.insert("NIX_CONFIG".into(), config.into());
-                values.insert("AIRLOCK_NIX_CONFIGURED".into(), "1".into());
+            let mut config = std::env::var("NIX_CONFIG").unwrap_or_default();
+            if !config.is_empty() {
+                config.push('\n');
             }
+            config.push_str(&format!("store = {store}"));
+            values.insert("NIX_CONFIG".into(), config.into());
+            values.insert("AIRLOCK_NIX_CONFIGURED".into(), "1".into());
         }
         Ok(Self { values })
     }

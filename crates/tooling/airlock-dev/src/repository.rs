@@ -163,11 +163,12 @@ fn local_source(root: &Path, argument: &OsStr) -> Option<(PathBuf, String)> {
     Some((relative, suffix))
 }
 
-/// Keep prepared source under this checkout's ignored build output unless explicitly overridden.
-pub(crate) fn prepared_cache(root: &Path) -> PathBuf {
-    std::env::var_os("AIRLOCK_PREPARED_CACHE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| root.join("target/nix"))
+/// Keep prepared source in the disposable development cache unless explicitly overridden.
+pub(crate) fn prepared_cache() -> Result<PathBuf> {
+    Ok(airlock_dev_paths::path(
+        "AIRLOCK_PREPARED_CACHE",
+        "cache/prepared",
+    )?)
 }
 
 /// Prepare the checked local machine pin and protect its artifact throughout the caller's use.
@@ -175,7 +176,7 @@ pub(crate) fn prepare_leased(
     root: &Path,
 ) -> Result<(PathBuf, airlock_config::preparation::cache::Lease)> {
     local(root)?;
-    airlock_config::preparation::development_leased(root, &prepared_cache(root))
+    airlock_config::preparation::development_leased(root, &prepared_cache()?)
         .map_err(|error| anyhow::anyhow!("{error}"))
 }
 
@@ -192,7 +193,7 @@ fn argument_leases(
     root: &Path,
     args: &[OsString],
 ) -> Result<Vec<airlock_config::preparation::cache::Lease>> {
-    let cache = prepared_cache(root);
+    let cache = prepared_cache()?;
     if !cache.exists() {
         return Ok(Vec::new());
     }

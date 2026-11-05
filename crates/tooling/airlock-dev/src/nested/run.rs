@@ -68,10 +68,10 @@ fn prune(directory: &Path, disk: &Path, keep: u64) -> Result<()> {
 
 /// Prepare the explicitly selected overlay and replace this process with upstream QEMU.
 pub(super) fn execute(context: &Context) -> Result<u8> {
-    let directory = path("AIRLOCK_VM_DIR", context.root.join(".airlock-vm"));
+    let directory = path("AIRLOCK_VM_DIR", airlock_dev_paths::root()?.join("vm"));
     let links = path(
         "AIRLOCK_RESULT_LINK_DIR",
-        context.root.join(".airlock/result-links"),
+        airlock_dev_paths::root()?.join("result-links"),
     );
     let attribute = setting("AIRLOCK_VM_IMAGE_ATTR", "airlock-vm-dev-image");
     ensure!(

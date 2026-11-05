@@ -50,10 +50,7 @@ impl Snapshot {
         captured.check()?;
         repository::check_image_source(&captured.root)?;
 
-        let vendor = std::env::var_os("AIRLOCK_CARGO_VENDOR")
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| source.join(".airlock-cache/authoring-vendor"));
+        let vendor = airlock_dev_paths::path("AIRLOCK_CARGO_VENDOR", "cache/authoring-vendor")?;
         let vendor = if vendor.is_absolute() {
             vendor
         } else {

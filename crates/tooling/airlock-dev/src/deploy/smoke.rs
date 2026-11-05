@@ -21,9 +21,7 @@ pub(super) fn execute(root: &Path) -> Result<()> {
         None,
         Some(Duration::from_secs(7200)),
     )?;
-    let logs = std::env::var_os("AIRLOCK_LOG_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| root.join(".airlock-logs"));
+    let logs = airlock_dev_paths::path("AIRLOCK_LOG_DIR", "logs")?;
     support::atomic(
         &logs.join("pool-admission-smoke.stdout.log"),
         &result.stdout,

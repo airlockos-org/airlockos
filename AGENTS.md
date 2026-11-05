@@ -40,7 +40,9 @@
 - For implementation, service, policy or deployment changes, run relevant tests;
   use `make test-quick` when shared behavior could be affected. Select Rust
   documentation and tooling checks using the rules below.
-  Preserve clear logs and machine-readable output under `.airlock-logs/`.
+  Write disposable logs and machine-readable output under `$AIRLOCK_LOG_DIR`
+  (by default `/run/media/user/data/airlock/logs`). Keep lasting findings and
+  validation summaries in Git commits or source-local explanations.
 - Do not add tests that merely repeat the configured package list.
 - Keep regression coverage focused on distinct behavior and integration boundaries.
   Extend an existing scenario when it already exercises the relevant path. Avoid
@@ -53,7 +55,8 @@
   Keep first-party package selections in their Rust component and user VM selections
   in their NixOS module; link there rather than maintain
   package inventories or installation/removal logs in docs. Git and deployment
-  records provide the change history. Preserve dated validation evidence.
+  records provide the change history. Record meaningful dated validation summaries
+  in Git; raw development evidence is disposable.
 - Keep `test-quick` free of Nix evaluations, builds and automatic tool provisioning.
   `make test-nix` is opt-in; do not run it as a routine pre-deployment gate.
 - Test Rust behavior with Cargo unit/integration tests and compile-fail doctests.
@@ -67,6 +70,20 @@
 - Long Airlock image/template/VM iterations can grow the custom store quickly.
   Run `make gc-auto` periodically and after large failed build loops. Use only
   the guarded Airlock GC targets; do not garbage collect the host `/nix/store`.
+
+## Disposable development state
+
+`AIRLOCK_DATA_ROOT` defaults to `/run/media/user/data/airlock` when that volume
+exists. Other machines must explicitly select an absolute disposable data root.
+Development tools write logs, receipts, caches, builds, prepared source trees and
+test VM state directly there. Do not add checkout compatibility symlinks or
+silently fall back into a source checkout.
+
+Deleting this directory must not lose authored work. Recreate generated state
+from Git and durable inputs kept elsewhere. Keep source changes and lasting
+findings in Git; credentials, unique inputs and persistent user data belong
+outside the disposable root. Raw logs and investigation archives need no durable
+preservation. Stop relevant builds and test VMs before clearing the root.
 
 ## Documentation
 
@@ -159,6 +176,9 @@ Future nested instructions must link here rather than duplicate these standards.
 Run from the repository root with stable Cargo/Clippy and the separately pinned
 rustfmt toolchain. The GTK welcome window also needs GTK4/libadwaita development
 files and pkg-config. The dom0 service also needs libudev development files.
+Make exports the configured artifact paths. For direct Cargo commands, explicitly
+export `CARGO_TARGET_DIR` under the selected data root; Cargo does not read the
+Make defaults.
 On NixOS, enter the explicitly prepared environment with
 `nix develop "$(make --silent prepare)/crates#desktop"` before running workspace
 Cargo checks; `nix develop "$(make --silent prepare)/crates#desktop" -c make rust-check`
@@ -215,6 +235,7 @@ macro template.
 - Public API code or documentation-lint setup: also run strict rustdoc, as above;
   `make rust-doc` adds `--all-features` to cover the shared runtime and job-writer APIs.
 
-Keep evidence in `.airlock-logs/`. Routine comments do not require rebuilding the
-GUI just to refresh a test receipt; if running GUI tests for a code/tooling change,
-prepare their artifact explicitly with `make ctrl-build` first.
+Write disposable evidence under `$AIRLOCK_LOG_DIR`. Routine comments do not
+require rebuilding the GUI just to refresh a test receipt; if running GUI tests
+for a code/tooling change, prepare their artifact explicitly with `make ctrl-build`
+first.

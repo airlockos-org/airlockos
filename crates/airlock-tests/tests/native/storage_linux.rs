@@ -280,7 +280,7 @@ fn privileged_linux_storage() -> Result<()> {
         )?,
         format!("{common_path}\n")
     );
-    let logs = airlock_tests::system::logs(&common::root(), "closure-store-linux-storage")?;
+    let logs = airlock_tests::system::logs("closure-store-linux-storage")?;
     linux.cleanup()?;
     drop(linux);
     fs::write(

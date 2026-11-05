@@ -86,7 +86,7 @@ impl Session {
         let default = if local_default {
             let root = root.map(Path::to_owned).unwrap_or(std::env::current_dir()?);
             if rustix::fs::access(&root, rustix::fs::Access::WRITE_OK).is_ok() {
-                root.join(".airlock-logs")
+                airlock_dev_paths::path("AIRLOCK_LOG_DIR", "logs")?
             } else {
                 path(
                     "XDG_STATE_HOME",

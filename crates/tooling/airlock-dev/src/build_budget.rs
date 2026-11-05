@@ -123,7 +123,7 @@ fn cargo_jobs(cpus: usize, requested: Option<&str>) -> Result<usize> {
 }
 
 /// Apply inherited affinity before exec so compilers, linkers, compression and build VMs share the limit.
-pub(crate) fn run(root: &Path, arguments: &[OsString]) -> Result<u8> {
+pub(crate) fn run(arguments: &[OsString]) -> Result<u8> {
     let (program, arguments) = arguments
         .split_first()
         .context("build command is missing")?;
@@ -156,7 +156,10 @@ cores = {cores}
         "build CPU affinity changed during setup"
     );
 
-    support::record(&root.join(".airlock-logs/build-cpu-budget.json"), &budget)?;
+    support::record(
+        &airlock_dev_paths::path("AIRLOCK_LOG_DIR", "logs")?.join("build-cpu-budget.json"),
+        &budget,
+    )?;
     eprintln!(
         "Image build: reserving physical-core CPUs {reserved:?}; using CPUs {build:?} with {jobs} Cargo jobs and {nix_jobs} concurrent Nix jobs ({nix_cores} cores each).",
         reserved = budget.reserved_core_cpus,
@@ -167,6 +170,10 @@ cores = {cores}
 
     let error = Command::new(program)
         .args(arguments)
+        .env(
+            "CARGO_TARGET_DIR",
+            airlock_dev_paths::path("CARGO_TARGET_DIR", "build/cargo")?,
+        )
         .env("CARGO_BUILD_JOBS", jobs.to_string())
         .env("NIX_CONFIG", config)
         .env("AIRLOCK_IMAGE_BUILD_LIMITED", "1")

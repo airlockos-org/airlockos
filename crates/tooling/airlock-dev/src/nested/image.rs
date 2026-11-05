@@ -18,7 +18,7 @@ pub(super) fn resolve(
     let environment = environment::Environment::load()?;
     let links = environment.path(
         "AIRLOCK_RESULT_LINK_DIR",
-        context.root.join(".airlock/result-links"),
+        airlock_dev_paths::root()?.join("result-links"),
     );
     let output = output.map(Path::to_owned).unwrap_or_else(|| {
         path(

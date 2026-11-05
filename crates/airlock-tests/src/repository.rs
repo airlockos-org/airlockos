@@ -41,7 +41,7 @@ impl Repository {
             )?;
             fs::write(checkout.join("README"), "initial\n")?;
             fs::write(checkout.join("flake.lock"), "{}\n")?;
-            fs::write(checkout.join(".gitignore"), ".airlock-logs/\n/target/\n")?;
+            fs::write(checkout.join(".gitignore"), "/target/\n")?;
             git(checkout, &["add", "."])?;
             git(checkout, &["commit", "-qm", "Initial"])?;
         }
@@ -132,6 +132,12 @@ impl Repository {
         ));
         command.env("PATH", std::env::join_paths(paths).unwrap());
         command.env("AIRLOCK_TEST_WORKSTATION", self.temporary.path());
+        command.env("AIRLOCK_DATA_ROOT", self.path("data"));
+        command.env("AIRLOCK_LOG_DIR", self.path("logs"));
+        command.env(
+            "AIRLOCK_CARGO_VENDOR",
+            self.path("data/cache/authoring-vendor"),
+        );
         // Preparation now maintains a real compiler mirror even with an inert
         // Cargo peer. Keep that output outside both committed fixture checkouts.
         command.env("CARGO_TARGET_DIR", self.path("cargo-target"));

@@ -46,7 +46,7 @@ fn quiet() -> Vec<(&'static str, String)> {
 pub(super) fn execute(context: &Context) -> Result<()> {
     let attribute = setting("AIRLOCK_VM_IMAGE_ATTR", "airlock-vm-gui-config-dev-image");
     ensure!(!attribute.contains('/'), "invalid baseline image attribute");
-    let data = path("AIRLOCK_DATA_ROOT", context.root.join(".airlock"));
+    let data = airlock_dev_paths::root()?;
     let directory = path(
         "AIRLOCK_VM_BASELINE_DIR",
         data.join(format!("vm-baselines/{attribute}-setup")),
@@ -171,7 +171,7 @@ pub(super) fn execute(context: &Context) -> Result<()> {
 /// Stage and boot the exact same overlay; a rebuilt base cannot erase the staged profile.
 pub(super) fn boot_flow(context: &Context) -> Result<()> {
     let attribute = setting("AIRLOCK_VM_IMAGE_ATTR", "airlock-vm-gui-config-dev-image");
-    let directory = path("AIRLOCK_VM_DIR", context.root.join(".airlock-vm"));
+    let directory = path("AIRLOCK_VM_DIR", airlock_dev_paths::root()?.join("vm"));
     fs::create_dir_all(&directory)?;
     let mut stage = Value::Null;
     let mut verify = Value::Null;

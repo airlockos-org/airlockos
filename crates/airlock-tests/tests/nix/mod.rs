@@ -253,7 +253,13 @@ impl Nix {
 
         let logs = std::env::var_os("AIRLOCK_RUSIX_LOG_DIR")
             .map(PathBuf::from)
-            .unwrap_or_else(|| root.join(".airlock-logs/rust-test-migration/nix"));
+            .map_or_else(
+                || {
+                    airlock_dev_paths::path("AIRLOCK_LOG_DIR", "logs")
+                        .map(|path| path.join("nix-tests"))
+                },
+                Ok,
+            )?;
         fs::create_dir_all(&logs)?;
 
         let compiler = common::binary("AIRLOCK_RUSIX_BIN", "airlock-config");

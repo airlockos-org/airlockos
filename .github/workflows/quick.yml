@@ -12,7 +12,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      AIRLOCK_LOG_DIR: ${{ github.workspace }}/.airlock-logs
+      AIRLOCK_DATA_ROOT: ${{ runner.temp }}/airlock
+      AIRLOCK_LOG_DIR: ${{ runner.temp }}/airlock/logs
+      CARGO_TARGET_DIR: ${{ runner.temp }}/airlock/build/cargo
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -36,18 +38,18 @@ jobs:
         run: |
           make prepare-dependencies
       - name: Check native code, docs and regression behavior
-        run: make rust-check AIRLOCK_CARGO_VENDOR="$PWD/.airlock-cache/authoring-vendor"
+        run: make rust-check AIRLOCK_CARGO_VENDOR="$AIRLOCK_DATA_ROOT/cache/authoring-vendor"
       - name: Exercise durable deployment interruption and recovery
         run: cargo test --locked --manifest-path crates/Cargo.toml -p airlock-dom0-service durable_handoff -- --ignored --nocapture
       - name: Run prepared native integration checks
         run: |
           make test-quick test-native-mounts test-native-desktop test-native-javascript
-      - name: Retain validation evidence
+      - name: Upload temporary test reports
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: native-test-reports
-          path: .airlock-logs/
+          path: ${{ runner.temp }}/airlock/logs/
           include-hidden-files: true
           retention-days: 7
 
@@ -56,7 +58,9 @@ jobs:
     timeout-minutes: 45
     env:
       AIRLOCK_USE_HOST_NIX_STORE: '1'
-      AIRLOCK_LOG_DIR: ${{ github.workspace }}/.airlock-logs
+      AIRLOCK_DATA_ROOT: ${{ runner.temp }}/airlock
+      AIRLOCK_LOG_DIR: ${{ runner.temp }}/airlock/logs
+      CARGO_TARGET_DIR: ${{ runner.temp }}/airlock/build/cargo
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -71,18 +75,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y pkg-config libudev-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev libgtk-4-dev libadwaita-1-dev bubblewrap xvfb dbus nodejs jq util-linux e2fsprogs ripgrep build-essential
           make prepare-dependencies native-integration-build
-          make --silent prepare > .airlock-logs/prepared-source
+          make --silent prepare > "$AIRLOCK_LOG_DIR/prepared-source"
       - name: Exercise real patched EROFS indexes
         run: |
-          crates/target/debug/airlock-dev with-environment -- nix -- shell "$(cat .airlock-logs/prepared-source)/airlock-machine#airlock-erofs-utils" --command bash -euc '
+          "$CARGO_TARGET_DIR/debug/airlock-dev" with-environment -- nix -- shell "$(cat "$AIRLOCK_LOG_DIR/prepared-source")/airlock-machine#airlock-erofs-utils" --command bash -euc '
             export AIRLOCK_EROFS_MKFS="$(command -v mkfs.erofs)"
-            crates/target/debug/airlock-test-runner .airlock-logs/native-integration-build.jsonl --ignored packaged_erofs_ --nocapture
+            "$CARGO_TARGET_DIR/debug/airlock-test-runner" "$AIRLOCK_LOG_DIR/native-integration-build.jsonl" --ignored packaged_erofs_ --nocapture
           '
-      - name: Retain storage evidence
+      - name: Upload temporary storage reports
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: storage-test-reports
-          path: .airlock-logs/
+          path: ${{ runner.temp }}/airlock/logs/
           include-hidden-files: true
           retention-days: 7

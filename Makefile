@@ -1,30 +1,8 @@
 SHELL := bash
 
-ifneq ($(wildcard /run/media/user/data/.),)
-AIRLOCK_DATA_ROOT ?= /run/media/user/data/airlock
-endif
+include development.mk
 
-ifneq ($(strip $(AIRLOCK_DATA_ROOT)),)
-AIRLOCK_VM_DIR ?= $(AIRLOCK_DATA_ROOT)/vm
-AIRLOCK_LOG_DIR ?= $(AIRLOCK_DATA_ROOT)/logs
-AIRLOCK_QUBES_CACHE_DIR ?= $(AIRLOCK_DATA_ROOT)/cache/rpms
-AIRLOCK_RESULT_LINK_DIR ?= $(AIRLOCK_DATA_ROOT)/result-links
-AIRLOCK_NIX_ROOT ?= $(AIRLOCK_DATA_ROOT)/nix-root
-AIRLOCK_NIX_STORE ?= $(AIRLOCK_NIX_ROOT)
-TMPDIR ?= $(AIRLOCK_DATA_ROOT)/tmp
-XDG_CACHE_HOME ?= $(AIRLOCK_DATA_ROOT)/cache/xdg
-export AIRLOCK_DATA_ROOT
-export AIRLOCK_VM_DIR
-export AIRLOCK_LOG_DIR
-export AIRLOCK_QUBES_CACHE_DIR
-export AIRLOCK_RESULT_LINK_DIR
-export AIRLOCK_NIX_ROOT
-export AIRLOCK_NIX_STORE
-export TMPDIR
-export XDG_CACHE_HOME
-endif
-
-AIRLOCK_DEV_NATIVE = $(abspath $(or $(CARGO_TARGET_DIR),crates/target))/debug/airlock-dev
+AIRLOCK_DEV_NATIVE = $(CARGO_TARGET_DIR)/debug/airlock-dev
 AIRLOCK_DEV_BOOTSTRAP = sh -ec 'env -u MAKEFLAGS -u MFLAGS make --no-print-directory -C "$$1" dev-tools-bootstrap; shift; exec "$$@"' airlock-dev "$(CURDIR)" "$(AIRLOCK_DEV_NATIVE)"
 AIRLOCK_DEV ?= $(if $(AIRLOCK_DEV_BIN),"$(AIRLOCK_DEV_BIN)",$(AIRLOCK_DEV_BOOTSTRAP)) --repository-root "$(CURDIR)" with-environment --
 AIRLOCK_NIX ?= $(AIRLOCK_DEV) nix --
@@ -42,21 +20,21 @@ VM_GUI_IMAGE_ATTR ?= airlock-vm-gui-$(VM_IMAGE_MODE_SUFFIX)-image
 VM_GUI_CONFIG_IMAGE_ATTR ?= airlock-vm-gui-config-$(VM_IMAGE_MODE_SUFFIX)-image
 VM_GUI_CONFIG_NETWORK_DEBUG_IMAGE_ATTR ?= airlock-vm-gui-config-network-debug-image
 VM_GUI_MINIMAL_IMAGE_ATTR ?= airlock-vm-gui-minimal-image
-VM_GUI_MINIMAL_DIR ?= $(or $(AIRLOCK_DATA_ROOT),$(CURDIR)/.airlock)/vm-gui-minimal
+VM_GUI_MINIMAL_DIR ?= $(AIRLOCK_DATA_ROOT)/vm-gui-minimal
 VM_GUI_MINIMAL_SSH_PORT ?= 2332
 AIRLOCK_VM_GDK_BACKEND ?= x11
 QEMU_LAB_INSTANCE ?= default
 QEMU_LAB_SSH_PORT ?= 2342
 VM_PARALLEL_IMAGE_ATTR ?= $(VM_GUI_CONFIG_IMAGE_ATTR)
 VM_PARALLEL_IMAGE_LINK ?= $(AIRLOCK_RESULT_LINK_DIR)/$(VM_PARALLEL_IMAGE_ATTR)-parallel-shared-result
-VM_PARALLEL_BASELINE_ROOT ?= $(or $(AIRLOCK_DATA_ROOT),$(CURDIR)/.airlock)/vm-baselines
+VM_PARALLEL_BASELINE_ROOT ?= $(AIRLOCK_DATA_ROOT)/vm-baselines
 VM_PARALLEL_BASELINE_DIR ?= $(VM_PARALLEL_BASELINE_ROOT)/$(VM_PARALLEL_IMAGE_ATTR)-setup
 VM_PARALLEL_BASELINE_DISK ?= $(VM_PARALLEL_BASELINE_DIR)/$(VM_PARALLEL_IMAGE_ATTR).qcow2
 VM_PARALLEL_BASELINE_OVMF_VARS ?= $(VM_PARALLEL_BASELINE_DIR)/$(VM_PARALLEL_IMAGE_ATTR)-OVMF_VARS.fd
-VM_PARALLEL_BASELINE_LOG_DIR ?= $(or $(AIRLOCK_LOG_DIR),$(CURDIR)/.airlock-logs)/vm-baseline
+VM_PARALLEL_BASELINE_LOG_DIR ?= $(AIRLOCK_LOG_DIR)/vm-baseline
 VM_PARALLEL_BASELINE_SSH_PORT ?= 2299
 VM_PARALLEL_SSH_BASE_PORT ?= 2300
-VM_SLOW_SERIAL_VM_DIR ?= $(or $(AIRLOCK_DATA_ROOT),$(CURDIR)/.airlock)/vm-slow-serial
+VM_SLOW_SERIAL_VM_DIR ?= $(AIRLOCK_DATA_ROOT)/vm-slow-serial
 VM_SLOW_SERIAL_SSH_PORT ?= 2310
 VM_FLOW_RUN_SETUP_CONFIG ?= 1
 
@@ -69,7 +47,7 @@ VM_PREBUILD_ATTRS := \
 	packages.x86_64-linux.airlock-qubes-vm-kernel \
 	$(VM_GUI_CONFIG_IMAGE_ATTR)
 
-TEST_LOG_DIR = $${AIRLOCK_LOG_DIR:-.airlock-logs}
+TEST_LOG_DIR = $(AIRLOCK_LOG_DIR)
 TEST_JOBS ?= 4
 TEST_VM_JOBS ?= 2
 TEST_WARM_VM_MEMORY ?= 16384
@@ -152,7 +130,6 @@ airlock-dom0-check:
 
 .PHONY: rust-fmt-prepare rust-fmt rust-fmt-check rust-doc rust-check
 # Independent source-owned authoring crates use explicitly prepared offline dependencies.
-AIRLOCK_CARGO_VENDOR ?= /etc/airlock/authoring/vendor
 AUTHORING_CRATES := airlock-machine crates/airlock-config/templates/initial-runtime-config
 # Pin formatting separately from stable application builds; match Hermit's dated nightly.
 RUSTFMT_TOOLCHAIN := nightly-2026-08-01
@@ -173,13 +150,13 @@ rust-fmt-check:
 
 rust-doc:
 	RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked --manifest-path crates/Cargo.toml
-	CARGO_TARGET_DIR="$(abspath $(or $(CARGO_TARGET_DIR),crates/target))" RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked --manifest-path $(STORE_PACKER_MANIFEST)
+	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked --manifest-path $(STORE_PACKER_MANIFEST)
 
 rust-check: rust-fmt-check rust-doc rust-authoring-check native-integration-build
 	cargo clippy --workspace --all-targets --all-features --locked --manifest-path crates/Cargo.toml -- -D warnings
-	CARGO_TARGET_DIR="$(abspath $(or $(CARGO_TARGET_DIR),crates/target))" cargo clippy --all-targets --locked --manifest-path $(STORE_PACKER_MANIFEST) -- -D warnings
+	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" cargo clippy --all-targets --locked --manifest-path $(STORE_PACKER_MANIFEST) -- -D warnings
 	cargo test --workspace --all-features --locked --manifest-path crates/Cargo.toml
-	CARGO_TARGET_DIR="$(abspath $(or $(CARGO_TARGET_DIR),crates/target))" cargo test --locked --manifest-path $(STORE_PACKER_MANIFEST)
+	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" cargo test --locked --manifest-path $(STORE_PACKER_MANIFEST)
 
 .PHONY: verify verify-prepare
 # Explicit prover preparation is separate from ordinary Cargo and test-quick.
@@ -190,13 +167,13 @@ verify-prepare:
 	cargo run --locked --manifest-path crates/Cargo.toml -p airlock-dev -- verify --prepare
 
 # Preparation archives the complete locked source graph; execution below remains offline.
-NIX_TEST_LOG_DIR := $(CURDIR)/.airlock-logs/nix-tests
+NIX_TEST_LOG_DIR := $(AIRLOCK_LOG_DIR)/nix-tests
 AIRLOCK_RUSIX_SOURCES ?= $(NIX_TEST_LOG_DIR)/sources.json
 export AIRLOCK_RUSIX_SOURCES
 .PHONY: test-nix-prepare
 test-nix-prepare: test-fixtures-build test-reports-build
 	@mkdir -p "$(NIX_TEST_LOG_DIR)"
-	"$(dir $(NATIVE_TEST_RUNNER))airlock-config" prepare "$(CURDIR)" "$(CURDIR)/target/nix" > "$(NIX_TEST_LOG_DIR)/prepared-source"
+	"$(dir $(NATIVE_TEST_RUNNER))airlock-config" prepare "$(CURDIR)" "$(AIRLOCK_PREPARED_CACHE)" > "$(NIX_TEST_LOG_DIR)/prepared-source"
 	$(AIRLOCK_NIX) flake archive --json --no-write-lock-file "$$(cat "$(NIX_TEST_LOG_DIR)/prepared-source")" > "$(NIX_TEST_LOG_DIR)/archive.json"
 	"$(dir $(NATIVE_TEST_RUNNER))airlock-test-report" sources "$(NIX_TEST_LOG_DIR)/archive.json" "$(if $(filter 1,$(AIRLOCK_USE_HOST_NIX_STORE)),/,$(AIRLOCK_NIX_ROOT))" "$(AIRLOCK_RUSIX_SOURCES)"
 
@@ -253,10 +230,14 @@ dev-tools-bootstrap:
 	@bootstrap_cpu="$$(sed -n 's/^Cpus_allowed_list:[[:space:]]*\([0-9][0-9]*\).*/\1/p' /proc/self/status)"; \
 	taskset --cpu-list "$$bootstrap_cpu" cargo build --quiet --locked --jobs 1 --manifest-path "$(CURDIR)/crates/Cargo.toml" -p airlock-dev
 
+.PHONY: dev-tools-path
+dev-tools-path:
+	@printf '%s\n' "$(AIRLOCK_DEV_NATIVE)"
+
 .PHONY: dev-tools-build
 dev-tools-build:
-	@mkdir -p "$(CURDIR)/.airlock-logs"
-	cargo build --locked --profile $(NATIVE_BUILD_PROFILE) --manifest-path crates/Cargo.toml -p airlock-dev --message-format=json-render-diagnostics > "$(CURDIR)/.airlock-logs/dev-build.jsonl"
+	@mkdir -p "$(AIRLOCK_LOG_DIR)"
+	cargo build --locked --profile $(NATIVE_BUILD_PROFILE) --manifest-path crates/Cargo.toml -p airlock-dev --message-format=json-render-diagnostics > "$(AIRLOCK_LOG_DIR)/dev-build.jsonl"
 
 # Prepare Rust-authored fixtures explicitly; execution never builds its own tools.
 .PHONY: test-fixtures-build
@@ -264,10 +245,10 @@ test-fixtures-build: native-test-fixtures-build runtime-config-build
 	cargo build --locked --manifest-path crates/Cargo.toml -p airlock-config --bin airlock-config --example test_fixtures --example candidate_fixture
 
 # Use explicitly prepared authoring dependencies for the source-owned candidate compiler.
-AUTHORING_TEST_VENDOR = $(if $(wildcard $(AIRLOCK_CARGO_VENDOR)/.),$(AIRLOCK_CARGO_VENDOR),$(CURDIR)/.airlock-cache/authoring-vendor)
+AUTHORING_TEST_VENDOR = $(AIRLOCK_CARGO_VENDOR)
 .PHONY: runtime-config-build
 runtime-config-build:
-	CARGO_TARGET_DIR="$(abspath $(or $(CARGO_TARGET_DIR),crates/target))" $(MAKE) -C crates/airlock-config/templates/initial-runtime-config build AIRLOCK_APPS="$(CURDIR)/crates" AIRLOCK_CARGO_VENDOR="$(AUTHORING_TEST_VENDOR)"
+	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(MAKE) -C crates/airlock-config/templates/initial-runtime-config build AIRLOCK_APPS="$(CURDIR)/crates" AIRLOCK_CARGO_VENDOR="$(AUTHORING_TEST_VENDOR)"
 
 # Cargo owns dependency/feature resolution for process-boundary test drivers too.
 .PHONY: native-test-fixtures-build
@@ -275,8 +256,8 @@ native-test-fixtures-build:
 	cargo build --locked --profile $(NATIVE_BUILD_PROFILE) --manifest-path crates/Cargo.toml -p airlock-dom0-service --example test_input
 
 .PHONY: image-tools-build
-IMAGE_TOOLS_DIR ?= $(abspath $(or $(CARGO_TARGET_DIR),crates/target))/$(if $(filter dev,$(NATIVE_BUILD_PROFILE)),debug,$(NATIVE_BUILD_PROFILE))
-IMAGE_BUILD_ARTIFACTS ?= $(CURDIR)/.airlock-logs/image-build.jsonl
+IMAGE_TOOLS_DIR ?= $(CARGO_TARGET_DIR)/$(if $(filter dev,$(NATIVE_BUILD_PROFILE)),debug,$(NATIVE_BUILD_PROFILE))
+IMAGE_BUILD_ARTIFACTS ?= $(AIRLOCK_LOG_DIR)/image-build.jsonl
 image-tools-build:
 	@mkdir -p "$(dir $(IMAGE_BUILD_ARTIFACTS))"
 	$(if $(filter 1,$(AIRLOCK_USB_INSTALL_LOGGED)),$(AIRLOCK_DEV) build-phase --stage image-tools --,) cargo build --locked --profile $(NATIVE_BUILD_PROFILE) --manifest-path crates/Cargo.toml -p airlock-image --message-format=json-render-diagnostics > "$(IMAGE_BUILD_ARTIFACTS)"
@@ -295,7 +276,7 @@ usb-dev-install:
 	+@$(AIRLOCK_DEV) usb-install-log -- $(MAKE) --no-print-directory AIRLOCK_USB_INSTALL_LOGGED=1 $@
 else ifeq ($(AIRLOCK_IMAGE_BUILD_LIMITED),1)
 usb-dev-install: image-tools-build
-	@$(AIRLOCK_DEV) usb-build-provision --usb-bin "$(IMAGE_TOOLS_DIR)/airlock-usb" --serial "$(USB_SERIAL)" $(USB_PUBLIC_KEY_ARGS) --result-link-dir "$(or $(AIRLOCK_RESULT_LINK_DIR),$(CURDIR)/.airlock)" $(if $(AIRLOCK_NIX_ROOT),--nix-root "$(AIRLOCK_NIX_ROOT)",) --resize-backup-dir "$(or $(AIRLOCK_LOG_DIR),/var/log/airlock)/usb-root-expansion" $(USB_DEV_PASSWORD_ARGS)
+	@$(AIRLOCK_DEV) usb-build-provision --usb-bin "$(IMAGE_TOOLS_DIR)/airlock-usb" --serial "$(USB_SERIAL)" $(USB_PUBLIC_KEY_ARGS) --result-link-dir "$(AIRLOCK_RESULT_LINK_DIR)" $(if $(AIRLOCK_NIX_ROOT),--nix-root "$(AIRLOCK_NIX_ROOT)",) --resize-backup-dir "$(AIRLOCK_LOG_DIR)/usb-root-expansion" $(USB_DEV_PASSWORD_ARGS)
 else
 usb-dev-install:
 	@$(AIRLOCK_DEV) build-phase --stage source-check -- $(AIRLOCK_DEV) check-image-source
@@ -304,18 +285,18 @@ endif
 
 ifeq ($(AIRLOCK_IMAGE_BUILD_LIMITED),1)
 usb-dom0-console-image: ensure-generated-dirs
-	$(AIRLOCK_NIX) build .#airlock-usb-dom0-console-image --out-link "$(or $(AIRLOCK_RESULT_LINK_DIR),$(CURDIR)/.airlock)/usb-dom0-console-image" --print-build-logs
+	$(AIRLOCK_NIX) build .#airlock-usb-dom0-console-image --out-link "$(AIRLOCK_RESULT_LINK_DIR)/usb-dom0-console-image" --print-build-logs
 endif
 
 usb-dom0-console-write: image-tools-build
 	@test -n "$(USB_SERIAL)" || (echo "Set USB_SERIAL to the exact USB serial" >&2; exit 2)
-	sudo "$(IMAGE_TOOLS_DIR)/airlock-usb" write-latest --result-link "$(or $(AIRLOCK_RESULT_LINK_DIR),$(CURDIR)/.airlock)/usb-dom0-console-image" --nix-root "$(AIRLOCK_NIX_ROOT)" --serial "$(USB_SERIAL)" --write
+	sudo "$(IMAGE_TOOLS_DIR)/airlock-usb" write-latest --result-link "$(AIRLOCK_RESULT_LINK_DIR)/usb-dom0-console-image" --nix-root "$(AIRLOCK_NIX_ROOT)" --serial "$(USB_SERIAL)" --write
 
 usb-dev-prepare-inputs: ensure-generated-dirs
 	@set -eu; \
-	seed_archive="$(or $(AIRLOCK_TMPDIR),$(CURDIR)/.airlock)/airlock-machine-seed.tar.gz"; \
-	offline_inputs="$(or $(AIRLOCK_TMPDIR),$(CURDIR)/.airlock)/airlock-machine-offline-inputs.json"; \
-	archive_json="$(or $(AIRLOCK_TMPDIR),$(CURDIR)/.airlock)/airlock-machine-flake-archive.json"; \
+	seed_archive="$(AIRLOCK_TMPDIR)/airlock-machine-seed.tar.gz"; \
+	offline_inputs="$(AIRLOCK_TMPDIR)/airlock-machine-offline-inputs.json"; \
+	archive_json="$(AIRLOCK_TMPDIR)/airlock-machine-flake-archive.json"; \
 	$(AIRLOCK_DEV) source seed --reuse --output "$$seed_archive" >/dev/null; \
 	$(AIRLOCK_NIX) flake archive --no-update-lock-file --json path:./airlock-machine > "$$archive_json"; \
 	$(AIRLOCK_DEV) source offline-inputs --repository airlock-machine --output "$$offline_inputs" < "$$archive_json"
@@ -324,32 +305,32 @@ usb-dev-prepare-inputs: ensure-generated-dirs
 ifeq ($(AIRLOCK_IMAGE_BUILD_LIMITED),1)
 usb-builder-offline-check: image-tools-build usb-dev-prepare-inputs
 	@set -eu; \
-	seed_archive="$(or $(AIRLOCK_TMPDIR),$(CURDIR)/.airlock)/airlock-machine-seed.tar.gz"; \
-	offline_inputs="$(or $(AIRLOCK_TMPDIR),$(CURDIR)/.airlock)/airlock-machine-offline-inputs.json"; \
+	seed_archive="$(AIRLOCK_TMPDIR)/airlock-machine-seed.tar.gz"; \
+	offline_inputs="$(AIRLOCK_TMPDIR)/airlock-machine-offline-inputs.json"; \
 	closure="$$(AIRLOCK_MACHINE_SEED_ARCHIVE="$$seed_archive" AIRLOCK_MACHINE_OFFLINE_INPUTS="$$offline_inputs" $(AIRLOCK_NIX) build --impure .#airlock-usb-builder-input-closure --no-link --print-out-paths)"; \
 	nix_bin="$$(AIRLOCK_MACHINE_SEED_ARCHIVE="$$seed_archive" AIRLOCK_MACHINE_OFFLINE_INPUTS="$$offline_inputs" $(AIRLOCK_NIX) eval --impure --raw .#airlock-usb-builder-nix.outPath)/bin/nix"; \
 	prepared_source="$$($(AIRLOCK_DEV) source prepare | jq -er .source)"; \
 	"$(IMAGE_TOOLS_DIR)/airlock-image-check" \
 	  --closure "$$closure" --machine airlock-machine --prepared-machine "$$prepared_source/airlock-machine" --manifest "$$offline_inputs" --seed-archive "$$seed_archive" \
 	  --source-store-root "$(if $(filter 1,$(AIRLOCK_USE_HOST_NIX_STORE)),/,$(AIRLOCK_NIX_ROOT))" --nix-bin "$$nix_bin" \
-	  --log-dir "$(or $(AIRLOCK_LOG_DIR),$(CURDIR)/.airlock-logs)/offline-builder-gate" \
-	  --cache-dir "$(or $(AIRLOCK_DATA_ROOT),$(CURDIR)/.airlock)/cache/offline-builder-gate" \
-	  --temporary-root "$(or $(AIRLOCK_TMPDIR),$(TMPDIR),$(CURDIR)/.airlock)" --force
+	  --log-dir "$(AIRLOCK_LOG_DIR)/offline-builder-gate" \
+	  --cache-dir "$(AIRLOCK_DATA_ROOT)/cache/offline-builder-gate" \
+	  --temporary-root "$(AIRLOCK_TMPDIR)" --force
 
 usb-dev-image: image-tools-build usb-dev-prepare-inputs
 	@set -eu; \
-	seed_archive="$(or $(AIRLOCK_TMPDIR),$(CURDIR)/.airlock)/airlock-machine-seed.tar.gz"; \
-	offline_inputs="$(or $(AIRLOCK_TMPDIR),$(CURDIR)/.airlock)/airlock-machine-offline-inputs.json"; \
+	seed_archive="$(AIRLOCK_TMPDIR)/airlock-machine-seed.tar.gz"; \
+	offline_inputs="$(AIRLOCK_TMPDIR)/airlock-machine-offline-inputs.json"; \
 	closure="$$(AIRLOCK_MACHINE_SEED_ARCHIVE="$$seed_archive" AIRLOCK_MACHINE_OFFLINE_INPUTS="$$offline_inputs" $(AIRLOCK_NIX) build --impure .#airlock-usb-builder-input-closure --no-link --print-out-paths)"; \
 	nix_bin="$$(AIRLOCK_MACHINE_SEED_ARCHIVE="$$seed_archive" AIRLOCK_MACHINE_OFFLINE_INPUTS="$$offline_inputs" $(AIRLOCK_NIX) eval --impure --raw .#airlock-usb-builder-nix.outPath)/bin/nix"; \
 	prepared_source="$$($(AIRLOCK_DEV) source prepare | jq -er .source)"; \
 	"$(IMAGE_TOOLS_DIR)/airlock-image-check" \
 	  --closure "$$closure" --machine airlock-machine --prepared-machine "$$prepared_source/airlock-machine" --manifest "$$offline_inputs" --seed-archive "$$seed_archive" \
 	  --source-store-root "$(if $(filter 1,$(AIRLOCK_USE_HOST_NIX_STORE)),/,$(AIRLOCK_NIX_ROOT))" --nix-bin "$$nix_bin" \
-	  --log-dir "$(or $(AIRLOCK_LOG_DIR),$(CURDIR)/.airlock-logs)/offline-builder-gate" \
-	  --cache-dir "$(or $(AIRLOCK_DATA_ROOT),$(CURDIR)/.airlock)/cache/offline-builder-gate" \
-	  --temporary-root "$(or $(AIRLOCK_TMPDIR),$(TMPDIR),$(CURDIR)/.airlock)" \
-	  --image-command $(AIRLOCK_NIX) build --impure .#airlock-usb-dev-image --out-link "$(or $(AIRLOCK_RESULT_LINK_DIR),$(CURDIR)/.airlock)/usb-dev-image" --print-build-logs
+	  --log-dir "$(AIRLOCK_LOG_DIR)/offline-builder-gate" \
+	  --cache-dir "$(AIRLOCK_DATA_ROOT)/cache/offline-builder-gate" \
+	  --temporary-root "$(AIRLOCK_TMPDIR)" \
+	  --image-command $(AIRLOCK_NIX) build --impure .#airlock-usb-dev-image --out-link "$(AIRLOCK_RESULT_LINK_DIR)/usb-dev-image" --print-build-logs
 else
 usb-dom0-console-image usb-builder-offline-check usb-dev-image:
 	@$(AIRLOCK_DEV) check-image-source
@@ -358,7 +339,7 @@ endif
 
 usb-dev-write: image-tools-build
 	@test -n "$(USB_SERIAL)" || (echo "Set USB_SERIAL to the exact USB serial, e.g. make usb-dev-write USB_SERIAL=YOUR_USB_SERIAL" >&2; exit 2)
-	sudo "$(IMAGE_TOOLS_DIR)/airlock-usb" write-latest --result-link "$(or $(AIRLOCK_RESULT_LINK_DIR),$(CURDIR)/.airlock)/usb-dev-image" --nix-root "$(AIRLOCK_NIX_ROOT)" --serial "$(USB_SERIAL)" --write
+	sudo "$(IMAGE_TOOLS_DIR)/airlock-usb" write-latest --result-link "$(AIRLOCK_RESULT_LINK_DIR)/usb-dev-image" --nix-root "$(AIRLOCK_NIX_ROOT)" --serial "$(USB_SERIAL)" --write
 
 usb-dev-help: image-tools-build
 	"$(IMAGE_TOOLS_DIR)/airlock-usb" --help
@@ -378,7 +359,7 @@ vm-gpu-lab-image: ensure-generated-dirs
 	$(AIRLOCK_NIX) build .#airlock-vm-gpu-lab-image --out-link "$(AIRLOCK_RESULT_LINK_DIR)/sys-gpu-lab-image" --print-build-logs
 
 vm-gpu-lab-run: ensure-generated-dirs
-	AIRLOCK_VM_DIR="$(or $(AIRLOCK_DATA_ROOT),$(CURDIR)/.airlock)/vm-gpu-lab" AIRLOCK_VM_SSH_PORT=2322 AIRLOCK_VM_IMAGE_ATTR=airlock-vm-gpu-lab-image $(AIRLOCK_DEV) with-environment nested run
+	AIRLOCK_VM_DIR="$(AIRLOCK_DATA_ROOT)/vm-gpu-lab" AIRLOCK_VM_SSH_PORT=2322 AIRLOCK_VM_IMAGE_ATTR=airlock-vm-gpu-lab-image $(AIRLOCK_DEV) with-environment nested run
 
 vm-gpu-lab-test: ensure-generated-dirs
 	@mkdir -p "$(TEST_LOG_DIR)"
@@ -549,7 +530,7 @@ rust-authoring-check:
 	  RUSTFMT="$$formatter" $(MAKE) -C "$$crate" rust-check AIRLOCK_APPS="$(CURDIR)/crates" AIRLOCK_CARGO_VENDOR="$(AIRLOCK_CARGO_VENDOR)" || exit; \
 	done
 
-# Emit a complete Rust-authored Nix source tree under target/nix before evaluation.
+# Emit a complete Rust-authored Nix source tree in the disposable data root before evaluation.
 .PHONY: prepare
 prepare:
 	$(MAKE) --no-print-directory -C crates/airlock-config prepare
@@ -557,8 +538,8 @@ prepare:
 # Bootstrap authoring with Cargo before a Nix flake exists.
 .PHONY: prepare-dependencies
 prepare-dependencies:
-	@mkdir -p .airlock-cache
-	cargo vendor --locked --manifest-path crates/Cargo.toml --versioned-dirs .airlock-cache/authoring-vendor > .airlock-cache/authoring-vendor-config.toml
+	@mkdir -p "$(dir $(AIRLOCK_CARGO_VENDOR))"
+	cargo vendor --locked --manifest-path crates/Cargo.toml --versioned-dirs "$(AIRLOCK_CARGO_VENDOR)" > "$(AIRLOCK_CARGO_VENDOR)-config.toml"
 
 # Prepared source is independent of image disks and the guarded Nix store.
 PREPARED_KEEP ?= 3
@@ -571,8 +552,8 @@ prepared-prune-apply:
 	$(AIRLOCK_DEV) source prune --keep "$(PREPARED_KEEP)" --apply
 
 # Preparation is explicit; quick/native execution reads Cargo's executable receipt only.
-NATIVE_TEST_RECEIPT ?= $(CURDIR)/.airlock-logs/native-integration-build.jsonl
-NATIVE_TEST_RUNNER := $(abspath $(or $(CARGO_TARGET_DIR),crates/target))/debug/airlock-test-runner
+NATIVE_TEST_RECEIPT ?= $(AIRLOCK_LOG_DIR)/native-integration-build.jsonl
+NATIVE_TEST_RUNNER := $(CARGO_TARGET_DIR)/debug/airlock-test-runner
 .PHONY: test-reports-build
 test-reports-build:
 	cargo build --locked --manifest-path crates/Cargo.toml -p airlock-tests --bin airlock-test-report

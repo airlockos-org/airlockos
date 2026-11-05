@@ -98,7 +98,7 @@ struct Context {
 impl Context {
     /// Load the already selected workstation environment and evidence directory.
     fn new(root: &Path) -> Result<Self> {
-        let logs = path("AIRLOCK_LOG_DIR", root.join(".airlock-logs"));
+        let logs = airlock_dev_paths::path("AIRLOCK_LOG_DIR", "logs")?;
         fs::create_dir_all(&logs)?;
         Ok(Self {
             root: root.into(),

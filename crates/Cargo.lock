@@ -140,6 +140,7 @@ version = "0.1.0"
 dependencies = [
  "airlock-build",
  "airlock-config",
+ "airlock-dev-paths",
  "airlock-image",
  "airlock-nix-core",
  "airlock-tests",
@@ -156,6 +157,10 @@ dependencies = [
  "tempfile",
  "toml",
 ]
+
+[[package]]
+name = "airlock-dev-paths"
+version = "0.1.0"
 
 [[package]]
 name = "airlock-diagnostics"
@@ -438,6 +443,7 @@ version = "0.1.0"
 dependencies = [
  "airlock-clipboard-core",
  "airlock-deployment-core",
+ "airlock-dev-paths",
  "airlock-dom0-service",
  "airlock-machine-core",
  "airlock-nix-core",

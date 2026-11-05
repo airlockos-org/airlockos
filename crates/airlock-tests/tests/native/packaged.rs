@@ -42,7 +42,7 @@ impl Packages {
         ensure!(source.join("flake.nix").is_file(), "prepared flake missing");
         Ok(Self {
             source,
-            logs: system::logs(&common::root(), &format!("packaged/{name}"))?,
+            logs: system::logs(&format!("packaged/{name}"))?,
         })
     }
 

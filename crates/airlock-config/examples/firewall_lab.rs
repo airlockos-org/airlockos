@@ -96,10 +96,11 @@ fn main() -> Result<()> {
             .all(|line| line.starts_with(' ')),
         "integration submodules must match their committed pins"
     );
-    let logs = root
-        .parent()
-        .context("repository parent")?
-        .join(".airlock-logs");
+    let logs = PathBuf::from(
+        std::env::var_os("AIRLOCK_LOG_DIR")
+            .context("set AIRLOCK_LOG_DIR to the disposable development log directory")?,
+    );
+    anyhow::ensure!(logs.is_absolute(), "AIRLOCK_LOG_DIR must be absolute");
     std::fs::create_dir_all(&logs)?;
     let temporary = tempfile::Builder::new()
         .prefix(&format!("firewall-integration-{revision}-"))
