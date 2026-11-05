@@ -35,7 +35,7 @@ serde_json = "1.0"
 sha2 = "0.10"
 tar = "0.4"
 tempfile = "3.0"
-airlock-vm-service = { path = "../runtime/airlock-vm/service" }
+airlock-vm-service = { path = "../runtime/airlock-vm/service", default-features = false }
 airlock-deployment-core = { path = "../airlock-common/deployment" }
 airlock-clipboard-core = { path = "../airlock-common/clipboard" }
 airlock-sys-clipboard = { path = "../runtime/airlock-sys-clipboard" }

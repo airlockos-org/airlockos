@@ -11,6 +11,9 @@ pub mod gpu;
 
 pub mod session;
 
+#[cfg(feature = "desktop-preferences")]
+pub mod preferences;
+
 pub mod support;
 
 pub mod private_storage;

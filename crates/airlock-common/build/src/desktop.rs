@@ -1,4 +1,4 @@
-//! Install trusted desktop artwork and attribution without granting application launch authority.
+//! Install trusted desktop assets, attribution and the local settings provider.
 
 use rusix::{
     interop::{
@@ -9,6 +9,27 @@ use rusix::{
 };
 
 pub use airlock_desktop::{CONTROL_ID, DESKTOP_ID, ICON_NAME, SETUP_ID, TAILSCALE_ID};
+
+/// Use upstream xsettingsd while refusing to replace an already running settings manager.
+/// Version 1.0.2 hardcodes replacement in main; its existing server-grabbed
+/// ownership check already supports refusal. Keep that upstream check atomic.
+pub fn settings_provider(pkgs: &NixValue) -> Package {
+    let upstream = Package::from_expression(pkgs.clone().select("xsettingsd"));
+    upstream.override_attrs(|old| {
+        rusix::interop::NixAttrs::new([(
+            "postPatch",
+            nix_text!(
+                r#"
+                {previous}
+                substituteInPlace xsettingsd.cc \
+                  --replace-fail 'manager.InitX11(screen, true)' 'manager.InitX11(screen, false)'
+            "#,
+                previous = old.get_or("postPatch", ""),
+            )
+            .into(),
+        )])
+    })
+}
 
 /// Install scalable and symbolic artwork under the identities used by desktop applications.
 /// Aliases share the same source files; application VMs can resolve them through Qubes' icon RPC.

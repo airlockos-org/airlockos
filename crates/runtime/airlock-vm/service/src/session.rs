@@ -97,6 +97,8 @@ pub fn environment(
                 )
                 .is_ok_and(|output| output.status.success())
                 {
+                    #[cfg(feature = "desktop-preferences")]
+                    crate::preferences::readiness(&runtime, remaining(deadline)?)?;
                     return Ok(variables);
                 }
             }

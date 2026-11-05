@@ -297,7 +297,9 @@ impl Application {
                             "systemd",
                         ],
                         Self::ControllerGui => &["git", "dbus", "glib", "fontconfig"],
-                        Self::VmService => &["xdg-user-dirs", "glib", "systemd", "xdpyinfo"],
+                        Self::VmService => {
+                            &["xdg-user-dirs", "glib", "systemd", "xdpyinfo", "fontconfig"]
+                        }
                         _ if binary == "airlock-usb" => &[
                             "coreutils",
                             "util-linux",
@@ -333,6 +335,17 @@ impl Application {
                             ]))
                         )
                         .into()
+                    } else if matches!(self, Self::VmService) {
+                        nix_text!(
+                            r#"
+                            wrapProgram "$out/bin/{binary}" --prefix PATH : {path} \
+                              --set AIRLOCK_XSETTINGSD {provider}/bin/xsettingsd
+                        "#,
+                            binary = binary,
+                            path = path,
+                            provider = crate::desktop::settings_provider(pkgs),
+                        )
+                        .into()
                     } else {
                         nix_text!(
                             r#"
@@ -345,12 +358,22 @@ impl Application {
                     }
                 });
                 attributes.extend([
-                    ("nativeBuildInputs", packages(&["makeWrapper"])),
+                    (
+                        "nativeBuildInputs",
+                        packages(if matches!(self, Self::VmService) {
+                            &["makeWrapper", "pkg-config"]
+                        } else {
+                            &["makeWrapper"]
+                        }),
+                    ),
                     (
                         "postInstall",
                         NixValue::join_text("\n", NixValue::list(scripts)),
                     ),
                 ]);
+                if matches!(self, Self::VmService) {
+                    attributes.push(("buildInputs", packages(&["glib", "pango"])));
+                }
             }
             Self::PrepareBoot
             | Self::StoreCache

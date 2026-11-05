@@ -11,6 +11,10 @@ description = "Airlock integration services inside individual VMs"
 name = "airlock-vm-service"
 path = "src/main.rs"
 
+[features]
+default = ["desktop-preferences"]
+desktop-preferences = ["dep:gio", "dep:pango"]
+
 [dependencies]
 airlock-desktop-preferences = { path = "../../../airlock-common/desktop-preferences" }
 airlock-machine-core = { path = "../../../airlock-common/machine" }
@@ -18,6 +22,8 @@ airlock-machine-planning = { path = "../../../airlock-common/machine-planning" }
 airlock-nix-core = { path = "../../../airlock-common/nix", features = ["runtime"] }
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
+gio = { version = "0.21", optional = true }
+pango = { version = "0.21", optional = true }
 rustix = { version = "1.1", features = ["fs", "event", "process", "termios", "stdio"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -36,3 +42,7 @@ x11rb = { version = "0.13", features = ["xfixes"] }
 
 [lib]
 path = "src/lib.rs"
+
+[[example]]
+name = "preferences_peer"
+path = "tests/fixtures/preferences_peer.rs"

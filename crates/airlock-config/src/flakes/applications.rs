@@ -6,7 +6,7 @@ use rusix::{
         NixExpression, NixPath,
         raw::{NixRepresentation, NixValue},
     },
-    nix_record,
+    nix_record, nix_text,
 };
 
 /// Describe application outputs without importing generated package catalogues back into authoring.
@@ -68,6 +68,12 @@ pub(super) fn outputs() -> NixValue {
                 .bind(|pkgs| nix_record! {
                     "verification": super::verification::shell(&pkgs),
                     "desktop": pkgs.clone().select("mkShell").call(nix_record! {
+                        "AIRLOCK_TEST_XSETTINGSD": nix_text!("{package}/bin/xsettingsd", package = airlock_build::desktop::settings_provider(&pkgs)),
+                        "AIRLOCK_TEST_GSETTINGS_SCHEMAS": nix_text!("{package}/share/gsettings-schemas/{name}/glib-2.0/schemas", package = pkgs.clone().select("gsettings-desktop-schemas"), name = pkgs.clone().select("gsettings-desktop-schemas.name")),
+                        "AIRLOCK_TEST_DCONF_MODULES": nix_text!("{package}/lib/gio/modules", package = pkgs.clone().select("dconf.lib")),
+                        "AIRLOCK_TEST_DCONF_SERVICE": nix_text!("{package}/libexec/dconf-service", package = pkgs.clone().select("dconf.lib")),
+                        "AIRLOCK_TEST_GTK_PORTAL": nix_text!("{package}/libexec/xdg-desktop-portal-gtk", package = pkgs.clone().select("xdg-desktop-portal-gtk")),
+                        "AIRLOCK_TEST_PORTAL": nix_text!("{package}/libexec/xdg-desktop-portal", package = pkgs.clone().select("xdg-desktop-portal")),
                         "nativeBuildInputs": NixValue::list([pkgs.clone().select("pkg-config")]),
                         "PYO3_PYTHON": rusix::nix_text!(
                             "{python}/bin/python3",
@@ -75,6 +81,9 @@ pub(super) fn outputs() -> NixValue {
                         ),
                         "buildInputs": NixValue::list([
                             pkgs.clone().select("gtk4"),
+                            airlock_build::desktop::settings_provider(&pkgs).as_expression(),
+                            pkgs.clone().select("xvfb"),
+                            pkgs.clone().select("xdg-desktop-portal-gtk"),
                             pkgs.clone().select("libadwaita"),
                             pkgs.clone().select("python3"),
                             pkgs.select("udev"),

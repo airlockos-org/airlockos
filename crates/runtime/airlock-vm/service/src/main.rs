@@ -38,6 +38,9 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Action {
+    /// Follow the assigned GUI domain's read-only desktop preferences.
+    #[cfg(feature = "desktop-preferences")]
+    Preferences(airlock_vm_service::preferences::Request),
     /// Share desktop clipboard representations through the configured Hermit service.
     Clipboard(clipboard::Args),
     /// Observe boot-critical graphical or worker services without starting them.
@@ -118,6 +121,8 @@ fn authorize_capture(path: Option<&std::path::Path>) -> Result<()> {
 
 fn run(args: Args) -> Result<()> {
     match args.command {
+        #[cfg(feature = "desktop-preferences")]
+        Action::Preferences(request) => airlock_vm_service::preferences::execute(request)?,
         Action::Clipboard(args) => clipboard::run(args)?,
         Action::BootHealth(request) => boot_health::execute(request)?,
         Action::Diagnostics(request) => diagnostics::execute(request),
