@@ -144,7 +144,12 @@ fn receiver_message(input: &mut dyn BufRead) -> Result<Value> {
 
 impl Source {
     fn physical(&self, path: &str) -> Result<PathBuf> {
-        Ok(self.physical_store_root.join(entry(path)?))
+        // Closure descriptors and root disks may be children of store objects.
+        // Package inventory roots are still checked separately by paths().
+        let artifact: crate::store_path::StoreArtifact = path.parse()?;
+        Ok(self
+            .physical_store_root
+            .join(Path::new(artifact.as_str()).strip_prefix("/nix/store")?))
     }
 
     fn paths(&self) -> Result<Vec<String>> {

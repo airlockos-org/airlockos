@@ -141,6 +141,7 @@ pub(super) fn entries(build: &Build, system: NixValue) -> NixValue {
         "airlockApps": build.workspace.root(),
         "airlockSupport": build.source.clone(),
         "modulesDirectory": directory,
+        "userModulesDirectory": build.source.join_relative("vms").unwrap(),
         "extraVmSpecialArgs": seed_inputs(),
     });
     NixValue::builtin("mapAttrs")
