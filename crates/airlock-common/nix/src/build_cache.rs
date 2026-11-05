@@ -162,13 +162,11 @@ impl Tools<'_> {
         .checked("query completed build inputs")?)
     }
 
-    fn query(&self, roots: &[StorePath], outputs: bool) -> Result<BTreeSet<StorePath>> {
+    fn query(&self, roots: &[StorePath], options: &[&str]) -> Result<BTreeSet<StorePath>> {
         let mut result = BTreeSet::new();
         for chunk in roots.chunks(128) {
-            let mut args = vec!["--query", "--requisites"];
-            if outputs {
-                args.push("--include-outputs");
-            }
+            let mut args = vec!["--query"];
+            args.extend_from_slice(options);
             args.extend(chunk.iter().map(StorePath::as_str));
             for line in std::str::from_utf8(&self.run(self.nix_store, &args)?)?.lines() {
                 result.insert(line.parse()?);
@@ -183,15 +181,18 @@ impl Tools<'_> {
 
     /// Read bounded batches of recipes; Nix computes the complete dependency traversal.
     fn recipes(&self, derivation: &StorePath, result: &StorePath) -> Result<Recipes> {
-        let metadata = self.query(std::slice::from_ref(derivation), false)?;
+        ensure!(
+            self.query(std::slice::from_ref(derivation), &["--outputs"])?
+                .contains(result),
+            "completed result differs from original derivation"
+        );
+        let metadata = self.query(std::slice::from_ref(derivation), &["--requisites"])?;
         let derivations: Vec<_> = metadata
             .iter()
             .filter(|p| p.as_str().ends_with(".drv"))
             .cloned()
             .collect();
         let mut selected = Vec::new();
-        let mut outputs = BTreeMap::new();
-        let mut matched_result = false;
         for chunk in derivations.chunks(32) {
             let mut args = vec![
                 "--extra-experimental-features",
@@ -215,22 +216,11 @@ impl Tools<'_> {
                     chunk.contains(&path) && received.insert(path.clone()),
                     "unexpected Nix derivation response"
                 );
-                let declared: BTreeSet<_> = entry["outputs"]
-                    .as_object()
-                    .context("missing derivation outputs")?
-                    .values()
-                    .filter_map(|output| output["path"].as_str())
-                    .map(store_path)
-                    .collect::<Result<_>>()?;
-                if &path == derivation {
-                    matched_result = declared.contains(result);
-                }
                 if entry["env"]["AIRLOCK_BUILD_ARTIFACT"] == "1"
                     || entry["structuredAttrs"]["AIRLOCK_BUILD_ARTIFACT"] == "1"
                 {
                     selected.push(path.clone());
                 }
-                outputs.insert(path, declared);
             }
             ensure!(
                 received.len() == chunk.len(),
@@ -238,18 +228,10 @@ impl Tools<'_> {
             );
         }
         ensure!(
-            matched_result,
-            "completed result differs from original derivation"
-        );
-        ensure!(
             !selected.is_empty(),
             "build has no reusable Airlock application recipes"
         );
-        Ok(Recipes {
-            metadata,
-            selected,
-            outputs,
-        })
+        Ok(Recipes { metadata, selected })
     }
 
     /// Read actual NAR sizes from Nix, accepting its supported array/map response forms.
@@ -306,7 +288,7 @@ impl Tools<'_> {
         let recipes = self.recipes(derivation, result)?;
         let metadata = self.metadata(&recipes.metadata)?;
         let mut paths = recipes.metadata;
-        paths.extend(self.query(&recipes.selected, true)?);
+        paths.extend(self.query(&recipes.selected, &["--requisites", "--include-outputs"])?);
         ensure!(
             paths.len() <= MAX_PATHS,
             "build closure exceeds object limit"
@@ -326,13 +308,16 @@ impl Tools<'_> {
             self.metadata(&recipes.metadata)? == request.metadata,
             "imported build recipe metadata differs"
         );
-        let inputs = self.query(&recipes.selected, false)?;
+        let inputs = self.query(&recipes.selected, &["--requisites"])?;
+        let derivations: Vec<_> = inputs
+            .iter()
+            .filter(|path| path.as_str().ends_with(".drv"))
+            .cloned()
+            .collect();
         let mut allowed = recipes.metadata;
-        for (derivation, outputs) in recipes.outputs {
-            if inputs.contains(&derivation) {
-                allowed.extend(outputs);
-            }
-        }
+        // Nix resolves fixed-output identities even when derivation JSON omits their paths.
+        // This queries declarations; it neither builds nor imports compiled outputs in dom0.
+        allowed.extend(self.query(&derivations, &["--outputs"])?);
         allowed.extend(inputs);
         ensure!(
             request.paths.keys().all(|path| allowed.contains(path)),
@@ -383,6 +368,4 @@ struct Recipes {
     metadata: BTreeSet<StorePath>,
     // Actual marked application recipes inside that closure.
     selected: Vec<StorePath>,
-    // Declared output identities, including outputs not yet present on the receiver.
-    outputs: BTreeMap<StorePath, BTreeSet<StorePath>>,
 }
