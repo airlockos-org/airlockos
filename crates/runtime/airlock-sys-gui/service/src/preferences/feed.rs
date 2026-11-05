@@ -96,7 +96,13 @@ impl Drop for Publisher {
 }
 
 /// Read only a current, regular, bounded and completely validated frame.
+#[cfg(test)]
 pub(super) fn read(directory: &Path) -> Result<Vec<u8>> {
+    Ok(current(directory)?.0)
+}
+
+/// Return the frame and its remaining heartbeat lifetime from the same opened inode.
+pub(super) fn current(directory: &Path) -> Result<(Vec<u8>, std::time::Duration)> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
@@ -124,5 +130,5 @@ pub(super) fn read(directory: &Path) -> Result<Vec<u8>> {
         "preferences feed must contain exactly one snapshot"
     );
     decoder.finish()?;
-    Ok(frame)
+    Ok((frame, MAX_AGE - age))
 }

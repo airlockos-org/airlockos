@@ -122,6 +122,44 @@ fn subscribers_receive_initial_changes_and_reconnect_state() -> Result<()> {
     Ok(())
 }
 
+/// Idle streams do no file reads; atomic replacement wakes them and watch loss closes them.
+#[test]
+fn exporter_waits_for_changes_without_periodic_snapshot_reads() -> Result<()> {
+    use rustix::fs::inotify;
+    let root = tempfile::tempdir()?;
+    let publisher = feed::Publisher::new(root.path())?;
+    publisher.publish(&Snapshot::default())?;
+    let directory = root.path().join("feed");
+    let (mut peer, worker) = subscriber(&directory)?;
+    receive(&mut peer)?;
+    let accesses = inotify::init(inotify::CreateFlags::NONBLOCK | inotify::CreateFlags::CLOEXEC)?;
+    inotify::add_watch(
+        &accesses,
+        directory.join("snapshot"),
+        inotify::WatchFlags::ACCESS,
+    )?;
+    std::thread::sleep(Duration::from_millis(350));
+    let mut buffer = [std::mem::MaybeUninit::uninit(); 512];
+    let mut events = inotify::Reader::new(&accesses, &mut buffer);
+    assert!(matches!(events.next(), Err(rustix::io::Errno::WOULDBLOCK)));
+    let changed = Snapshot {
+        high_contrast: Setting::Supported(true),
+        ..Snapshot::default()
+    };
+    publisher.publish(&changed)?;
+    assert_eq!(receive(&mut peer)?, changed);
+    fs::rename(&directory, root.path().join("moved-feed"))?;
+    assert!(
+        worker
+            .join()
+            .unwrap()
+            .unwrap_err()
+            .to_string()
+            .contains("watch lost")
+    );
+    Ok(())
+}
+
 /// A full output pipe times out independently; unsolicited input cannot mutate the feed.
 #[test]
 fn slow_and_writing_guests_do_not_affect_other_subscribers() -> Result<()> {

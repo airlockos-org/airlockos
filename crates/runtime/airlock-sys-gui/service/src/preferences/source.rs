@@ -6,10 +6,9 @@ use airlock_desktop_preferences::{
 };
 use anyhow::{Result, bail};
 use gio::{Settings, SettingsBackend, SettingsSchemaSource, glib, prelude::*};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::path::Path;
 use std::rc::Rc;
-use std::time::Instant;
 
 /// GNOME keys that have a corresponding field in the fixed shared contract.
 const INTERFACE_KEYS: &[&str] = &[
@@ -26,6 +25,9 @@ const INTERFACE_KEYS: &[&str] = &[
 /// Accessibility preferences kept distinct from color and animation values.
 const ACCESSIBILITY_KEYS: &[&str] = &["high-contrast", "reduced-motion"];
 
+/// A notification scheduler installed after initial state capture.
+type Wakeup = Rc<RefCell<Option<Box<dyn Fn()>>>>;
+
 /// Session-owned settings handles; construction subscribes before the first value read.
 pub(super) struct Source {
     /// Effective interface values, including installed schema overrides and resets.
@@ -34,6 +36,8 @@ pub(super) struct Source {
     accessibility: Option<Settings>,
     /// One coalescing bit, never a queue of change events.
     pub(super) dirty: Rc<Cell<bool>>,
+    /// Installed scheduler, called only by allowlisted source notifications.
+    wakeup: Wakeup,
 }
 
 impl Source {
@@ -43,13 +47,18 @@ impl Source {
         backend: Option<&SettingsBackend>,
     ) -> Self {
         let dirty = Rc::new(Cell::new(true));
+        let wakeup: Wakeup = Rc::new(RefCell::new(None));
         let observe = |schema, keys: &'static [&'static str]| {
             let schema = schemas?.lookup(schema, true)?;
             let settings = Settings::new_full(&schema, backend, None);
             let changed = dirty.clone();
+            let notify = wakeup.clone();
             settings.connect_changed(None, move |_, key| {
                 if keys.contains(&key) {
                     changed.set(true);
+                    if let Some(wakeup) = notify.borrow().as_ref() {
+                        wakeup();
+                    }
                 }
             });
             Some(settings)
@@ -58,6 +67,7 @@ impl Source {
             interface: observe("org.gnome.desktop.interface", INTERFACE_KEYS),
             accessibility: observe("org.gnome.desktop.a11y.interface", ACCESSIBILITY_KEYS),
             dirty,
+            wakeup,
         }
     }
 
@@ -128,40 +138,76 @@ fn value<T: glib::variant::FromVariant, U>(
 
 /// Run on the graphical session's GLib context; a session unit stops this process on logout.
 pub(super) fn run(root: &Path) -> Result<()> {
-    let publisher = Publisher::new(root)?;
-    let source = Source::new(SettingsSchemaSource::default().as_ref(), None);
+    let publisher = Rc::new(Publisher::new(root)?);
+    let source = Rc::new(Source::new(SettingsSchemaSource::default().as_ref(), None));
     source.dirty.set(false);
-    let mut latest = source.snapshot()?;
-    publisher.publish(&latest)?;
-    let mut refreshed = Instant::now();
+    let latest = Rc::new(RefCell::new(source.snapshot()?));
+    publisher.publish(&latest.borrow())?;
     let main_loop = glib::MainLoop::new(None, false);
     let failure = Rc::new(std::cell::RefCell::new(None));
-    let failed = failure.clone();
-    let running = main_loop.clone();
-    let timer = glib::timeout_add_local(TICK, move || {
-        let mut changed = false;
-        if source.dirty.replace(false) {
-            match source.snapshot() {
-                Ok(snapshot) if snapshot != latest => {
-                    latest = snapshot;
-                    changed = true;
-                }
-                Ok(_) => {}
-                Err(error) => eprintln!("preferences: retaining last valid snapshot: {error}"),
-            }
-        }
-        if changed || refreshed.elapsed() >= HEARTBEAT {
-            if let Err(error) = publisher.publish(&latest) {
-                *failed.borrow_mut() = Some(error);
+    let publish: Rc<dyn Fn()> = {
+        let (publisher, latest, failure, running) = (
+            publisher.clone(),
+            latest.clone(),
+            failure.clone(),
+            main_loop.clone(),
+        );
+        Rc::new(move || {
+            if let Err(error) = publisher.publish(&latest.borrow()) {
+                *failure.borrow_mut() = Some(error);
                 running.quit();
-                // Leave the timer registered so the owner can always remove it below.
             }
-            refreshed = Instant::now();
+        })
+    };
+    let pending = Rc::new(RefCell::new(None::<glib::SourceId>));
+    let schedule = {
+        let (source, pending, latest, publish) = (
+            Rc::downgrade(&source),
+            pending.clone(),
+            latest.clone(),
+            publish.clone(),
+        );
+        move || {
+            if pending.borrow().is_some() {
+                return;
+            }
+            let (source, pending_callback, latest, publish) = (
+                source.clone(),
+                pending.clone(),
+                latest.clone(),
+                publish.clone(),
+            );
+            *pending.borrow_mut() = Some(glib::timeout_add_local_once(TICK, move || {
+                pending_callback.borrow_mut().take();
+                if let Some(source) = source.upgrade() {
+                    source.dirty.set(false);
+                    match source.snapshot() {
+                        Ok(snapshot) if snapshot != *latest.borrow() => {
+                            *latest.borrow_mut() = snapshot;
+                            publish();
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            eprintln!("preferences: retaining last valid snapshot: {error}")
+                        }
+                    }
+                }
+            }));
         }
+    };
+    if source.dirty.get() {
+        schedule();
+    }
+    *source.wakeup.borrow_mut() = Some(Box::new(schedule));
+    let timer = glib::timeout_add_local(HEARTBEAT, move || {
+        publish();
         glib::ControlFlow::Continue
     });
     main_loop.run();
     timer.remove();
+    if let Some(timer) = pending.borrow_mut().take() {
+        timer.remove();
+    }
     match failure.take() {
         Some(error) => Err(error),
         None => Ok(()),

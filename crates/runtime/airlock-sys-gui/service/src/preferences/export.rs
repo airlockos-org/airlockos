@@ -1,8 +1,9 @@
 //! Bounded output-only subscription. Input bytes terminate it; EOF permits a read-only client.
 
-use super::{TICK, feed};
+use super::feed;
 use anyhow::{Result, bail, ensure};
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
+use rustix::fs::inotify;
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use std::io::{Read, Write};
 use std::path::Path;
@@ -37,13 +38,29 @@ pub(super) fn pump<R: Read + std::os::fd::AsFd, W: Write + std::os::fd::AsFd>(
 ) -> Result<()> {
     fcntl_setfl(&*input, fcntl_getfl(&*input)? | OFlags::NONBLOCK)?;
     fcntl_setfl(&*output, fcntl_getfl(&*output)? | OFlags::NONBLOCK)?;
+    // Watch the stable directory before opening a snapshot: publication replaces
+    // its inode atomically, and changes racing the initial read remain queued.
+    let watch = inotify::init(inotify::CreateFlags::CLOEXEC | inotify::CreateFlags::NONBLOCK)?;
+    inotify::add_watch(
+        &watch,
+        directory,
+        inotify::WatchFlags::MOVED_TO
+            | inotify::WatchFlags::CLOSE_WRITE
+            | inotify::WatchFlags::DELETE
+            | inotify::WatchFlags::ATTRIB
+            | inotify::WatchFlags::DELETE_SELF
+            | inotify::WatchFlags::MOVE_SELF,
+    )?;
+    let mut buffer = [std::mem::MaybeUninit::uninit(); 4096];
+    let mut events = inotify::Reader::new(&watch, &mut buffer);
     let started = Instant::now();
     let mut input_open = true;
     let mut previous = Vec::new();
     let mut pending = Vec::new();
     let mut sent = 0;
     let mut write_started = Instant::now();
-    let mut next_read = Instant::now();
+    let mut dirty = true;
+    let mut expires = started + INITIAL_WAIT;
     loop {
         if started.elapsed() >= lease {
             return Ok(());
@@ -61,9 +78,11 @@ pub(super) fn pump<R: Read + std::os::fd::AsFd, W: Write + std::os::fd::AsFd>(
             }
         }
 
-        if pending.is_empty() && Instant::now() >= next_read {
-            match feed::read(directory) {
-                Ok(frame) => {
+        if pending.is_empty() && (dirty || Instant::now() >= expires) {
+            dirty = false;
+            match feed::current(directory) {
+                Ok((frame, lifetime)) => {
+                    expires = Instant::now() + lifetime;
                     if frame != previous {
                         pending = frame;
                         sent = 0;
@@ -73,7 +92,6 @@ pub(super) fn pump<R: Read + std::os::fd::AsFd, W: Write + std::os::fd::AsFd>(
                 Err(_) if previous.is_empty() && started.elapsed() < INITIAL_WAIT => {}
                 Err(error) => return Err(error),
             }
-            next_read = Instant::now() + TICK;
         }
         if !pending.is_empty() {
             ensure!(
@@ -95,23 +113,39 @@ pub(super) fn pump<R: Read + std::os::fd::AsFd, W: Write + std::os::fd::AsFd>(
             }
         }
 
-        let events = if pending.is_empty() {
+        let output_events = if pending.is_empty() {
             PollFlags::empty()
         } else {
             PollFlags::OUT
         };
-        let mut descriptors = vec![PollFd::new(&*output, events)];
+        let mut descriptors = vec![
+            PollFd::new(&*output, output_events),
+            PollFd::new(&watch, PollFlags::IN),
+        ];
         if input_open {
             descriptors.push(PollFd::new(&*input, PollFlags::IN));
         }
+        // A queued change is read immediately once an in-flight frame finishes.
+        // Otherwise sleep until actual I/O or the nearest meaningful deadline.
+        if pending.is_empty() && dirty {
+            continue;
+        }
+        let deadline = (started + lease).min(if pending.is_empty() {
+            expires
+        } else {
+            write_started + WRITE_WAIT
+        });
+        let remaining = deadline.saturating_duration_since(Instant::now());
         let timeout = Timespec {
-            tv_sec: 0,
-            tv_nsec: TICK.as_nanos() as i64,
+            tv_sec: remaining.as_secs() as i64,
+            tv_nsec: i64::from(remaining.subsec_nanos()),
         };
-        match poll(&mut descriptors, Some(&timeout)) {
-            Ok(_) => {}
-            Err(rustix::io::Errno::INTR) => continue,
-            Err(error) => return Err(error.into()),
+        if events.is_buffer_empty() {
+            match poll(&mut descriptors, Some(&timeout)) {
+                Ok(_) => {}
+                Err(rustix::io::Errno::INTR) => continue,
+                Err(error) => return Err(error.into()),
+            }
         }
         ensure!(
             !descriptors[0]
@@ -119,5 +153,34 @@ pub(super) fn pump<R: Read + std::os::fd::AsFd, W: Write + std::os::fd::AsFd>(
                 .intersects(PollFlags::ERR | PollFlags::HUP | PollFlags::NVAL),
             "preferences subscriber disconnected"
         );
+        // Bound work per wakeup, including an overflowing or busy producer. Lost
+        // watches/overflow end this subscription, requiring a clean resubscribe.
+        for _ in 0..256 {
+            match events.next() {
+                Ok(event) => {
+                    ensure!(
+                        !event.events().intersects(
+                            inotify::ReadFlags::IGNORED
+                                | inotify::ReadFlags::QUEUE_OVERFLOW
+                                | inotify::ReadFlags::UNMOUNT
+                                | inotify::ReadFlags::DELETE_SELF
+                                | inotify::ReadFlags::MOVE_SELF
+                        ),
+                        "preferences feed watch lost"
+                    );
+                    dirty |= event
+                        .file_name()
+                        .is_some_and(|name| name.to_bytes() == b"snapshot");
+                }
+                Err(rustix::io::Errno::WOULDBLOCK) => break,
+                Err(rustix::io::Errno::INTR) => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        // Reader may have buffered more events than the work budget. Consume
+        // those before sleeping rather than waiting for another kernel edge.
+        if !events.is_buffer_empty() {
+            dirty = true;
+        }
     }
 }
