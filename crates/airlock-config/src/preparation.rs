@@ -440,14 +440,9 @@ pub fn run_machine(
         // Installed machine inputs refer to an immutable application source. Capture
         // it alongside the generated graph so relative crate paths remain portable.
         // Development preparation already captures and generates that workspace.
-        if let Some(prepared) = std::env::var_os("AIRLOCK_PREPARED_APPLICATIONS") {
-            if ["Cargo.nix", "airlock-crate-build.nix"]
-                .iter()
-                .any(|name| !Path::new(&prepared).join(name).is_file())
-            {
-                return Err("development application graph was not prepared".into());
-            }
-            mirror(Path::new(&prepared), &directory.join("generated/crate2nix"))?;
+        let applications = if let Some(prepared) = std::env::var_os("AIRLOCK_PREPARED_APPLICATIONS")
+        {
+            PathBuf::from(prepared)
         } else {
             let applications = std::env::var_os("AIRLOCK_APPS")
                 .map(PathBuf::from)
@@ -458,10 +453,21 @@ pub fn run_machine(
                     "installed preparation requires admitted store application sources".into(),
                 );
             }
-            let captured = directory.join("generated/crate2nix");
-            mirror(&applications, &captured)?;
-            crates::generate(&captured)?;
+            applications
+        };
+
+        // Admitted applications already contain their source-bound graphs. Machine
+        // edits cannot change that immutable workspace. Reuse its recipes rather
+        // than regenerating and overwriting read-only Nix store copies.
+        for workspace in ["", "tooling/airlock-store-packer"] {
+            for name in ["Cargo.nix", "airlock-crate-build.nix"] {
+                if !applications.join(workspace).join(name).is_file() {
+                    return Err("admitted application graph was not prepared".into());
+                }
+            }
         }
+
+        mirror(&applications, &directory.join("generated/crate2nix"))?;
         crate::export_machine(
             snapshot,
             &crate::profiles::bootstrap::machine()?,
