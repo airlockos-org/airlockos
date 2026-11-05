@@ -193,7 +193,13 @@ impl Tools<'_> {
         let mut outputs = BTreeMap::new();
         let mut matched_result = false;
         for chunk in derivations.chunks(32) {
-            let mut args = vec!["derivation", "show", "--no-pretty"];
+            let mut args = vec![
+                "--extra-experimental-features",
+                "nix-command",
+                "derivation",
+                "show",
+                "--no-pretty",
+            ];
             args.extend(chunk.iter().map(StorePath::as_str));
             let raw: Value = serde_json::from_slice(&self.run(self.nix, &args)?)?;
             let graph = if let Some(version) = raw.get("version") {
@@ -251,7 +257,12 @@ impl Tools<'_> {
         let ordered: Vec<_> = paths.iter().cloned().collect();
         let mut result = BTreeMap::new();
         for chunk in ordered.chunks(128) {
-            let mut args = vec!["path-info", "--json"];
+            let mut args = vec![
+                "--extra-experimental-features",
+                "nix-command",
+                "path-info",
+                "--json",
+            ];
             args.extend(chunk.iter().map(StorePath::as_str));
             let raw: Value = serde_json::from_slice(&self.run(self.nix, &args)?)?;
             let entries: Vec<_> = match &raw {
