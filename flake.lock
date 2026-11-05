@@ -4,17 +4,17 @@
       "flake": false,
       "locked": {
         "dir": "crates",
-        "lastModified": 1793749314,
-        "narHash": "sha256-CtyN4xeF12/6cflBL4H+mhdo03lTBef+a1fYADL5mB0=",
+        "lastModified": 1793840792,
+        "narHash": "sha256-6t+lKNLL/+6ndTTJ8mYGIVu1vuS8iRWjip05DR6Uc7A=",
         "ref": "refs/heads/main",
-        "rev": "631f33c7678cd67a10f77a05f924da85cb6b0cf1",
+        "rev": "8734f7e2930e3a7023066e9c7caf403b290eb252",
         "type": "git",
         "url": "https://github.com/airlockos-org/airlockos.git"
       },
       "original": {
         "dir": "crates",
         "ref": "main",
-        "rev": "631f33c7678cd67a10f77a05f924da85cb6b0cf1",
+        "rev": "8734f7e2930e3a7023066e9c7caf403b290eb252",
         "type": "git",
         "url": "https://github.com/airlockos-org/airlockos.git"
       }
@@ -74,17 +74,17 @@
       },
       "locked": {
         "dir": "crates/vendor/nixos-qubes",
-        "lastModified": 1793749314,
-        "narHash": "sha256-CtyN4xeF12/6cflBL4H+mhdo03lTBef+a1fYADL5mB0=",
+        "lastModified": 1793840792,
+        "narHash": "sha256-6t+lKNLL/+6ndTTJ8mYGIVu1vuS8iRWjip05DR6Uc7A=",
         "ref": "refs/heads/main",
-        "rev": "631f33c7678cd67a10f77a05f924da85cb6b0cf1",
+        "rev": "8734f7e2930e3a7023066e9c7caf403b290eb252",
         "type": "git",
         "url": "https://github.com/airlockos-org/airlockos.git"
       },
       "original": {
         "dir": "crates/vendor/nixos-qubes",
         "ref": "main",
-        "rev": "631f33c7678cd67a10f77a05f924da85cb6b0cf1",
+        "rev": "8734f7e2930e3a7023066e9c7caf403b290eb252",
         "type": "git",
         "url": "https://github.com/airlockos-org/airlockos.git"
       }
