@@ -136,7 +136,14 @@ pub fn on_app(
     let locked = PyDict::new(py);
     locked.set_item("lock", true)?;
     if matches!(request, Request::Install(_)) {
-        app.call_method("load", (), Some(&locked))?;
+        // Qubes' constructor suppresses events while loading properties: network
+        // defaults are resolved before each VM's explicit NetVM is restored.
+        let events = app.getattr("events_enabled")?;
+        app.setattr("events_enabled", false)?;
+        let loaded = app.call_method("load", (), Some(&locked));
+        let restored = app.setattr("events_enabled", &events);
+        loaded?;
+        restored?;
     }
     let name = match &request {
         Request::Snapshot { target } => target,

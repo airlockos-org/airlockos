@@ -345,7 +345,10 @@ fn app(
     let object = argument(args, 0)?;
 
     match name {
-        "__init__" => initialize(&object)?,
+        "__init__" => {
+            object.setattr("events_enabled", true)?;
+            initialize(&object)?;
+        }
         "load" => {}
         "get_pool" => {
             return Ok(object
