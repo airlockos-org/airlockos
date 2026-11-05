@@ -388,7 +388,10 @@ fn run(args: Args) -> Result<Value> {
         Action::AdmissionPrepare { release, caller } => c.admission_prepare(&release, &caller)?,
         Action::BuildPrepare => c.prepare_build_cache()?,
         Action::BuildReceive { token, caller } => match c.receive_build_cache(&token, &caller) {
-            Ok(value) => value,
+            Ok(value) => {
+                airlock_nix_core::artifact::write_message(&mut io::stdout().lock(), &value)?;
+                Value::Null
+            }
             Err(error) => {
                 crate::store::report_build_error(&error);
                 return Err(crate::process::ProtocolFailed.into());
@@ -509,6 +512,7 @@ pub fn main() -> ExitCode {
         args.command,
         Action::Setup { .. }
             | Action::AdmissionReceive { .. }
+            | Action::BuildReceive { .. }
             | Action::Storage { .. }
             | Action::Rpc(_)
     );
