@@ -115,6 +115,8 @@ pub(super) fn verify_registration(source: &str, objects: &BTreeMap<String, Value
     let ordered: Vec<_> = objects.iter().collect();
     for chunk in ordered.chunks(128) {
         let mut args = vec![
+            "--extra-experimental-features",
+            "nix-command",
             "hash",
             "convert",
             "--hash-algo",
