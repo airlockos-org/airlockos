@@ -40,6 +40,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Action {
+    /// Report the current USB disk matching an exact serial as JSON, without changing it.
+    InspectTarget {
+        // Exact hardware serial used by the later provisioning request.
+        #[arg(long)]
+        serial: String,
+    },
     /// Inspect by default; explicitly opt into erasing a USB.
     Write(Write),
     /// Use a build result link and an exact hardware serial.
@@ -57,6 +63,9 @@ enum Action {
         // Machine source captured by the build owner before preparation.
         #[arg(long)]
         machine_revision: GitRevision,
+        // Read-only observation displayed to the operator immediately before sudo.
+        #[arg(long)]
+        expected_target: String,
     },
     /// Personalize an already mounted Airlock USB root.
     Personalize {
@@ -438,6 +447,14 @@ pub(crate) fn main() -> Result<()> {
     };
 
     match action {
+        Action::InspectTarget { serial } => {
+            serde_json::to_writer(
+                std::io::stdout().lock(),
+                &device::UsbTarget::inspect(&serial)?,
+            )?;
+            println!();
+            Ok(())
+        }
         Action::Write(args) => write_image(&args, SourcePolicy::Direct, None),
         Action::WriteLatest(args) => {
             let (write, selected, output) =
@@ -456,6 +473,7 @@ pub(crate) fn main() -> Result<()> {
             provision,
             application_revision,
             machine_revision,
+            expected_target,
         } => {
             let mut reply = crate::provisioning::reply_pipe()?;
             ensure!(
@@ -469,6 +487,11 @@ pub(crate) fn main() -> Result<()> {
                 selected.serial.as_deref() == Some(&provision.source.serial),
                 "USB serial changed during selection"
             );
+            let expected: device::UsbTarget = serde_json::from_str(&expected_target)?;
+            ensure!(
+                selected.target()? == expected,
+                "USB target changed after the pre-sudo preview; stop and select the device again"
+            );
             growth::backup_location(&provision.resize_backup_dir, &selected)?;
             growth::backup_location(
                 provision
@@ -478,12 +501,7 @@ pub(crate) fn main() -> Result<()> {
                     .context("image result parent")?,
                 &selected,
             )?;
-            println!(
-                "USB selected for provisioning after the build: {serial}, {model}, {bytes} bytes.",
-                serial = provision.source.serial,
-                model = selected.model.as_deref().unwrap_or("unknown model"),
-                bytes = selected.size,
-            );
+            println!("{expected}");
             let prepared = provision.settings.prepare()?;
             ensure!(
                 prepared.revision() == &application_revision,

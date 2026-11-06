@@ -203,6 +203,7 @@ fn combined_usb_build_prepares_once_and_provisions_only_its_successful_image() -
         "missing_key",
         "prepare_fail",
         "vendor_missing",
+        "inspect_fail",
         "build_fail",
         "missing_result",
         "source_change",
@@ -276,12 +277,12 @@ fn combined_usb_build_prepares_once_and_provisions_only_its_successful_image() -
             command.env("AIRLOCK_CARGO_VENDOR", &vendor);
         }
         let output = run(&mut command, None)?;
-        if matches!(outcome, "vendor_missing" | "missing_key") {
+        if matches!(outcome, "vendor_missing" | "missing_key" | "inspect_fail") {
             assert!(!output.status.success());
-            let expected = if outcome == "missing_key" {
-                "SSH public key is missing"
-            } else {
-                "make prepare-dependencies"
+            let expected = match outcome {
+                "missing_key" => "SSH public key is missing",
+                "inspect_fail" => "USB target lookup failed",
+                _ => "make prepare-dependencies",
             };
             assert!(String::from_utf8_lossy(&output.stderr).contains(expected));
             assert!(fixture.calls("sudo")?.is_empty());
@@ -299,9 +300,19 @@ fn combined_usb_build_prepares_once_and_provisions_only_its_successful_image() -
         );
         assert_eq!(fixture.path("usb-provisioned").exists(), succeeds);
         assert_eq!(fixture.calls("sudo")?.len(), 1);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let before_prompt = stderr.split("fixture sudo password prompt").next().unwrap();
+        assert_eq!(
+            before_prompt.lines().last(),
+            Some(
+                "Target USB: /dev/fixture-usb | Fixture USB disk | 223.6 GiB (240057409536 bytes) | Serial: fixture-serial"
+            ),
+            "target details must be the last line before sudo"
+        );
         let helper_calls = fixture.calls("airlock-usb")?;
-        assert_eq!(helper_calls.len(), 1);
-        let helper_args = helper_calls[0].as_array().context("helper arguments")?;
+        assert_eq!(helper_calls.len(), 2);
+        assert_eq!(helper_calls[0][0], "inspect-target");
+        let helper_args = helper_calls[1].as_array().context("helper arguments")?;
         let key_argument = helper_args.iter().position(|arg| arg == "--public-key");
         if outcome == "success_with_key" {
             assert_eq!(

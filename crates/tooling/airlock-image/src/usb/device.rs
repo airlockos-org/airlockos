@@ -3,9 +3,10 @@
 use crate::support::{output, root_only, run};
 use airlock_provisioning_core as verified;
 use anyhow::{Context, Result, ensure};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
+    fmt,
     fs::{self, File},
     os::fd::AsRawFd,
     os::unix::fs::{FileTypeExt, MetadataExt},
@@ -13,12 +14,60 @@ use std::{
     process::Command,
 };
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct Identity {
     // Kernel block-device number; names alone can be reused after unplugging.
     device: u64,
     // Kernel disk sequence changes even when a replacement reuses the same number.
     sequence: u64,
+}
+
+/// Read-only USB observation shown before sudo and compared again by the privileged helper.
+/// This snapshot carries no permission to write; normal provisioning checks still apply.
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UsbTarget {
+    // Current kernel device path, resolved from the exact supplied serial.
+    name: PathBuf,
+    // Informational model from the same inventory as the serial and capacity.
+    model: Option<String>,
+    // Observed hardware serial, independently matched to the operator's selection.
+    serial: String,
+    // Whole-disk capacity in bytes, never a partition or image size.
+    bytes: u64,
+    // Device number and kernel incarnation detect replacement across authentication.
+    identity: Identity,
+}
+
+impl UsbTarget {
+    /// Resolve one attached USB disk without opening it for writing or changing its mounts.
+    pub(super) fn inspect(serial: &str) -> Result<Self> {
+        let disk = inspect(&select(serial)?, false)?;
+        ensure!(
+            disk.serial.as_deref() == Some(serial),
+            "USB serial changed during selection"
+        );
+        disk.target()
+    }
+}
+
+impl fmt::Display for UsbTarget {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "Target USB: {device} | {model} | {gib:.1} GiB ({bytes} bytes) | Serial: {serial}",
+            device = self.name.display(),
+            model = self
+                .model
+                .as_deref()
+                .unwrap_or("unknown model")
+                .trim()
+                .escape_debug(),
+            gib = self.bytes as f64 / 1_073_741_824.0,
+            bytes = self.bytes,
+            serial = self.serial.escape_debug(),
+        )
+    }
 }
 
 fn identity(path: &Path) -> Result<Identity> {
@@ -80,6 +129,21 @@ struct Inventory {
 }
 
 impl Disk {
+    /// Capture the facts displayed before elevation, including the current kernel incarnation.
+    pub(super) fn target(&self) -> Result<UsbTarget> {
+        let identity = self.identity.as_ref().context("USB identity unavailable")?;
+        Ok(UsbTarget {
+            name: self.name.clone(),
+            model: self.model.clone(),
+            serial: self.serial.clone().context("USB serial unavailable")?,
+            bytes: self.size,
+            identity: Identity {
+                device: identity.device,
+                sequence: identity.sequence,
+            },
+        })
+    }
+
     /// Project real kernel/inventory facts; preparing a mounted disk never claims an unused observation.
     pub(super) fn evidence(&self) -> Result<verified::Observation> {
         let identity = self.identity.as_ref().context("USB identity unavailable")?;

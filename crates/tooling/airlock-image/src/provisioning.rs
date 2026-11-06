@@ -20,6 +20,9 @@ pub const READY: &[u8] = b"airlock-usb-prepared-v2\n";
 /// Actual build outcomes projected into the executable verification gate.
 pub use airlock_provisioning_core::BuildOutcome;
 
+/// Disk details shared by the unprivileged preview and the authenticated helper.
+pub use crate::usb::device::UsbTarget;
+
 /// Original source and private output coordinate, shared by the build owner and waiting USB helper.
 #[derive(Clone)]
 pub struct BuildRun {

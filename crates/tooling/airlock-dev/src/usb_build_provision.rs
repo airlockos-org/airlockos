@@ -1,7 +1,7 @@
 //! Keep image builds unprivileged while a separately authenticated USB helper waits on a private pipe.
 
 use crate::support;
-use airlock_image::provisioning::{BuildOutcome, BuildRun, CompletedBuild, READY};
+use airlock_image::provisioning::{BuildOutcome, BuildRun, CompletedBuild, READY, UsbTarget};
 use airlock_nix_core::runtime::process::OwnedChild;
 use airlock_nix_core::runtime::progress::{Span, phase};
 use airlock_nix_core::store_path::StorePath;
@@ -167,7 +167,7 @@ pub(crate) fn run(root: &Path, args: Args) -> Result<u8> {
     let mut command = Command::new("sudo");
     command
         .arg("--")
-        .arg(usb)
+        .arg(&usb)
         .arg("provision-after-build")
         .arg("--serial")
         .arg(&args.serial)
@@ -199,6 +199,19 @@ pub(crate) fn run(root: &Path, args: Args) -> Result<u8> {
         "Preparing USB provisioning now; sudo and dom0 password prompts precede the image build."
     );
     let helper = phase("credentials", || -> Result<Helper> {
+        let observed = support::output(
+            Command::new(&usb)
+                .arg("inspect-target")
+                .arg("--serial")
+                .arg(&args.serial),
+        )?;
+        let target: UsbTarget = serde_json::from_slice(&observed).context("USB target preview")?;
+        command
+            .arg("--expected-target")
+            .arg(serde_json::to_string(&target)?);
+        // Keep this on stderr with sudo's prompt, after the phase-start event.
+        eprintln!("{target}");
+        io::stderr().flush()?;
         let mut helper = Helper::start(&mut command)?;
         helper.prepared()?;
         Ok(helper)

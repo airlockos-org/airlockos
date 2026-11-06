@@ -20,7 +20,7 @@ pub(crate) fn execute(root: &Path, name: &str, args: &[String]) -> Result<()> {
         && name == "airlock-test-peer"
         && args
             .first()
-            .is_some_and(|arg| arg == "provision-after-build")
+            .is_some_and(|arg| matches!(arg.as_str(), "inspect-target" | "provision-after-build"))
     {
         "airlock-usb"
     } else {
@@ -77,9 +77,28 @@ pub(crate) fn execute(root: &Path, name: &str, args: &[String]) -> Result<()> {
                 args.first().is_some_and(|arg| arg == "--"),
                 "unexpected USB sudo arguments"
             );
+            eprintln!("fixture sudo password prompt");
             return Err(Command::new(&args[1]).args(&args[2..]).exec().into());
         }
         "airlock-usb" if config["usb_flow"].is_object() => {
+            if args.first().is_some_and(|arg| arg == "inspect-target") {
+                ensure!(
+                    args == ["inspect-target", "--serial", "fixture-serial"],
+                    "unexpected USB preview arguments"
+                );
+                ensure!(
+                    config["usb_flow"]["inspect_fail"].as_bool() != Some(true),
+                    "USB target lookup failed"
+                );
+                let target = json!({
+                    "name": "/dev/fixture-usb", "model": "Fixture USB disk",
+                    "serial": "fixture-serial", "bytes": 240057409536_u64,
+                    "identity": {"device": 123, "sequence": 456},
+                });
+                fs::write(root.join("usb-target.json"), serde_json::to_vec(&target)?)?;
+                println!("{target}");
+                return Ok(());
+            }
             ensure!(
                 args.first()
                     .is_some_and(|arg| arg == "provision-after-build"),
@@ -101,6 +120,11 @@ pub(crate) fn execute(root: &Path, name: &str, args: &[String]) -> Result<()> {
                     .context("missing USB run argument")?;
                 Ok(args[index + 1].as_str())
             };
+            ensure!(
+                serde_json::from_str::<Value>(argument("--expected-target")?)?
+                    == serde_json::from_slice::<Value>(&fs::read(root.join("usb-target.json"))?)?,
+                "USB helper did not receive the displayed target identity"
+            );
             let source = Path::new(argument("--repo")?);
             ensure!(
                 source != root.join("parent with spaces"),
