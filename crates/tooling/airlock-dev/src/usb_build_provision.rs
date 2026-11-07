@@ -138,6 +138,7 @@ pub(crate) fn run(root: &Path, args: Args) -> Result<u8> {
         "Supply --nix-root for the private Airlock store."
     );
     let usb = fs::canonicalize(&args.usb_bin).context("prepare image tools before provisioning")?;
+    let generator = crate::build_inputs::generator()?;
     let public_key = args
         .public_key
         .as_ref()
@@ -232,6 +233,8 @@ pub(crate) fn run(root: &Path, args: Args) -> Result<u8> {
         // Native tools must not be replaced by Cargo work in the active checkout.
         .env("CARGO_TARGET_DIR", run.path().join("target"))
         .env("AIRLOCK_CARGO_VENDOR", &source.vendor)
+        .env("AIRLOCK_PACKER_CARGO_VENDOR", &source.packer_vendor)
+        .env("AIRLOCK_CRATE2NIX", &generator)
         .env("GIT_TERMINAL_PROMPT", "0")
         // This Rust recipe is not a Make jobserver participant. Caller settings
         // remain in exported variables, but its closed jobserver FDs must not leak.

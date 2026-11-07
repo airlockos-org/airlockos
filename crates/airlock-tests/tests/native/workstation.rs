@@ -203,6 +203,9 @@ fn combined_usb_build_prepares_once_and_provisions_only_its_successful_image() -
         "missing_key",
         "prepare_fail",
         "vendor_missing",
+        "generator_missing",
+        "generator_wrong_version",
+        "packer_missing",
         "inspect_fail",
         "build_fail",
         "missing_result",
@@ -242,7 +245,26 @@ fn combined_usb_build_prepares_once_and_provisions_only_its_successful_image() -
             flow[outcome] = json!(true);
         }
         flow["vendor_source"] = json!(vendor);
+        let packer = fixture.path("data/cache/packer-vendor");
+        if outcome != "packer_missing" {
+            fs::create_dir_all(&packer)?;
+            fs::write(packer.join("source.txt"), "prepared packer source")?;
+        }
+        flow["packer_source"] = json!(packer);
         fixture.configure(json!({"usb_flow":flow}))?;
+        if outcome == "success" {
+            let mut prepare = fixture.command(&["prepare-build-inputs"]);
+            prepare
+                .env_remove("AIRLOCK_CRATE2NIX")
+                .env_remove("AIRLOCK_CARGO_VENDOR")
+                .env_remove("AIRLOCK_PACKER_CARGO_VENDOR");
+            run(&mut prepare, None)?.checked()?;
+            let calls = fixture.calls("cargo")?;
+            assert_eq!(calls.len(), 3);
+            assert_eq!(calls[0][0], "install");
+            assert_eq!(calls[1][0], "vendor");
+            assert_eq!(calls[2][0], "vendor");
+        }
         airlock_tests::process::peer_link(&fixture.path("tools"), "make")?;
         let usb = airlock_tests::process::peer_link(&fixture.path("tools"), "airlock-usb")?;
         let public = fixture.path("public key with spaces");
@@ -273,15 +295,32 @@ fn combined_usb_build_prepares_once_and_provisions_only_its_successful_image() -
             command.arg("--public-key").arg(&public);
         }
         command.env_remove("AIRLOCK_CARGO_VENDOR");
+        command.env("AIRLOCK_PACKER_CARGO_VENDOR", &packer);
+        if outcome == "success" {
+            command.env_remove("AIRLOCK_CRATE2NIX");
+        } else if outcome == "generator_missing" {
+            command.env("AIRLOCK_CRATE2NIX", fixture.path("missing-crate2nix"));
+        }
         if outcome == "source_change" {
             command.env("AIRLOCK_CARGO_VENDOR", &vendor);
         }
         let output = run(&mut command, None)?;
-        if matches!(outcome, "vendor_missing" | "missing_key" | "inspect_fail") {
+        if matches!(
+            outcome,
+            "vendor_missing"
+                | "missing_key"
+                | "inspect_fail"
+                | "generator_missing"
+                | "generator_wrong_version"
+                | "packer_missing"
+        ) {
             assert!(!output.status.success());
             let expected = match outcome {
                 "missing_key" => "SSH public key is missing",
                 "inspect_fail" => "USB target lookup failed",
+                "generator_missing" => "make prepare-dependencies",
+                "generator_wrong_version" => "expected crate2nix 0.15.0",
+                "packer_missing" => "prepared packer dependencies are missing",
                 _ => "make prepare-dependencies",
             };
             assert!(String::from_utf8_lossy(&output.stderr).contains(expected));

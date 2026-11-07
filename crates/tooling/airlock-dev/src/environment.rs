@@ -77,11 +77,16 @@ impl Environment {
             fs::create_dir_all(&path)?;
             values.insert(OsString::from(key), path.into_os_string());
         }
-        values.insert(
-            "AIRLOCK_CARGO_VENDOR".into(),
-            airlock_dev_paths::path("AIRLOCK_CARGO_VENDOR", "cache/authoring-vendor")?
-                .into_os_string(),
-        );
+        for (key, fallback) in [
+            ("AIRLOCK_CARGO_VENDOR", "cache/authoring-vendor"),
+            ("AIRLOCK_PACKER_CARGO_VENDOR", "cache/packer-vendor"),
+            ("AIRLOCK_CRATE2NIX", "tools/crate2nix/bin/crate2nix"),
+        ] {
+            values.insert(
+                key.into(),
+                airlock_dev_paths::path(key, fallback)?.into_os_string(),
+            );
+        }
 
         let root = values.get(OsStr::new("AIRLOCK_NIX_ROOT")).unwrap().clone();
         values.insert(

@@ -275,7 +275,7 @@ ifneq ($(AIRLOCK_USB_INSTALL_LOGGED),1)
 usb-dev-install:
 	+@$(AIRLOCK_DEV) usb-install-log -- $(MAKE) --no-print-directory AIRLOCK_USB_INSTALL_LOGGED=1 $@
 else ifeq ($(AIRLOCK_IMAGE_BUILD_LIMITED),1)
-usb-dev-install: image-tools-build
+usb-dev-install: prepare-dependencies image-tools-build
 	@$(AIRLOCK_DEV) usb-build-provision --usb-bin "$(IMAGE_TOOLS_DIR)/airlock-usb" --serial "$(USB_SERIAL)" $(USB_PUBLIC_KEY_ARGS) --result-link-dir "$(AIRLOCK_RESULT_LINK_DIR)" $(if $(AIRLOCK_NIX_ROOT),--nix-root "$(AIRLOCK_NIX_ROOT)",) --resize-backup-dir "$(AIRLOCK_LOG_DIR)/usb-root-expansion" $(USB_DEV_PASSWORD_ARGS)
 else
 usb-dev-install:
@@ -535,11 +535,10 @@ rust-authoring-check:
 prepare:
 	$(MAKE) --no-print-directory -C crates/airlock-config prepare
 
-# Bootstrap authoring with Cargo before a Nix flake exists.
+# Explicit build preparation runs before source generation or USB credentials.
 .PHONY: prepare-dependencies
 prepare-dependencies:
-	@mkdir -p "$(dir $(AIRLOCK_CARGO_VENDOR))"
-	cargo vendor --locked --manifest-path crates/Cargo.toml --versioned-dirs "$(AIRLOCK_CARGO_VENDOR)" > "$(AIRLOCK_CARGO_VENDOR)-config.toml"
+	$(AIRLOCK_DEV) build-phase --stage build-inputs -- $(AIRLOCK_DEV) prepare-build-inputs
 
 # Prepared source is independent of image disks and the guarded Nix store.
 PREPARED_KEEP ?= 3

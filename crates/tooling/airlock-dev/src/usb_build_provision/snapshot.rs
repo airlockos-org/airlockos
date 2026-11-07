@@ -19,6 +19,8 @@ pub(super) struct Snapshot {
     pub(super) machine_revision: GitRevision,
     /// Prepared offline dependencies copied independently of the active checkout's cache.
     pub(super) vendor: PathBuf,
+    /// Independent lockfile dependencies captured for the store packer.
+    pub(super) packer_vendor: PathBuf,
 }
 
 impl Snapshot {
@@ -46,6 +48,10 @@ impl Snapshot {
                 .parent()
                 .context("USB snapshot needs a private parent")?
                 .join("authoring-vendor"),
+            packer_vendor: destination
+                .parent()
+                .context("USB snapshot needs a private parent")?
+                .join("packer-vendor"),
         };
         captured.check()?;
         repository::check_image_source(&captured.root)?;
@@ -66,6 +72,13 @@ impl Snapshot {
         );
 
         copy_vendor(&vendor, &captured.vendor)?;
+        let packer = airlock_dev_paths::path("AIRLOCK_PACKER_CARGO_VENDOR", "cache/packer-vendor")?;
+        let packer = fs::canonicalize(&packer).with_context(|| format!(
+            "prepared packer dependencies are missing at {path}; run make prepare-dependencies before installing a USB image",
+            path = packer.display(),
+        ))?;
+        ensure!(packer.is_dir(), "packer dependencies must be a directory");
+        copy_vendor(&packer, &captured.packer_vendor)?;
 
         Ok(captured)
     }

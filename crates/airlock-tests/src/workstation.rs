@@ -39,11 +39,46 @@ pub(crate) fn execute(root: &Path, name: &str, args: &[String]) -> Result<()> {
         "cargo" => {
             if args.first().is_some_and(|arg| arg == "metadata") {
                 println!("{}", json!({"packages": []}));
+            } else if args.first().is_some_and(|arg| arg == "install") {
+                ensure!(
+                    args.windows(2).any(|pair| pair == ["--version", "=0.15.0"])
+                        && args.iter().any(|arg| arg == "--locked"),
+                    "generator install must use its pinned lock"
+                );
+                let index = args
+                    .iter()
+                    .position(|arg| arg == "--root")
+                    .context("generator installation root")?;
+                let bin = Path::new(&args[index + 1]).join("bin");
+                fs::create_dir_all(&bin)?;
+                airlock_tests::process::peer_link(&bin, "crate2nix")?;
+            } else if args.first().is_some_and(|arg| arg == "vendor") {
+                ensure!(
+                    args.iter().any(|arg| arg == "--locked"),
+                    "vendor preparation must keep the lock"
+                );
+                let directory = Path::new(args.last().context("vendor destination")?);
+                fs::create_dir_all(directory)?;
+                let packer = args
+                    .iter()
+                    .any(|arg| arg.contains("airlock-store-packer/Cargo.toml"));
+                fs::write(
+                    directory.join("source.txt"),
+                    if packer {
+                        "prepared packer source"
+                    } else {
+                        "prepared authoring source"
+                    },
+                )?;
             }
         }
         "crate2nix" => {
             if args == ["--version"] {
-                println!("crate2nix 0.15.0");
+                if config["usb_flow"]["generator_wrong_version"].as_bool() == Some(true) {
+                    println!("crate2nix 0.14.0");
+                } else {
+                    println!("crate2nix 0.15.0");
+                }
             } else {
                 ensure!(
                     args.first().is_some_and(|arg| arg == "generate"),
@@ -232,6 +267,12 @@ pub(crate) fn execute(root: &Path, name: &str, args: &[String]) -> Result<()> {
                         .context("active vendor path")?,
                 );
                 fs::write(vendor.join("source.txt"), "changed active cache")?;
+                let packer = Path::new(
+                    config["usb_flow"]["packer_source"]
+                        .as_str()
+                        .context("active packer vendor path")?,
+                );
+                fs::write(packer.join("source.txt"), "changed active packer cache")?;
             }
             let vendor = std::env::var_os("AIRLOCK_CARGO_VENDOR")
                 .context("captured authoring dependencies")?;
@@ -241,6 +282,20 @@ pub(crate) fn execute(root: &Path, name: &str, args: &[String]) -> Result<()> {
                     && fs::read_to_string(vendor.join("source.txt"))?
                         == "prepared authoring source",
                 "build did not retain independent prepared authoring dependencies"
+            );
+            let packer = std::env::var_os("AIRLOCK_PACKER_CARGO_VENDOR")
+                .context("captured packer dependencies")?;
+            let packer = Path::new(&packer);
+            ensure!(
+                Some(packer) != config["usb_flow"]["packer_source"].as_str().map(Path::new)
+                    && fs::read_to_string(packer.join("source.txt"))? == "prepared packer source",
+                "build did not retain independent prepared packer dependencies"
+            );
+            let generator = std::env::var_os("AIRLOCK_CRATE2NIX")
+                .context("prepared generator was not forwarded")?;
+            ensure!(
+                Path::new(&generator).is_absolute(),
+                "generator path must be absolute"
             );
             let source: Value = serde_json::from_slice(&fs::read(root.join("usb-source.json"))?)?;
             let checkout = Path::new(source["path"].as_str().context("captured source path")?);

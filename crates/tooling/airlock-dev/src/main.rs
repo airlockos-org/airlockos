@@ -31,6 +31,8 @@ mod install_log;
 
 mod usb_build_provision;
 
+mod build_inputs;
+
 mod nested;
 
 use anyhow::Result;
@@ -50,6 +52,8 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Action {
+    /// Explicitly prepare the pinned crate generator and both locked Cargo vendor trees.
+    PrepareBuildInputs,
     /// Retain a timestamped USB install transcript and its final outcome.
     UsbInstallLog {
         /// Recursive Make command, started only after the run record exists.
@@ -150,6 +154,10 @@ enum Action {
 fn execute(args: Args) -> Result<u8> {
     let root = repository::root(args.repository_root.as_deref())?;
     match args.command {
+        Action::PrepareBuildInputs => {
+            build_inputs::prepare(&root)?;
+            Ok(0)
+        }
         Action::UsbInstallLog { arguments } => install_log::run(&root, &arguments),
         Action::BuildPhase { stage, arguments } => install_log::phase(&stage, &arguments),
         Action::QemuLab(args) => nested::qemu_lab::execute(&root, args),
