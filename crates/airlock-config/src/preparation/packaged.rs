@@ -160,6 +160,87 @@ pub(super) fn install(source: &Path, destination: &Path, metadata: &Path) -> Res
     Ok(())
 }
 
+/// Capture stable compiler inputs separately from runtime Nix modules and Git provenance.
+/// rustc dep-info preserves explicitly embedded modules. Unknown dependency evidence,
+/// custom build scripts and symlinks conservatively retain the complete source.
+/// This filters build inputs only: Cargo compiles this captured source again, and
+/// the packaged compiler still snapshots and validates the full reviewed checkout.
+pub(super) fn source(source: &Path, destination: &Path) -> Result<()> {
+    let executable = std::env::current_exe()?;
+    let package = executable.parent().ok_or("compiler package directory")?;
+    let receipt = package.join("compiler.json");
+    let inputs = if receipt.is_file() {
+        let manifest: Manifest = serde_json::from_slice(&fs::read(receipt)?)?;
+        manifest.reusable.then(|| {
+            manifest
+                .inputs
+                .into_keys()
+                .collect::<std::collections::BTreeSet<_>>()
+        })
+    } else if executable.with_extension("d").is_file() {
+        let root = fs::canonicalize(
+            std::env::var_os("AIRLOCK_MACHINE_COMPILER_SOURCE")
+                .map(PathBuf::from)
+                .unwrap_or(std::env::current_dir()?),
+        )?;
+        Some(
+            dependencies(&fs::read_to_string(executable.with_extension("d"))?)?
+                .into_iter()
+                .filter_map(|path| {
+                    root.join(path)
+                        .strip_prefix(&root)
+                        .ok()
+                        .map(|path| path.to_string_lossy().into_owned())
+                })
+                .collect(),
+        )
+    } else {
+        None
+    };
+    let mut files = BTreeMap::new();
+    super::inventory(source, source, &mut files)?;
+    capture(source, destination, &files, inputs.as_ref())
+}
+
+/// Preserve Cargo controls and arbitrary assets; omit only known runtime inputs
+/// when compiler dependency evidence establishes that Rust did not embed them.
+fn capture(
+    source: &Path,
+    destination: &Path,
+    files: &BTreeMap<String, String>,
+    embedded: Option<&std::collections::BTreeSet<String>>,
+) -> Result<()> {
+    let embedded = embedded.filter(|_| {
+        !files.keys().any(|name| {
+            Path::new(name)
+                .file_name()
+                .is_some_and(|name| name == "build.rs")
+                || fs::symlink_metadata(source.join(name))
+                    .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        })
+    });
+    for name in files.keys() {
+        let runtime = name == "airlock-source.json"
+            || name == "flake.lock"
+            || (name.starts_with("vms/")
+                && Path::new(name)
+                    .extension()
+                    .is_some_and(|extension| extension == "nix"));
+        if embedded.is_some_and(|inputs| runtime && !inputs.contains(name)) {
+            continue;
+        }
+        let from = source.join(name);
+        let to = destination.join(name);
+        fs::create_dir_all(to.parent().ok_or("compiler input parent")?)?;
+        if fs::symlink_metadata(&from)?.file_type().is_symlink() {
+            std::os::unix::fs::symlink(fs::read_link(from)?, to)?;
+        } else {
+            fs::copy(from, to)?;
+        }
+    }
+    Ok(())
+}
+
 /// Reject a changed Rust input, lock, build script, Cargo override or admitted application tree.
 /// User Nix modules remain runtime inputs unless rustc explicitly embedded one in the executable.
 pub(super) fn matches(source: &Path, package: &Path) -> Result<bool> {
@@ -242,6 +323,43 @@ mod tests {
         fs::remove_file(source.join("build.rs"))?;
         fs::write(source.join("src/main.rs"), "fn main() { panic!(); }")?;
         assert!(!unchanged(source, &inputs)?);
+        Ok(())
+    }
+
+    /// Runtime module/provenance edits preserve compiler inputs; embedded Nix
+    /// and Cargo controls remain inputs, and custom build scripts disable filtering.
+    #[test]
+    fn compiler_source_separates_runtime_modules_and_preserves_embedded_inputs() -> Result<()> {
+        let fixture = tempfile::tempdir()?;
+        let source = fixture.path().join("source");
+        fs::create_dir_all(source.join("vms"))?;
+        fs::write(source.join("Cargo.toml"), "manifest")?;
+        fs::write(source.join("vms/app.nix"), "runtime module")?;
+        fs::write(source.join("vms/embedded.nix"), "embedded module")?;
+        fs::write(source.join("airlock-source.json"), "revision one")?;
+        let embedded = std::collections::BTreeSet::from(["vms/embedded.nix".to_owned()]);
+        let snapshot = |name: &str| -> Result<BTreeMap<String, String>> {
+            let mut inputs = BTreeMap::new();
+            super::super::inventory(&source, &source, &mut inputs)?;
+            let destination = fixture.path().join(name);
+            capture(&source, &destination, &inputs, Some(&embedded))?;
+            let mut output = BTreeMap::new();
+            super::super::inventory(&destination, &destination, &mut output)?;
+            Ok(output)
+        };
+        let first = snapshot("first")?;
+        assert!(first.contains_key("Cargo.toml"));
+        assert!(first.contains_key("vms/embedded.nix"));
+        assert!(!first.contains_key("vms/app.nix"));
+        fs::write(source.join("vms/app.nix"), "changed packages")?;
+        fs::write(source.join("airlock-source.json"), "revision two")?;
+        assert_eq!(first, snapshot("runtime-edit")?);
+        fs::write(source.join("vms/embedded.nix"), "changed embedded input")?;
+        assert_ne!(first, snapshot("embedded-edit")?);
+        fs::write(source.join("Cargo.toml"), "changed compiler options")?;
+        assert_ne!(first, snapshot("cargo-edit")?);
+        fs::write(source.join("build.rs"), "dynamic inputs")?;
+        assert!(snapshot("custom-build")?.contains_key("vms/app.nix"));
         Ok(())
     }
 }

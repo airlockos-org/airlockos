@@ -61,8 +61,12 @@ pub(super) fn module(machine: &NixPath, workspace: &Workspace) -> NixValue {
 /// This is a build-time executable and source receipt; no build cache is imported from usr-assistant.
 pub(crate) fn compiler(pkgs: &NixValue, workspace: &Workspace, machine: &NixPath) -> NixValue {
     // Flake self paths can be context-free strings. Capture an actual store input for the sandbox.
+    let captured = machine
+        .join_relative("generated/machine-compiler-source")
+        .unwrap();
     let source = NixValue::builtin("path").call(nix_record! {
-        "path": machine.clone(), "name": "airlock-machine-compiler-source",
+        "path": NixValue::if_else(NixValue::builtin("pathExists").call(captured.clone()), captured, machine.clone()),
+        "name": "airlock-machine-compiler-source",
     });
     let applications = NixValue::builtin("path").call(nix_record! {
         "path": workspace.root(), "name": "airlock-machine-compiler-apps",

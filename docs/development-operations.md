@@ -75,6 +75,13 @@ After making and committing the intended changes and updating the parent pin:
 make machine-plan DEPLOY_TARGET=user@TARGET
 ```
 
+Use the installed `airlock machine guest-plan --target VM` and
+`guest-apply --target VM` path for a software change confined to one declared
+Linux VM. It builds that guest's artifacts and retains the remaining machine
+baseline. Use whole-machine planning for topology, routing, host or policy
+changes, and changes that must activate together across VMs. Source approval
+still precedes either build path.
+
 Source approval occurs before evaluation and building. An approved or accepted
 request is not a completed plan or deployment. Follow its returned request ID
 inside usr-assistant with `airlock machine review-status --request-id REQUEST_ID`

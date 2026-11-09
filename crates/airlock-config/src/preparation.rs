@@ -387,6 +387,7 @@ fn compile_in(
 
     let status = Command::new("cargo")
         .current_dir(source)
+        .env("AIRLOCK_MACHINE_COMPILER_SOURCE", &compiler_source)
         .env(
             "AIRLOCK_PREPARED_APPLICATIONS",
             destination
@@ -437,6 +438,10 @@ pub fn run_machine(
 ) -> Result<()> {
     let arguments: Vec<_> = std::env::args_os().skip(1).collect();
     let emit = |directory: &Path| {
+        packaged::source(
+            directory,
+            &directory.join("generated/machine-compiler-source"),
+        )?;
         // Installed machine inputs refer to an immutable application source. Capture
         // it alongside the generated graph so relative crate paths remain portable.
         // Development preparation already captures and generates that workspace.

@@ -240,184 +240,194 @@ pub(super) fn outputs() -> NixValue {
                     .to_text()
                     .into_expr::<String>(),
             );
-            let workspace = Workspace::new(source.join_relative("generated/crate2nix").unwrap());
-            let lib = inputs.clone().select("nixpkgs.lib");
-            let constructors = nix_record! {
-                "modules": crate::vm::module_constructors().call(source.clone()),
-                "template": crate::vm_build::constructors().as_expression(),
-                "windowState": overlays::gui_window_state(&workspace),
-                "imageTools": overlays::image_tools(&workspace),
-                "qubesStartup": overlays::qubes_startup(),
-                "identity": super::source_identity(&inputs.clone().select("self")),
-            };
-            let result = constructors.bind(|constructors| {
-                let apps_overlay = NixValue::function(|_| {
-                    NixValue::function(|_| {
-                        nix_record! {
-                            "airlockAppsSource": workspace.root().as_expression().to_text(),
-                        }
-                    })
-                });
-                // A function is shared, but applying it repeatedly does not memoize
-                // its result. Keep one lazy package set per supported platform.
-                let packages = super::systems(|system| {
-                    NixValue::builtin("import")
-                        .call(inputs.clone().select("nixpkgs"))
-                        .call(nix_record! {
-                            "system": system,
-                            "overlays": NixValue::list([
-                                inputs.clone().select("nixos-qubes.overlays.default"),
-                                apps_overlay.clone(),
-                                constructors.clone().select("windowState"),
-                                overlays::codex(),
-                                overlays::memory_accounting(&workspace),
-                                constructors.clone().select("imageTools"),
-                                constructors.clone().select("qubesStartup"),
-                            ]),
-                            "config": nix_record! {
-                                "allowUnfreePredicate": super::allow_unfree(&lib),
-                            },
+            // Give application bytes their own content identity. A machine module
+            // edit must not change every Rust recipe's source path or compiler receipt.
+            let applications = NixValue::builtin("path").call(nix_record! {
+                "path": source.join_relative("generated/crate2nix").unwrap(),
+                "name": "airlock-applications",
+            });
+            let result = applications.bind(|applications| {
+                let workspace = Workspace::new(NixPath::from_source_text(
+                    applications.to_text().into_expr::<String>(),
+                ));
+                let lib = inputs.clone().select("nixpkgs.lib");
+                let constructors = nix_record! {
+                    "modules": crate::vm::module_constructors().call(source.clone()),
+                    "template": crate::vm_build::constructors().as_expression(),
+                    "windowState": overlays::gui_window_state(&workspace),
+                    "imageTools": overlays::image_tools(&workspace),
+                    "qubesStartup": overlays::qubes_startup(),
+                    "identity": super::source_identity(&inputs.clone().select("self")),
+                };
+                constructors.bind(|constructors| {
+                    let apps_overlay = NixValue::function(|_| {
+                        NixValue::function(|_| {
+                            nix_record! {
+                                "airlockAppsSource": workspace.root().as_expression().to_text(),
+                            }
                         })
-                });
-                let builders = NixValue::function(|system| {
-                    constructors.clone().select("template")
-                        .call(nix_record! {
-                            "nixpkgs": inputs.clone().select("nixpkgs"),
-                            "system": system,
-                            "nixpkgsLibvirt105Source": inputs.clone()
-                                .select("nixpkgs-libvirt_10_5")
-                                .to_text(),
-                            "airlockSupport": source.clone(),
-                            "airlockAppsSource": workspace.root(),
-                            "nixosQubesSource": inputs.clone().select("nixos-qubes").to_text(),
-                            "hermitXen": inputs.clone().select("hermit-xen"),
-                            "applicationRevision": inputs.clone().select("airlock-apps.rev"),
-                        })
-                });
-                builders.bind(|builders| {
-                    let factory_inputs = nix_record! {
-                        "lib": lib.clone(),
-                        "mkAirlockQubeBuilders": builders.clone(),
-                        "airlockQubesVmKernelName": crate::vm_build::KERNEL_NAME,
-                        "airlockApps": workspace.root(),
-                        "airlockSupport": source.clone(),
-                    };
-                    let factories = nix_record! {
-                        "pkgs": packages,
-                        "builders": builders,
-                        "modules": constructors.clone().select("modules"),
-                        "profiles": constructors.clone().select("modules")
-                            .select("profiles")
-                            .call(workspace.root()),
-                        "bootstrap": NixValue::builtin("import")
-                            .call(
-                                source
-                                    .join_relative("generated/bootstrap/default.nix")
-                                    .unwrap(),
-                            )
-                            .select("builders")
-                            .call(factory_inputs.clone().merge_attrs(nix_record! {
-                                "modulesDirectory": source.join_relative("generated/bootstrap").unwrap(),
-                            })),
-                        "diagnostics": NixValue::builtin("import")
-                            .call(
-                                source
-                                    .join_relative("generated/bootstrap/default.nix")
-                                    .unwrap(),
-                            )
-                            .select("builders")
-                            .call(factory_inputs.clone().merge_attrs(nix_record! {
-                                "networkDebug": true,
-                                "modulesDirectory": source.join_relative("generated/bootstrap").unwrap(),
-                            })),
-                        "displays": crate::displays::builders().as_expression()
-                            .call(factory_inputs.clone().merge_attrs(nix_record! {
-                                "userModulesDirectory": source.join_relative("vms").unwrap(),
-                            })),
-                    };
-
-                    factories.bind(|shared| {
-                        let build = Build {
-                            inputs: inputs.clone(),
-                            lib: lib.clone(),
-                            source: source.clone(),
-                            workspace: workspace.clone(),
-                            shared,
-                        };
-                        let assembly = NixValue::builtin("import")
-                            .call(
-                                source
-                                    .join_relative("generated/machine/default.nix")
-                                    .unwrap(),
-                            )
-                            .select("assembly")
-                            .call(
-                                factory_inputs.merge_attrs(nix_record! {
-                                    "modulesDirectory": source.join_relative("generated/machine").unwrap(),
-                                    "userModulesDirectory": source.join_relative("vms").unwrap(),
-                                    "kernelPackage": build.kernel("x86_64-linux".into()).select("package"),
-                                    "dom0Module": build.output("nixosModules.dom0"),
-                                    "hybridGui": build.shared.clone().select("displays.hybrid"),
-                                    "standaloneGui": build.shared.clone().select("displays.standalone"),
-                                    "revision": constructors.clone()
-                                        .select("identity")
-                                        .select("revision"),
-                                    "timestamp": constructors.clone().select("identity").select("timestamp"),
-                                    "machineSource": NixValue::if_else(
-                                        constructors.clone().select("identity").select("dirty").equals(false),
-                                        nix_record! {
-                                            "revision": constructors.clone()
-                                                .select("identity")
-                                                .select("revision"),
-                                            "lockHash": NixValue::builtin("hashFile")
-                                                .call("sha256")
-                                                .call(build.file("flake.lock")),
-                                        },
-                                        NixValue::null(),
-                                    ),
-                                }),
-                            );
-
-                        assembly.bind(|assembly| nix_record! {
-                            "lib": nix_record! {
-                                "airlockSystem": NixValue::builtin("import")
-                                    .call(build.file("generated/schemas.nix"))
-                                    .select("system")
-                                    .call(lib.clone()),
-                                "airlockTopology": NixValue::builtin("import")
-                                    .call(build.file("generated/schemas.nix"))
-                                    .select("topology")
-                                    .call(lib),
-                                "airlockQubeTemplate": constructors.clone().select("template"),
-                                "mkMachineGuestEntries": assembly.clone().select("entries"),
-                                "machineGuestEntries": NixValue::function(|system| {
-                                    assembly.clone().select("entries").call(system).call(nix_record! {})
-                                }),
-                                "mkMachineConfiguration": assembly.clone().select("configuration"),
-                                "bootstrapEntries": NixValue::function(|system| {
-                                    build.bootstrap_entries(system, false)
-                                }),
-                            },
-                            "airlock": nix_record! {
-                                "configInputs": build.configuration_inputs(),
-                                "tests": nix_record! {
-                                    "uplinkHotplug": uplink::fixture(&build),
-                                    "inputReceiver": input::fixture(&build),
+                    });
+                    // A function is shared, but applying it repeatedly does not memoize
+                    // its result. Keep one lazy package set per supported platform.
+                    let packages = super::systems(|system| {
+                        NixValue::builtin("import")
+                            .call(inputs.clone().select("nixpkgs"))
+                            .call(nix_record! {
+                                "system": system,
+                                "overlays": NixValue::list([
+                                    inputs.clone().select("nixos-qubes.overlays.default"),
+                                    apps_overlay.clone(),
+                                    constructors.clone().select("windowState"),
+                                    overlays::codex(),
+                                    overlays::memory_accounting(&workspace),
+                                    constructors.clone().select("imageTools"),
+                                    constructors.clone().select("qubesStartup"),
+                                ]),
+                                "config": nix_record! {
+                                    "allowUnfreePredicate": super::allow_unfree(&lib),
                                 },
-                            },
-                            "overlays": nix_record! {
-                                "airlockApps": exported_overlay(&build, apps_overlay),
-                                "airlockImageBuildTools": exported_overlay(&build, constructors.clone().select("imageTools")),
-                                "airlockQubesGuiWindowState": exported_overlay(&build, constructors.clone().select("windowState")),
-                                "airlockQubesStartup": exported_overlay(&build, constructors.clone().select("qubesStartup")),
-                            },
-                            "nixosModules": nix_record! {
-                                "dom0": build.dom0(),
-                                "default": build.output("nixosModules.dom0"),
-                            },
-                            "nixosConfigurations": nested::configurations(&build, &assembly),
-                            "packages": super::systems(|system| packages::outputs(&build, system)),
-                            "checks": super::systems(|system| checks::outputs(&build, system)),
+                            })
+                    });
+                    let builders = NixValue::function(|system| {
+                        constructors.clone().select("template")
+                            .call(nix_record! {
+                                "nixpkgs": inputs.clone().select("nixpkgs"),
+                                "system": system,
+                                "nixpkgsLibvirt105Source": inputs.clone()
+                                    .select("nixpkgs-libvirt_10_5")
+                                    .to_text(),
+                                "airlockSupport": source.clone(),
+                                "airlockAppsSource": workspace.root(),
+                                "nixosQubesSource": inputs.clone().select("nixos-qubes").to_text(),
+                                "hermitXen": inputs.clone().select("hermit-xen"),
+                                "applicationRevision": inputs.clone().select("airlock-apps.rev"),
+                            })
+                    });
+                    builders.bind(|builders| {
+                        let factory_inputs = nix_record! {
+                            "lib": lib.clone(),
+                            "mkAirlockQubeBuilders": builders.clone(),
+                            "airlockQubesVmKernelName": crate::vm_build::KERNEL_NAME,
+                            "airlockApps": workspace.root(),
+                            "airlockSupport": source.clone(),
+                        };
+                        let factories = nix_record! {
+                            "pkgs": packages,
+                            "builders": builders,
+                            "modules": constructors.clone().select("modules"),
+                            "profiles": constructors.clone().select("modules")
+                                .select("profiles")
+                                .call(workspace.root()),
+                            "bootstrap": NixValue::builtin("import")
+                                .call(
+                                    source
+                                        .join_relative("generated/bootstrap/default.nix")
+                                        .unwrap(),
+                                )
+                                .select("builders")
+                                .call(factory_inputs.clone().merge_attrs(nix_record! {
+                                    "modulesDirectory": source.join_relative("generated/bootstrap").unwrap(),
+                                })),
+                            "diagnostics": NixValue::builtin("import")
+                                .call(
+                                    source
+                                        .join_relative("generated/bootstrap/default.nix")
+                                        .unwrap(),
+                                )
+                                .select("builders")
+                                .call(factory_inputs.clone().merge_attrs(nix_record! {
+                                    "networkDebug": true,
+                                    "modulesDirectory": source.join_relative("generated/bootstrap").unwrap(),
+                                })),
+                            "displays": crate::displays::builders().as_expression()
+                                .call(factory_inputs.clone().merge_attrs(nix_record! {
+                                    "userModulesDirectory": source.join_relative("vms").unwrap(),
+                                })),
+                        };
+
+                        factories.bind(|shared| {
+                            let build = Build {
+                                inputs: inputs.clone(),
+                                lib: lib.clone(),
+                                source: source.clone(),
+                                workspace: workspace.clone(),
+                                shared,
+                            };
+                            let assembly = NixValue::builtin("import")
+                                .call(
+                                    source
+                                        .join_relative("generated/machine/default.nix")
+                                        .unwrap(),
+                                )
+                                .select("assembly")
+                                .call(
+                                    factory_inputs.merge_attrs(nix_record! {
+                                        "modulesDirectory": source.join_relative("generated/machine").unwrap(),
+                                        "userModulesDirectory": source.join_relative("vms").unwrap(),
+                                        "kernelPackage": build.kernel("x86_64-linux".into()).select("package"),
+                                        "dom0Module": build.output("nixosModules.dom0"),
+                                        "hybridGui": build.shared.clone().select("displays.hybrid"),
+                                        "standaloneGui": build.shared.clone().select("displays.standalone"),
+                                        "revision": constructors.clone()
+                                            .select("identity")
+                                            .select("revision"),
+                                        "timestamp": constructors.clone().select("identity").select("timestamp"),
+                                        "machineSource": NixValue::if_else(
+                                            constructors.clone().select("identity").select("dirty").equals(false),
+                                            nix_record! {
+                                                "revision": constructors.clone()
+                                                    .select("identity")
+                                                    .select("revision"),
+                                                "lockHash": NixValue::builtin("hashFile")
+                                                    .call("sha256")
+                                                    .call(build.file("flake.lock")),
+                                            },
+                                            NixValue::null(),
+                                        ),
+                                    }),
+                                );
+
+                            assembly.bind(|assembly| nix_record! {
+                                "lib": nix_record! {
+                                    "airlockSystem": NixValue::builtin("import")
+                                        .call(build.file("generated/schemas.nix"))
+                                        .select("system")
+                                        .call(lib.clone()),
+                                    "airlockTopology": NixValue::builtin("import")
+                                        .call(build.file("generated/schemas.nix"))
+                                        .select("topology")
+                                        .call(lib),
+                                    "airlockQubeTemplate": constructors.clone().select("template"),
+                                    "mkMachineGuestEntries": assembly.clone().select("entries"),
+                                    "machineGuestEntries": NixValue::function(|system| {
+                                        assembly.clone().select("entries").call(system).call(nix_record! {})
+                                    }),
+                                    "mkMachineConfiguration": assembly.clone().select("configuration"),
+                                    "bootstrapEntries": NixValue::function(|system| {
+                                        build.bootstrap_entries(system, false)
+                                    }),
+                                },
+                                "airlock": nix_record! {
+                                    "configInputs": build.configuration_inputs(),
+                                    "tests": nix_record! {
+                                        "uplinkHotplug": uplink::fixture(&build),
+                                        "inputReceiver": input::fixture(&build),
+                                    },
+                                },
+                                "overlays": nix_record! {
+                                    "airlockApps": exported_overlay(&build, apps_overlay),
+                                    "airlockImageBuildTools": exported_overlay(&build, constructors.clone().select("imageTools")),
+                                    "airlockQubesGuiWindowState": exported_overlay(&build, constructors.clone().select("windowState")),
+                                    "airlockQubesStartup": exported_overlay(&build, constructors.clone().select("qubesStartup")),
+                                },
+                                "nixosModules": nix_record! {
+                                    "dom0": build.dom0(),
+                                    "default": build.output("nixosModules.dom0"),
+                                },
+                                "nixosConfigurations": nested::configurations(&build, &assembly),
+                                "packages": super::systems(|system| packages::outputs(&build, system)),
+                                "checks": super::systems(|system| checks::outputs(&build, system)),
+                            })
                         })
                     })
                 })
