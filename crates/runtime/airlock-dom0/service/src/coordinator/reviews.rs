@@ -40,6 +40,14 @@ pub(crate) enum ReviewControl {
         // Lock digest the caller intends to build.
         lock_hash: LockHash,
     },
+    Preparation {
+        // Approved source whose worker owns the open qrexec channel.
+        request_id: ReviewId,
+        // Exact source checked before acknowledging the preparation lifetime.
+        revision: GitRevision,
+        // Exact dependency selection checked against protected approval.
+        lock_hash: LockHash,
+    },
     Status {
         // Protected request to observe without taking a writer lock.
         request_id: ReviewId,
@@ -155,8 +163,56 @@ impl Coordinator {
                 Ok(None) => (),
                 Err(error) => result["progress_error"] = json!(error.to_string()),
             }
+            for (field, name) in [
+                (
+                    "build_progress",
+                    format!("build-{request_id}", request_id = record.request_id),
+                ),
+                (
+                    "preparation_progress",
+                    format!("preparation-{revision}", revision = record.binding.revision),
+                ),
+            ] {
+                match airlock_nix_core::runtime::progress::status(
+                    &self.state.join("progress").join(name),
+                ) {
+                    Ok(Some(progress)) => result[field] = progress,
+                    Ok(None) => (),
+                    Err(error) => result["progress_error"] = json!(error.to_string()),
+                }
+            }
             result["lock"] = serde_json::to_value(lock::status(&self.state.join("lock"))?)?;
             return Ok(result);
+        }
+
+        if let ReviewControl::Preparation {
+            request_id,
+            revision,
+            lock_hash,
+        } = &request
+        {
+            let _preparation = crate::lock::PreparationLock::acquire(&self.state, false)?;
+            {
+                let _guard = MachineLock::acquire(
+                    &self.state,
+                    "Build preparation",
+                    "Authenticate the controller's preparation lifetime",
+                    MachineOperation::Review,
+                )?;
+                self.approved_review(request_id, revision, lock_hash)?;
+            }
+            airlock_nix_core::artifact::write_message(
+                &mut std::io::stdout().lock(),
+                &json!({"status":"preparing","request_id":request_id}),
+            )?;
+            // EOF releases the kernel lock after success, failure, cancellation or
+            // controller death. There is no persistent lease to expire or recover.
+            let mut extra = [0];
+            ensure!(
+                std::io::stdin().lock().read(&mut extra)? == 0,
+                "unexpected preparation channel payload"
+            );
+            return Ok(json!({"status":"released","request_id":request_id}));
         }
 
         let _guard = MachineLock::acquire(
@@ -290,7 +346,7 @@ impl Coordinator {
                 &revision,
                 &lock_hash,
             )?)?),
-            ReviewControl::Status { .. } => unreachable!(),
+            ReviewControl::Status { .. } | ReviewControl::Preparation { .. } => unreachable!(),
         }
     }
 

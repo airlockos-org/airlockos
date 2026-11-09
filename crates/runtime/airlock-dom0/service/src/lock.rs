@@ -379,3 +379,54 @@ impl Drop for MachineLock {
         let _ = fs::remove_file(&self.metadata);
     }
 }
+
+/// Kernel-owned preparation lifetime. Automatic maintenance takes exclusive
+/// ownership; reviewed builders hold shared ownership through their qrexec pipe.
+/// Lock ordering is preparation, machine mutation, then pool admission.
+/// flock, process/pipe lifetime and the monotonic clock are trusted adapters.
+pub(crate) struct PreparationLock {
+    // Keep exclusion alive until the operation and inherited helpers have exited.
+    _file: File,
+}
+
+impl PreparationLock {
+    /// Wait at most fifteen minutes for earlier preparation or maintenance.
+    /// No machine lock may be held while calling this function.
+    pub(crate) fn acquire(root: &Path, maintenance: bool) -> Result<Self> {
+        state::directory(root)?;
+        let path = root.join("preparation.lock");
+        let file = File::from(open(
+            &path,
+            OFlags::RDWR | OFlags::CREATE | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::from_raw_mode(0o600),
+        )?);
+        state::trusted(&path)?;
+        ensure!(
+            file.metadata()?.is_file(),
+            "preparation lock is not a regular file"
+        );
+        let operation = if maintenance {
+            FlockOperation::NonBlockingLockExclusive
+        } else {
+            FlockOperation::NonBlockingLockShared
+        };
+        let started = std::time::Instant::now();
+        let waiting =
+            airlock_nix_core::runtime::progress::Span::start("waiting_for_preparation_lock");
+        loop {
+            match flock(&file, operation) {
+                Ok(()) => break,
+                Err(rustix::io::Errno::WOULDBLOCK)
+                    if started.elapsed() < std::time::Duration::from_secs(900) =>
+                {
+                    airlock_nix_core::runtime::progress::heartbeat();
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        waiting.complete();
+        rustix::io::fcntl_setfd(&file, rustix::io::FdFlags::empty())?;
+        Ok(Self { _file: file })
+    }
+}

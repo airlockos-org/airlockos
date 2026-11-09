@@ -396,7 +396,7 @@ pub fn status(directory: &Path) -> io::Result<Option<Value>> {
 /// Consume bounded stderr lines while preserving diagnostics and forwarding progress frames.
 /// Each capture owns its buffer so simultaneous helpers cannot splice their events together.
 #[derive(Default)]
-pub(crate) struct Frames {
+pub struct Frames {
     // Incomplete stderr line; oversized lines are passed through as ordinary diagnostics.
     pending: Vec<u8>,
     // Oversized lines are plain diagnostics and cannot become truncated valid events.
@@ -404,7 +404,10 @@ pub(crate) struct Frames {
 }
 
 impl Frames {
-    pub(crate) fn push(&mut self, bytes: &[u8], forward: bool) -> Vec<u8> {
+    /// Record complete progress frames and return ordinary diagnostics. Set
+    /// `forward` when the caller already forwards the original stderr bytes;
+    /// otherwise recognized frames are forwarded here, without duplication.
+    pub fn push(&mut self, bytes: &[u8], forward: bool) -> Vec<u8> {
         let mut diagnostics = Vec::new();
         for byte in bytes {
             if self.passthrough {
@@ -435,7 +438,8 @@ impl Frames {
         diagnostics
     }
 
-    pub(crate) fn finish(&mut self) -> Vec<u8> {
+    /// Return the final incomplete line as diagnostics, never as a progress frame.
+    pub fn finish(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.pending)
     }
 }

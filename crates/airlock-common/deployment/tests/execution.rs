@@ -17,3 +17,24 @@ fn interruption_requires_new_acknowledgments() {
     recovered.advance(Event::Interrupted);
     assert!(!recovered.begin("attempt-2", "intent-2"));
 }
+
+/// A retained receipt cannot cross a changed request, approval, boot or commit boundary.
+#[test]
+fn completed_publication_requires_the_original_binding() {
+    use airlock_deployment_core::publication::completion_matches;
+    assert!(completion_matches(
+        true, "request", "request", "approval", "approval", "boot", "boot"
+    ));
+    assert!(!completion_matches(
+        false, "request", "request", "approval", "approval", "boot", "boot"
+    ));
+    assert!(!completion_matches(
+        true, "old", "request", "approval", "approval", "boot", "boot"
+    ));
+    assert!(!completion_matches(
+        true, "request", "request", "revoked", "approval", "boot", "boot"
+    ));
+    assert!(!completion_matches(
+        true, "request", "request", "approval", "approval", "previous", "boot"
+    ));
+}

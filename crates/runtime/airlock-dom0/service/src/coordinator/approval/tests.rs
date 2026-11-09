@@ -245,6 +245,13 @@ fn durable_handoff() -> Result<()> {
         .args(["--tmpfs", "/nix", "--ro-bind"])
         .arg(store_view.path())
         .arg("/nix/store")
+        // Cargo artifacts may live below /run/media, hidden by the private /run.
+        .arg("--ro-bind")
+        .arg(std::env::current_exe()?)
+        .arg(std::env::current_exe()?)
+        .arg("--ro-bind")
+        .arg(&peer)
+        .arg(&peer)
         .arg(std::env::current_exe()?)
         .args([
             "--exact",
@@ -342,6 +349,7 @@ fn crash_worker(path: &Path) -> Result<()> {
 fn scenarios() -> Result<()> {
     let publication = tempfile::tempdir_in("/var/lib/airlock")?;
     state::test_interrupted_publication(publication.path())?;
+    preparation_defers_maintenance()?;
     legacy_gap()?;
     verified_adapter()?;
     effect_requests()?;
@@ -1601,4 +1609,37 @@ fn configuration_requests() -> Result<()> {
     durable.finish(false);
     assert!(durable.configuration_create(&record, 0, false).is_err());
     Ok(())
+}
+
+/// Waiting cleanup must leave machine mutation available to the active builder;
+/// once that builder exits, cleanup can acquire its exclusive preparation guard.
+fn preparation_defers_maintenance() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let root = fixture.coordinator.state.clone();
+    let builder = crate::lock::PreparationLock::acquire(&root, false)?;
+    let (acquired, receipt) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| -> Result<()> {
+        let worker = scope.spawn(|| -> Result<()> {
+            let _cleanup = crate::lock::PreparationLock::acquire(&root, true)?;
+            acquired
+                .send(())
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            Ok(())
+        });
+        let overlapped = receipt.recv_timeout(Duration::from_millis(50)).is_ok();
+        let machine = MachineLock::acquire(
+            &root,
+            "Builder",
+            "Continue active preparation",
+            MachineOperation::Candidate,
+        );
+        drop(builder);
+        receipt.recv_timeout(Duration::from_secs(3))?;
+        worker
+            .join()
+            .map_err(|_| anyhow::anyhow!("cleanup worker panicked"))??;
+        drop(machine?);
+        ensure!(!overlapped, "cleanup overlapped a live preparation");
+        Ok(())
+    })
 }

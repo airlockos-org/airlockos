@@ -38,7 +38,7 @@ mod builder;
 
 mod build_cache;
 
-pub(crate) use build_cache::release as release_build_cache;
+pub(crate) use build_cache::{completed as completed_build_cache, release as release_build_cache};
 
 mod builder_cli;
 

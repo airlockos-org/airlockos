@@ -398,17 +398,95 @@ fn wait(id: &JobId) -> Result<u8> {
 }
 
 fn control(request: &Value) -> Result<Value> {
-    let value = process::rpc(
-        "airlock.Ctrl.ReviewControl",
-        request,
-        Some(Duration::from_secs(10)),
-    )?;
-    require(
-        value.get("status").and_then(Value::as_str).is_some(),
-        "ReviewControl response has no status",
-    )?;
+    let started = std::time::Instant::now();
+    let mut waiting = None;
+    loop {
+        match process::rpc(
+            "airlock.Ctrl.ReviewControl",
+            request,
+            Some(Duration::from_secs(10)),
+        ) {
+            Err(Error::Remote { details, .. })
+                if details["response"]["status"] == "busy"
+                    && details["response"]["lock"]["verified"] == true
+                    && details["response"]["lock"]["operation"] == "maintenance"
+                    && started.elapsed() < Duration::from_secs(900) =>
+            {
+                waiting.get_or_insert_with(|| {
+                    airlock_nix_core::runtime::progress::Span::start("waiting_for_maintenance")
+                });
+                thread::sleep(Duration::from_secs(1));
+            }
+            result => {
+                if let Some(waiting) = waiting {
+                    waiting.complete();
+                }
+                let value = result?;
+                require(
+                    value.get("status").and_then(Value::as_str).is_some(),
+                    "ReviewControl response has no status",
+                )?;
+                return Ok(value);
+            }
+        }
+    }
+}
 
-    Ok(value)
+/// Own the existing authenticated control channel while a reviewed build is active.
+/// Closing it releases dom0's shared preparation lock even after controller death.
+struct Preparation {
+    // The guarded qrexec child owns both pipe ends until release is acknowledged.
+    child: process::OwnedChild,
+    // Retain the response pipe so normal release cannot cause SIGPIPE in dom0.
+    output: std::io::BufReader<std::process::ChildStdout>,
+}
+
+impl Preparation {
+    /// Wait for earlier maintenance, then require protected source authentication.
+    fn start(grant: &Grant) -> Result<Self> {
+        use std::process::{Command, Stdio};
+        let mut child = process::OwnedChild(
+            Command::new("qrexec-client-vm")
+                .args(["dom0", "airlock.Ctrl.ReviewControl"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()?,
+        );
+        airlock_nix_core::artifact::write_message(child.0.stdin.as_mut().ok_or_else(|| Error::Message("preparation stdin unavailable".into()))?,
+            &json!({"op":"preparation","request_id":grant.id,"revision":grant.header.revision,"lock_hash":grant.header.lock_hash}))
+            .map_err(|error| Error::Message(error.to_string()))?;
+        let mut output = std::io::BufReader::new(
+            child
+                .0
+                .stdout
+                .take()
+                .ok_or_else(|| Error::Message("preparation stdout unavailable".into()))?,
+        );
+        let ready = airlock_nix_core::artifact::read_message(&mut output)
+            .map_err(|error| Error::Message(error.to_string()))?;
+        require(
+            ready["status"] == "preparing" && ready["request_id"] == json!(grant.id),
+            "preparation lifetime was not authenticated",
+        )?;
+        Ok(Self { child, output })
+    }
+
+    /// Close the lease explicitly and check acknowledgement on the normal path.
+    fn finish(mut self) -> Result<()> {
+        drop(self.child.0.stdin.take());
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        self.output.by_ref().take(65537).read_to_end(&mut bytes)?;
+        require(
+            bytes.len() <= 65536,
+            "preparation release exceeds response limit",
+        )?;
+        let released: Value = decode(&bytes)?;
+        require(
+            released["status"] == "released" && self.child.0.wait()?.success(),
+            "preparation lifetime release failed",
+        )
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -678,8 +756,16 @@ fn work(id: JobId) -> Result<u8> {
         records::save_job(&store, &mut job)?;
         lock.update_phase("building".into())?;
 
+        let preparation =
+            airlock_nix_core::runtime::progress::phase("acquiring_preparation", || {
+                Preparation::start(&grant)
+            })?;
         grant.check(&lock)?;
-        build::execute(&store, &grant, &lock)
+        let outcome = build::execute(&store, &grant, &lock);
+        let released = preparation.finish();
+        let payload = outcome?;
+        released?;
+        Ok(payload)
     });
 
     match result {
@@ -752,7 +838,16 @@ fn status(id: &JobId, refresh: bool) -> Result<Value> {
         match control(&json!({"op":"status","request_id":auth})) {
             Ok(latest) => {
                 value["lock"] = latest.get("lock").cloned().unwrap_or(Value::Null);
-                if let Some(progress) = latest.get("progress") {
+                if let Some(progress) = ["progress", "preparation_progress", "build_progress"]
+                    .iter()
+                    .filter_map(|field| latest.get(*field))
+                    .max_by(|left, right| {
+                        left["last_progress_at"]
+                            .as_f64()
+                            .unwrap_or_default()
+                            .total_cmp(&right["last_progress_at"].as_f64().unwrap_or_default())
+                    })
+                {
                     value["deployment_progress"] = progress.clone();
                 }
                 if let Some(phase) = latest.get("deployment_phase") {

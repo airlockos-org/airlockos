@@ -616,18 +616,22 @@ pub(super) fn materialize(request: ViewRequest<'_>) -> Result<Value> {
             .iter()
             .map(|path| entry(path).map(str::to_owned))
             .collect::<Result<_>>()?;
+        // Finish the only append before taking per-segment snapshots. The caller
+        // holds pool exclusion throughout assembly, so these observations stay valid.
+        let eof = segments::eof(root, transaction, target)?;
         let mut reused = 0;
         let mut items = Vec::new();
         let mut segments = BTreeMap::new();
         let mut logical = 0u64;
         super::progress::detail("Assembling object map");
+        let mut mapping = airlock_nix_core::runtime::progress::Span::start("assembling_object_map");
         for name in order
             .iter()
             .map(String::as_str)
             .chain(std::iter::once(".tar-eof"))
         {
             let value: Value = if name == ".tar-eof" {
-                segments::eof(root, transaction, target)?
+                eof.clone()
             } else {
                 read(&segments::object_metadata(root, name)?)?
             };
@@ -640,8 +644,13 @@ pub(super) fn materialize(request: ViewRequest<'_>) -> Result<Value> {
                 extent.size % 512 == 0 && extent.segment_offset % 512 == 0,
                 "object extent not tar aligned"
             );
-            let segment_meta: Value = read(&segments::metadata(root, &extent.segment_id)?)?;
-            segments.insert(extent.segment_id.clone(), json!({"id":extent.segment_id,"blob":extent.segment_blob,"size":fs::metadata(&extent.segment_blob)?.len(),"status":segment_meta["status"]}));
+            if let std::collections::btree_map::Entry::Vacant(slot) =
+                segments.entry(extent.segment_id.clone())
+            {
+                let segment_meta: Value = read(&segments::metadata(root, &extent.segment_id)?)?;
+                slot.insert(json!({"id":extent.segment_id,"blob":extent.segment_blob,
+                    "size":fs::metadata(&extent.segment_blob)?.len(),"status":segment_meta["status"]}));
+            }
             items.push(MapExtent {
                 logical_offset: logical,
                 segment_id: extent.segment_id,
@@ -654,7 +663,13 @@ pub(super) fn materialize(request: ViewRequest<'_>) -> Result<Value> {
             logical = logical
                 .checked_add(extent.size)
                 .context("logical size overflow")?;
+            mapping.update(
+                json!({"objects_completed":items.len(),"objects_total":order.len()+1,
+                "segments_read":segments.len()}),
+            );
         }
+
+        mapping.complete();
 
         let map = json!({
             "schema": "airlock.closure-store.blob-map.v1",
@@ -694,7 +709,10 @@ pub(super) fn materialize(request: ViewRequest<'_>) -> Result<Value> {
             let mut source = tempfile::NamedTempFile::new_in(root.join("tmp"))?;
             {
                 let mut archive = tar::Builder::new(std::io::BufWriter::new(source.as_file_mut()));
-                for item in &items {
+                let mut indexing =
+                    airlock_nix_core::runtime::progress::Span::start("assembling_file_index");
+                for (completed, item) in items.iter().enumerate() {
+                    indexing.update(json!({"objects_completed":completed,"objects_total":order.len(),"indexes_reused":reused}));
                     if item.object == ".tar-eof" {
                         continue;
                     }
@@ -710,6 +728,8 @@ pub(super) fn materialize(request: ViewRequest<'_>) -> Result<Value> {
                     )?;
                 }
                 archive.into_inner()?.flush()?;
+                indexing.update(json!({"objects_completed":order.len(),"objects_total":order.len(),"indexes_reused":reused}));
+                indexing.complete();
             }
             command(
                 &tool("mkfs.erofs", "AIRLOCK_MKFS_EROFS"),
@@ -896,7 +916,7 @@ mod image_index_tests {
     use super::*;
 
     /// Build one admitted immutable view without kernel devices or external tools.
-    fn admitted_view(root: &Path) -> Result<(Value, Value)> {
+    fn admitted_view(root: &Path, object: &str) -> Result<(Value, Value)> {
         ensure_pool(root)?;
         let backing = segments::blob(root, "000001")?;
         fs::write(&backing, vec![0u8; 1024])?;
@@ -907,11 +927,11 @@ mod image_index_tests {
         let path = directory.join("store.blob-map.json");
         let map = json!({"logical_size":512,"extents":[{
             "logical_offset":0,"segment_id":"000001","segment_blob":backing,
-            "segment_offset":0,"length":512,"object":"package","object_sha256":"a".repeat(64)
+            "segment_offset":0,"length":512,"object":object,"object_sha256":"a".repeat(64)
         }]});
         write(&path, &map, 0o644)?;
         write(
-            &segments::object_metadata(root, "package")?,
+            &segments::object_metadata(root, object)?,
             &json!({
                 "segment_id":"000001","segment_offset":0,"size":512,"sha256":"a".repeat(64)
             }),
@@ -924,13 +944,112 @@ mod image_index_tests {
         Ok((store, map))
     }
 
+    /// Commit one fixture generation using the production transaction/manifest format.
+    fn committed_generation(
+        root: &Path,
+        domain: &str,
+        store: &Value,
+        builder: &Value,
+        system: &str,
+    ) -> Result<PathBuf> {
+        let path = records::manifest_path(root, domain, 1)?;
+        let transaction = format!("fixture-{domain}");
+        write(
+            &path,
+            &json!({"schema":GENERATION_SCHEMA,"status":"committed","domain":domain,
+            "generation":1,"transaction":transaction,"system":system,"store":store,"builder":builder}),
+            0o644,
+        )?;
+        write(
+            &root
+                .join("transactions")
+                .join(format!("{transaction}.json")),
+            &json!({"schema":"airlock.closure-store.transaction.v1","id":transaction,
+                "domain":domain,"generation":1,"status":"committed","manifest":path}),
+            0o644,
+        )?;
+        Ok(path)
+    }
+
+    /// Cached publication requires committed admission, current builder descriptors
+    /// and intact immutable images. Collection is a miss; corruption fails closed.
+    #[test]
+    fn completed_publication_rechecks_storage_before_reuse() -> Result<()> {
+        use airlock_nix_core::build_cache::{DOMAIN, Request, SCHEMA, registration_hash};
+        let fixture = tempfile::tempdir()?;
+        let root = fixture.path();
+        let derivation = format!("/nix/store/{hash}-recipe.drv", hash = "a".repeat(32));
+        let registration = "immutable registration bytes";
+        let request = Request {
+            schema: SCHEMA.into(),
+            review_authorization: "c".repeat(64).parse()?,
+            revision: "f".repeat(40).parse()?,
+            lock_hash: "b".repeat(64).parse()?,
+            target: None,
+            result: format!("/nix/store/{hash}-result", hash = "d".repeat(32)).parse()?,
+            derivation: derivation.parse()?,
+            paths: BTreeMap::from([(derivation.parse()?, 512)]),
+            metadata: BTreeMap::from([(derivation.parse()?, 512)]),
+            registration_sha256: registration_hash(registration)?,
+        };
+        let (mut store, _) = admitted_view(root, entry(&derivation)?)?;
+        store["closure_hash"] = json!("e".repeat(64));
+        let namespace = super::super::runtime_namespace(DOMAIN);
+        let path = committed_generation(root, &namespace, &store, &Value::Null, &derivation)?;
+        fs::write(path.parent().unwrap().join("registration"), registration)?;
+        let mut receipt = json!({"schema":"airlock.closure-store.admission.v1","status":"passed",
+            "transport":"qrexec","domain":DOMAIN,"generation":1,"current_generation":null,
+            "activated":false,"retained":true,"manifest":path,"system":derivation,"root_source":"",
+            "root_artifact":null,"kernel_name":"","closure_hash":"e".repeat(64),
+            "source_revision":request.revision,"lock_hash":request.lock_hash,
+            "build_publication":{"schema":SCHEMA,"request_hash":request.fingerprint()?,
+                "result":request.result,"admission":"complete","publication":"complete","views":{}}});
+        for role in ["sys-ctrl", "usr-assistant"] {
+            let domain = format!("{role}-build-store");
+            let image = root.join(format!("{role}.erofs"));
+            fs::write(&image, "builder index")?;
+            fs::set_permissions(&image, fs::Permissions::from_mode(0o444))?;
+            let builder = json!({"schema":format!("airlock.{role}-build-store.v1"),"domain":domain,
+                "generation":1,"closure_hash":store["closure_hash"],"metadata_image":image,
+                "metadata_image_sha256":hash(&image)?,"registration_sha256":hash(path.parent().unwrap().join("registration").as_path())?});
+            let builder_path = committed_generation(root, &domain, &store, &builder, &derivation)?;
+            fs::write(
+                builder_path.parent().unwrap().join("registration"),
+                registration,
+            )?;
+            records::running(root, &domain, 1, "builder-persistent", true)?;
+            write(
+                &root.join("builders").join(format!("{role}.json")),
+                &builder,
+                0o644,
+            )?;
+            receipt["build_publication"]["views"][role] = builder;
+        }
+        let check = || super::super::build_cache::completed_at(root, &request, &receipt);
+        assert!(check()?);
+        let descriptor = root.join("builders/sys-ctrl.json");
+        let original: Value = read(&descriptor)?;
+        let mut changed = original.clone();
+        changed["generation"] = json!(2);
+        write(&descriptor, &changed, 0o644)?;
+        assert!(!check()?);
+        write(&descriptor, &original, 0o644)?;
+        let image = root.join("sys-ctrl.erofs");
+        fs::set_permissions(&image, fs::Permissions::from_mode(0o644))?;
+        fs::write(&image, "damaged index")?;
+        assert!(check().is_err());
+        fs::remove_file(path)?;
+        assert!(!check()?);
+        Ok(())
+    }
+
     /// Boot reuses admission without opening package records, but rejects changed
     /// placement, missing/truncated backing, redirected paths and damaged metadata.
     #[test]
     fn retained_attachment_reuses_admission_and_checks_current_storage() -> Result<()> {
         let fixture = tempfile::tempdir()?;
         let root = fixture.path();
-        let (store, map) = admitted_view(root)?;
+        let (store, map) = admitted_view(root, "package")?;
         let path = PathBuf::from(text(&store, "canonical_blob_map")?);
         fs::write(
             segments::object_metadata(root, "package")?,
@@ -968,7 +1087,7 @@ mod image_index_tests {
     fn admission_binds_placement_and_survives_pool_relocation() -> Result<()> {
         let fixture = tempfile::tempdir()?;
         let root = fixture.path().join("pool");
-        let (store, mut map) = admitted_view(&root)?;
+        let (store, mut map) = admitted_view(&root, "package")?;
         let path = PathBuf::from(text(&store, "canonical_blob_map")?);
         fs::remove_file(admission_path(&path))?;
         assert!(attachment_map(&root, &store).is_err());

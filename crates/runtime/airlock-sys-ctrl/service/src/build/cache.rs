@@ -13,42 +13,32 @@ pub(super) fn publish(
 ) -> Result<Value> {
     grant.check(lock)?;
     let start = Instant::now();
-    let tools = Tools {
-        nix: "airlock-config-nix",
-        nix_store: "airlock-config-nix-store",
+    let request_name = name(grant, "build-publication-request");
+    let path = records::record_path(&request_name)?;
+    let cached: Option<Request> = if path.try_exists()? {
+        Some(records::read_owned::<Request>(&request_name)?)
+    } else {
+        None
     };
-    let derivation = tools.deriver(result).map_err(|error| {
-        Error::Message(format!(
-            "build completed; publication inventory failed: {error:#}"
-        ))
-    })?;
-    let inventory = tools.inventory(&derivation, result).map_err(|error| {
-        Error::Message(format!(
-            "build completed; publication inventory failed: {error:#}"
-        ))
-    })?;
-    let registration = tools.registration(&inventory.paths).map_err(|error| {
-        Error::Message(format!(
-            "build completed; Nix registration failed: {error:#}"
-        ))
-    })?;
-    let registration_sha256 = airlock_nix_core::build_cache::registration_hash(&registration)
-        .map_err(|error| Error::Message(format!("build registration identity: {error:#}")))?;
-    let request = Request {
-        schema: SCHEMA.into(),
-        review_authorization: grant.id.clone(),
-        revision: grant.header.revision.clone(),
-        lock_hash: grant.header.lock_hash.clone(),
-        target: grant.header.target.clone(),
-        result: result.clone(),
-        derivation,
-        paths: inventory.paths,
-        metadata: inventory.metadata,
-        registration_sha256,
+    let (request, registration) = match cached.filter(|request| {
+        request.revision == grant.header.revision
+            && request.lock_hash == grant.header.lock_hash
+            && request.target == grant.header.target
+            && request.result == *result
+    }) {
+        Some(mut request) => {
+            request.review_authorization = grant.id.clone();
+            (request, None)
+        }
+        None => {
+            let (request, registration) = inventory(grant, result)?;
+            (request, Some(registration))
+        }
     };
     request.validate().map_err(|error| {
         Error::Message(format!("build completed; publication refused: {error:#}"))
     })?;
+    records::save(store, &request_name, &serde_json::to_value(&request)?)?;
     let fingerprint = request
         .fingerprint()
         .map_err(|error| Error::Message(format!("build publication identity: {error:#}")))?;
@@ -60,6 +50,17 @@ pub(super) fn publish(
             &request.metadata,
         )
     })?;
+    if prepared["admission"] == "complete" && prepared["publication"] == "complete" {
+        check_receipt(&prepared, &fingerprint, result)?;
+        let mut receipt = prepared;
+        receipt["objects_total"] = json!(request.paths.len());
+        receipt["objects_transferred"] = json!(0);
+        receipt["payload_bytes_transferred"] = json!(0);
+        receipt["elapsed_seconds"] = json!(start.elapsed().as_secs_f64());
+        grant.check(lock)?;
+        records::save(store, &name(grant, "build-publication"), &receipt)?;
+        return Ok(receipt);
+    }
     require(
         prepared["schema"] == SCHEMA
             && prepared["request_hash"] == json!(fingerprint)
@@ -68,6 +69,18 @@ pub(super) fn publish(
         "build completed; invalid protected build preparation",
     )?;
     grant.check(lock)?;
+    let registration = match registration {
+        Some(registration) => registration,
+        None => Tools {
+            nix: "airlock-config-nix",
+            nix_store: "airlock-config-nix-store",
+        }
+        .registration(&request.paths)
+        .map_err(|error| Error::Message(format!("build registration: {error:#}")))?,
+    };
+    request
+        .check_registration(&registration)
+        .map_err(|error| Error::Message(format!("build registration: {error:#}")))?;
     let source = airlock_nix_core::artifact::Source {
         domain: airlock_nix_core::build_cache::DOMAIN.into(),
         system: request.derivation.to_string(),
@@ -114,20 +127,7 @@ pub(super) fn publish(
         .get("build_publication")
         .cloned()
         .ok_or_else(|| Error::Message("build completed; publication receipt missing".into()))?;
-    require(
-        receipt["schema"] == SCHEMA
-            && receipt["request_hash"] == json!(fingerprint)
-            && receipt["result"] == json!(result)
-            && receipt["activated"] == false
-            && receipt["build"] == "complete"
-            && receipt["admission"] == "complete"
-            && receipt["publication"] == "complete"
-            && receipt["adoption"] == "next-stopped-start"
-            && ["sys-ctrl", "usr-assistant"]
-                .iter()
-                .all(|role| receipt["views"][*role].is_object()),
-        "build completed; invalid build publication receipt",
-    )?;
+    check_receipt(&receipt, &fingerprint, result)?;
     grant.check(lock)?;
     receipt["objects_total"] = admission
         .diagnostics
@@ -148,4 +148,61 @@ pub(super) fn publish(
     receipt["elapsed_seconds"] = json!(start.elapsed().as_secs_f64());
     records::save(store, &name(grant, "build-publication"), &receipt)?;
     Ok(receipt)
+}
+
+/// Require a protected completion reply bound to this exact build inventory.
+fn check_receipt(receipt: &Value, fingerprint: &LockHash, result: &StorePath) -> Result<()> {
+    require(
+        receipt["schema"] == SCHEMA
+            && receipt["request_hash"] == json!(fingerprint)
+            && receipt["result"] == json!(result)
+            && receipt["activated"] == false
+            && receipt["build"] == "complete"
+            && receipt["admission"] == "complete"
+            && receipt["publication"] == "complete"
+            && receipt["adoption"] == "next-stopped-start"
+            && ["sys-ctrl", "usr-assistant"]
+                .iter()
+                .all(|role| receipt["views"][*role].is_object()),
+        "build completed; invalid build publication receipt",
+    )?;
+    Ok(())
+}
+
+/// Freeze the actual Nix result's reusable inputs once, after source approval.
+fn inventory(grant: &Grant, result: &StorePath) -> Result<(Request, String)> {
+    let tools = Tools {
+        nix: "airlock-config-nix",
+        nix_store: "airlock-config-nix-store",
+    };
+    let derivation = tools.deriver(result).map_err(|error| {
+        Error::Message(format!(
+            "build completed; publication inventory failed: {error:#}"
+        ))
+    })?;
+    let inventory = tools.inventory(&derivation, result).map_err(|error| {
+        Error::Message(format!(
+            "build completed; publication inventory failed: {error:#}"
+        ))
+    })?;
+    let registration = tools.registration(&inventory.paths).map_err(|error| {
+        Error::Message(format!(
+            "build completed; Nix registration failed: {error:#}"
+        ))
+    })?;
+    let registration_sha256 = airlock_nix_core::build_cache::registration_hash(&registration)
+        .map_err(|error| Error::Message(format!("build registration identity: {error:#}")))?;
+    let request = Request {
+        schema: SCHEMA.into(),
+        review_authorization: grant.id.clone(),
+        revision: grant.header.revision.clone(),
+        lock_hash: grant.header.lock_hash.clone(),
+        target: grant.header.target.clone(),
+        result: result.clone(),
+        derivation,
+        paths: inventory.paths,
+        metadata: inventory.metadata,
+        registration_sha256,
+    };
+    Ok((request, registration))
 }

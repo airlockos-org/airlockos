@@ -63,6 +63,19 @@ mod recovery;
 mod baseline;
 
 impl Coordinator {
+    /// Keep observation failures separate from storage and source-approval decisions.
+    fn progress(&self, name: &str) -> Option<airlock_nix_core::runtime::progress::Recording> {
+        match airlock_nix_core::runtime::progress::record_to(
+            &self.state.join("progress").join(name),
+        ) {
+            Ok(recording) => Some(recording),
+            Err(error) => {
+                eprintln!("preparation progress unavailable: {error}");
+                None
+            }
+        }
+    }
+
     fn store(&self) -> Store<'_> {
         Store::new(&self.runner)
     }

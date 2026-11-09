@@ -6,7 +6,7 @@ use std::{
     ffi::{OsStr, OsString},
     fs::File,
     io::Read,
-    os::unix::process::CommandExt,
+    os::unix::{fs::FileExt, process::CommandExt},
     process::{Child, Command, ExitStatus, Stdio},
     thread,
     time::{Duration, Instant},
@@ -175,6 +175,25 @@ fn contents(mut file: File) -> Result<Vec<u8>> {
     file.take(OUTPUT_LIMIT).read_to_end(&mut bytes)?;
 
     Ok(bytes)
+}
+
+/// Observe appended stderr without seeking the file shared with its writer.
+/// The existing frame decoder bounds partial lines; capture limits bound this drain.
+fn drain_progress(
+    file: &File,
+    offset: &mut u64,
+    frames: &mut airlock_nix_core::runtime::progress::Frames,
+) -> Result<()> {
+    let mut buffer = [0; 16384];
+    while *offset <= OUTPUT_LIMIT {
+        let count = file.read_at(&mut buffer, *offset)?;
+        if count == 0 {
+            break;
+        }
+        frames.push(&buffer[..count], false);
+        *offset += count as u64;
+    }
+    Ok(())
 }
 
 /// Bounded helper runner owning each process group through exit and descendant cleanup.
@@ -718,11 +737,15 @@ impl Runner {
     fn successful(program: &OsStr, captured: Captured) -> Result<String> {
         let stdout = String::from_utf8(captured.stdout)?;
         let stderr = String::from_utf8(captured.stderr)?;
-        ensure!(
-            !captured.limited,
-            "{program} exceeded its time or output limit",
-            program = program.to_string_lossy()
-        );
+        if captured.limited {
+            let reason =
+                if stdout.len() as u64 >= OUTPUT_LIMIT || stderr.len() as u64 >= OUTPUT_LIMIT {
+                    "exceeded its output limit"
+                } else {
+                    "exceeded its deadline"
+                };
+            anyhow::bail!("{program} {reason}", program = program.to_string_lossy());
+        }
         ensure!(
             captured.status.success(),
             "{program} failed ({status}): {stderr}",
@@ -781,7 +804,10 @@ impl Runner {
 
         let deadline = Instant::now() + timeout;
         let mut limited = false;
+        let mut frames = airlock_nix_core::runtime::progress::Frames::default();
+        let mut diagnostic_offset = 0;
         let status = loop {
+            drain_progress(&errors, &mut diagnostic_offset, &mut frames)?;
             airlock_nix_core::runtime::progress::heartbeat();
             if exited(child.group)? {
                 break child.finish()?;
@@ -796,6 +822,7 @@ impl Runner {
             thread::sleep(Duration::from_millis(20));
         };
 
+        drain_progress(&errors, &mut diagnostic_offset, &mut frames)?;
         // A fast helper may exit between polls after exceeding its output budget.
         limited |=
             output.metadata()?.len() > OUTPUT_LIMIT || errors.metadata()?.len() > OUTPUT_LIMIT;

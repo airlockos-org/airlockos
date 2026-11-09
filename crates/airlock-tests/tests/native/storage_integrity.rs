@@ -1113,12 +1113,21 @@ fn pool_verification_and_segment_packing_preserve_admission_boundaries() -> Resu
         store.closure.join("store-paths"),
         format!("{paths}\n", paths = objects.join("\n")),
     )?;
-    common::json(
+    let admitted = common::json(
         store
             .admission()
             .args(["--segment-target-bytes", "1048576"]),
         None,
     )?;
+    // EOF may append to the same open segment. Its recorded size must include
+    // that final append even when earlier objects share a metadata snapshot.
+    let map = read(admitted["canonical_blob_map"].as_str().unwrap())?;
+    for segment in map["segments"].as_array().unwrap() {
+        assert_eq!(
+            segment["size"].as_u64().unwrap(),
+            fs::metadata(segment["blob"].as_str().unwrap())?.len()
+        );
+    }
     let mut segments = BTreeSet::new();
     for path in objects {
         let name = Path::new(&path).file_name().unwrap();

@@ -130,3 +130,93 @@ pub(super) fn summary(root: &Path) -> Result<Value> {
         "physical_accounting":"shared pool segment and allocated-byte totals; NAR bytes are logical"}),
     )
 }
+
+/// Reuse only a committed publication whose exact admission and current builder
+/// descriptors still exist. Machine exclusion precedes this pool lock. Missing
+/// or superseded evidence is a cache miss; corrupt retained evidence is an error.
+/// Filesystem reads and checksum validation remain trusted storage adapters;
+/// fresh source authorization is required by the coordinator before this call.
+pub(crate) fn completed(
+    request: &airlock_nix_core::build_cache::Request,
+    receipt: &Value,
+) -> Result<bool> {
+    completed_at(Path::new(super::host::POOL), request, receipt)
+}
+
+/// The same storage check with an explicit physical pool for offline validation.
+pub(super) fn completed_at(
+    root: &Path,
+    request: &airlock_nix_core::build_cache::Request,
+    receipt: &Value,
+) -> Result<bool> {
+    let _lock = PoolLock::acquire(&root.join("admission.lock"))?;
+    let admitted: super::AdmissionReceipt = serde_json::from_value(receipt.clone())?;
+    admitted.check_transfer(
+        &DOMAIN.parse()?,
+        &airlock_nix_core::identity::SourceIdentity {
+            revision: request.revision.clone(),
+            lock_hash: request.lock_hash.clone(),
+        },
+    )?;
+    ensure!(
+        admitted.system == request.derivation,
+        "publication result differs from its recipe"
+    );
+    let namespace = super::runtime_namespace(DOMAIN);
+    let path = records::manifest_path(root, &namespace, admitted.generation.get())?;
+    ensure!(
+        path == admitted.manifest,
+        "publication manifest identity differs"
+    );
+    if !path.try_exists()? {
+        return Ok(false);
+    }
+    let manifest = records::generation(root, &namespace, admitted.generation.get())?;
+    ensure!(
+        manifest["system"] == json!(request.derivation)
+            && receipt["build_publication"]["schema"] == airlock_nix_core::build_cache::SCHEMA
+            && receipt["build_publication"]["request_hash"] == json!(request.fingerprint()?)
+            && receipt["build_publication"]["result"] == json!(request.result)
+            && receipt["build_publication"]["publication"] == "complete"
+            && receipt["build_publication"]["admission"] == "complete",
+        "committed publication binding differs"
+    );
+    request.check_registration(&fs::read_to_string(
+        path.parent()
+            .context("missing publication directory")?
+            .join("registration"),
+    )?)?;
+    super::views::attachment_map(root, &manifest["store"])?;
+    for role in ["sys-ctrl", "usr-assistant"] {
+        let descriptor = root.join("builders").join(format!("{role}.json"));
+        if !descriptor.try_exists()? {
+            return Ok(false);
+        }
+        let current: Value = read(&descriptor)?;
+        if current != receipt["build_publication"]["views"][role] {
+            return Ok(false);
+        }
+        // Older descriptors have no immutable image digest; retain their normal
+        // publication path rather than claiming a freshly checked cache hit.
+        let Some(digest) = current["metadata_image_sha256"].as_str() else {
+            return Ok(false);
+        };
+        let image = std::path::PathBuf::from(text(&current, "metadata_image")?);
+        pool_path(root, &image)?;
+        ensure!(hash(&image)? == digest, "builder metadata checksum differs");
+        let domain = format!("{role}-build-store");
+        let generation = number(&current, "generation")?;
+        let builder = records::generation(root, &domain, generation)?;
+        let registration = records::manifest_path(root, &domain, generation)?
+            .parent()
+            .context("missing builder directory")?
+            .join("registration");
+        ensure!(
+            json!(hash(&registration)?) == current["registration_sha256"],
+            "builder registration checksum differs"
+        );
+        super::views::attachment_map(root, &builder["store"])?;
+        super::builder::volume_configs(root, root, "airlock", role)?;
+    }
+    Ok(true)
+}

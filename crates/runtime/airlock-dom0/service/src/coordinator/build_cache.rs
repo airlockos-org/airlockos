@@ -52,13 +52,37 @@ impl Coordinator {
             approval.binding == Self::build_binding(&request),
             "publication scope differs from review"
         );
+        let fingerprint = request.fingerprint()?;
+        let directory = self.state.join("build-publications");
+        let path = directory.join(format!("{fingerprint}.json"));
+        let previous: Option<Value> = state::optional(&path)?;
+        let approval_hash = state::digest(&serde_json::to_value(&approval)?)?;
+        if let Some(previous) = &previous {
+            ensure!(
+                previous["request"] == serde_json::to_value(&request)?,
+                "build preparation identity conflict"
+            );
+            if airlock_deployment_core::publication::completion_matches(
+                previous["status"] == "committed",
+                previous["request_hash"].as_str().unwrap_or_default(),
+                fingerprint.as_str(),
+                previous["approval_hash"].as_str().unwrap_or_default(),
+                &approval_hash,
+                previous["boot_id"].as_str().unwrap_or_default(),
+                state::boot_id()?.as_str(),
+            ) && crate::store::completed_build_cache(&request, &previous["receipt"])?
+            {
+                release_metadata_root(&fingerprint)?;
+                let mut receipt = previous["receipt"]["build_publication"].clone();
+                receipt["reused"] = json!(true);
+                return Ok(receipt);
+            }
+        }
         Tools {
             nix: "nix",
             nix_store: "nix-store",
         }
         .prepare(&request)?;
-        let fingerprint = request.fingerprint()?;
-        let directory = self.state.join("build-publications");
         // A direct Nix GC root retains the recipe itself and its references.
         // --realise on a .drv would instead request its compiled outputs in dom0.
         let roots = Path::new(METADATA_ROOTS);
@@ -75,15 +99,6 @@ impl Coordinator {
             std::os::unix::fs::symlink(request.derivation.as_str(), &pin)?;
         }
         File::open(roots)?.sync_all()?;
-        let path = directory.join(format!("{fingerprint}.json"));
-        let previous: Option<Value> = state::optional(&path)?;
-        if let Some(previous) = &previous {
-            ensure!(
-                previous["request"] == serde_json::to_value(&request)?,
-                "build preparation identity conflict"
-            );
-        }
-        let approval_hash = state::digest(&serde_json::to_value(approval)?)?;
         let record = json!({"schema":SCHEMA, "request":request, "request_hash":fingerprint,
             "approval_hash":approval_hash, "boot_id":state::boot_id()?, "metadata_root":pin,
             "status":"prepared", "previous_progress":previous.and_then(|v|v.get("progress").cloned())});
@@ -158,6 +173,10 @@ impl Coordinator {
             gate.begin(&attempt, &binding),
             "publication intent was not acknowledged"
         );
+        let _recording = self.progress(&format!(
+            "build-{review}",
+            review = request.review_authorization
+        ));
         let received = crate::store::receive_build_cache(
             &request,
             &gate,
@@ -185,13 +204,7 @@ impl Coordinator {
                 // Committed pool generations now retain the source and recipe objects.
                 // Release temporary host-store ownership only after that acknowledgement;
                 // an interrupted attempt keeps its recorded root for recovery/retirement.
-                let roots = Path::new(METADATA_ROOTS);
-                match fs::remove_file(roots.join(token.as_str())) {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error.into()),
-                }
-                File::open(roots)?.sync_all()?;
+                release_metadata_root(token)?;
                 Ok(receipt)
             }
             Err(error) => {
@@ -204,4 +217,20 @@ impl Coordinator {
             }
         }
     }
+}
+
+/// A committed pool receipt owns these objects before temporary host roots are
+/// released. Retry also closes the crash window between receipt and root removal.
+fn release_metadata_root(token: &LockHash) -> Result<()> {
+    let roots = Path::new(METADATA_ROOTS);
+    if !roots.try_exists()? {
+        return Ok(());
+    }
+    match fs::remove_file(roots.join(token.as_str())) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    File::open(roots)?.sync_all()?;
+    Ok(())
 }

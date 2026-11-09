@@ -759,6 +759,8 @@ impl Coordinator {
 
     /// Resume journalled background pruning and pool GC only for the verified selected generation.
     pub fn generation_maintenance(&self) -> Result<Value> {
+        // Wait outside machine exclusion so a reviewed build can finish all phases.
+        let _preparation = crate::lock::PreparationLock::acquire(&self.state, true)?;
         let mut guard = MachineLock::acquire(
             &self.state,
             "Automatic generation maintenance",

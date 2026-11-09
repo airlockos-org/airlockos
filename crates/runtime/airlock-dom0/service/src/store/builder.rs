@@ -350,6 +350,7 @@ pub(super) fn prepare(
     fs::set_permissions(&image, fs::Permissions::from_mode(0o444))?;
     File::open(&image)?.sync_all()?;
     identity["metadata_image"] = json!(image);
+    identity["metadata_image_sha256"] = json!(hash(&image)?);
     manifest["builder"] = identity.clone();
     atomic(&directory.join("registration"), &registration_bytes, 0o444)?;
     if let Some(bytes) = &offline_bytes {

@@ -6,6 +6,22 @@ use vstd::prelude::*;
 
 verus! {
 
+/// Match a committed journal to the complete request, fresh source authorization
+/// and current host boot. This selects a retained-artifact check; it never grants
+/// execution or replaces the filesystem checks at the storage boundary.
+pub fn completion_matches(
+    committed: bool,
+    saved_request: &str, request: &str,
+    saved_authorization: &str, authorization: &str,
+    saved_boot: &str, boot: &str,
+) -> (matches: bool)
+    ensures matches == (committed && saved_request@ == request@
+        && saved_authorization@ == authorization@ && saved_boot@ == boot@),
+{
+    committed && saved_request == request
+        && saved_authorization == authorization && saved_boot == boot
+}
+
 /// Position of one attempt in the publication-to-execution handoff.
 #[derive(Clone, Copy)]
 pub enum Stage {

@@ -205,7 +205,13 @@ impl Coordinator {
         }
         r.recheck()?;
 
-        let mut host = self.store().publish_host(&r.manifest.host)?;
+        let _recording = self.progress(&format!(
+            "preparation-{revision}",
+            revision = r.manifest.revision
+        ));
+        let mut host = airlock_nix_core::runtime::progress::phase("publishing_host_store", || {
+            self.store().publish_host(&r.manifest.host)
+        })?;
         host.observation()?;
         ensure!(
             host.system == r.manifest.host,
