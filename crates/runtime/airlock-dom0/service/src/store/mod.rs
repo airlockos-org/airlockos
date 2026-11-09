@@ -477,9 +477,13 @@ impl<'a> Store<'a> {
 
     /// Publish and validate the host software view without selecting its boot entry.
     pub(crate) fn publish_host(&self, system: &StorePath) -> Result<HostReceipt> {
-        Ok(serde_json::from_value(
-            self.host(&["publish", system.as_str()])?,
-        )?)
+        // Publishing a cold host closure also materializes retained builder views.
+        // Use the release-preparation budget rather than the metadata-query limit.
+        Ok(serde_json::from_value(self.json(
+            "host",
+            &["publish", system.as_str()],
+            Duration::from_secs(1800),
+        )?)?)
     }
 
     /// Verify the already published host view and return its recorded identity.

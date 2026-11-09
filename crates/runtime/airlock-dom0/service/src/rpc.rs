@@ -266,13 +266,20 @@ impl Receiver {
                 Ok(bytes)
             })
             .transpose()?;
+
+        // Binding may publish a cold host closure and both builder views.
+        let timeout = Duration::from_secs(if args.first() == Some(&"machine-bind") {
+            1800
+        } else {
+            600
+        });
         let output = process::run(
             Command::new(program)
                 .arg("--state")
                 .arg(&self.state)
                 .args(args),
             bytes,
-            Some(Duration::from_secs(600)),
+            Some(timeout),
         )?;
         if !output.status.success() {
             let response: Value =
