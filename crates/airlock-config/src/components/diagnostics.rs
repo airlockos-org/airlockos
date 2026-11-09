@@ -258,7 +258,7 @@ fn endpoint_body(
                     "source": nix_text!("{executable}/bin/airlock-diagnostics", executable = executable),
                     "mode": "0555",
                 },
-                "qubes/rpc-config/airlock.Diagnostics": nix_record! { "text": "force-user=root\n" },
+                "qubes/rpc-config/airlock.Diagnostics": nix_record! { "text": "force-user='root'\n" },
             },
         },
         "systemd": nix_record! {
@@ -323,6 +323,7 @@ pub(crate) fn host_module(access: &Access, workspace: Workspace) -> NixValue {
                         "source": nix_text!("{package}/bin/airlock-diagnostics-relay", package = package),
                         "mode": "0555",
                     },
+                    "qubes/rpc-config/airlock.Diagnostics.Self": nix_record! { "text": "force-user='root'\n" },
                 },
             },
         }))
