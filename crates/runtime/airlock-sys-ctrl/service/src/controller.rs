@@ -276,6 +276,12 @@ fn start_job(store: &StateStore, header: &Header, retry_of: Option<&JobId>) -> R
                 "--setenv=PATH={}",
                 std::env::var("PATH").unwrap_or_default()
             ))
+            // systemd starts the raw executable outside its installed wrapper.
+            // Copy only the wrapper's artifact-store settings into that worker.
+            .args([
+                "--setenv=AIRLOCK_ARTIFACT_PHYSICAL_STORE",
+                "--setenv=AIRLOCK_ARTIFACT_NIX",
+            ])
             .arg(exe)
             .args(["work", id.as_str()]),
         None,
