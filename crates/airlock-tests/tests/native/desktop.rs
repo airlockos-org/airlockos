@@ -17,6 +17,52 @@ const IDENTITY: &str = "738a6af9-8e51-590d-afe4-790b26fbca79";
 
 const TOKEN: &str = "728a6af9-8e51-590d-afe4-790b26fbca79";
 
+/// Managed GTK sessions use XSettings without a forced font multiplier; unmanaged sessions keep their fallback.
+#[test]
+fn guest_session_scaling_has_one_owner_and_clears_stale_readiness() -> Result<()> {
+    for managed in [false, true] {
+        let mut peers = Peers::new()?;
+        let runtime = peers.path("runtime");
+        fs::create_dir_all(runtime.join("airlock-desktop-preferences"))?;
+        let ready = runtime.join("airlock-app-session-ready");
+        let preferences = runtime.join("airlock-desktop-preferences/status.json");
+        fs::write(&ready, b"stale")?;
+        fs::write(&preferences, b"stale")?;
+        peers.rules(
+            "upstream-session",
+            json!([{
+                "args": [],
+                "env": {"GDK_SCALE": if managed {None} else {Some("3")},
+                    "GDK_DPI_SCALE": if managed {None} else {Some("1")}, "XCURSOR_SIZE": "72"}
+            }]),
+        )?;
+        peers.run(
+            peers
+                .command(common::binary(
+                    "AIRLOCK_VM_SERVICE_BIN",
+                    "airlock-vm-service",
+                ))?
+                .args(["desktop", "app-session", "--session"])
+                .arg(peers.path("bin/upstream-session"))
+                .args([
+                    "--scale",
+                    "3",
+                    "--cursor-size",
+                    "72",
+                    "--preferences-enabled",
+                    if managed { "true" } else { "false" },
+                ])
+                .env("XDG_RUNTIME_DIR", &runtime)
+                .env("GDK_SCALE", "4")
+                .env("GDK_DPI_SCALE", "2"),
+        )?;
+        assert!(!ready.exists());
+        assert!(!preferences.exists());
+        assert_eq!(peers.calls()?.len(), 1);
+    }
+    Ok(())
+}
+
 /// GNOME receives both a resolvable icon and the installed notification source identity.
 fn assert_notification_identity(call: &Value) {
     let arguments = call["args"].as_array().unwrap();

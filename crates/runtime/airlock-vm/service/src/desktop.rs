@@ -145,10 +145,26 @@ enum Action {
         /// Integer scale exported before session startup.
         #[arg(long)]
         scale: String,
+        /// Let the configured preferences agent own GTK window scale and font DPI.
+        #[arg(long, default_value_t = managed_preferences(), action = clap::ArgAction::Set)]
+        preferences_enabled: bool,
         /// Cursor size derived from the same scale.
         #[arg(long)]
         cursor_size: String,
     },
+}
+
+/// Machine authoring installs this binding only when its XSettings agent is enabled.
+/// Existing session wrappers can therefore discover ownership without changing their arguments.
+fn managed_preferences() -> bool {
+    #[cfg(feature = "desktop-preferences")]
+    {
+        std::path::Path::new(airlock_vm_service::preferences::CONFIG).is_file()
+    }
+    #[cfg(not(feature = "desktop-preferences"))]
+    {
+        false
+    }
 }
 
 /// Register cleanup signals without altering process authority or interpreting input streams.
@@ -494,6 +510,7 @@ pub(crate) fn execute(request: Request) -> Result<()> {
         Action::AppSession {
             session,
             scale,
+            preferences_enabled,
             cursor_size,
         } => {
             let runtime = env::var_os("XDG_RUNTIME_DIR")
@@ -516,15 +533,17 @@ pub(crate) fn execute(request: Request) -> Result<()> {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error.into()),
             }
-            // These environment values are fixed when each application starts. Live text
-            // scaling must use toolkit settings while preserving this integer window scale;
-            // cursor synchronization must also account for the inherited XCURSOR_SIZE.
-            exec(
-                Command::new(session)
-                    .env("GDK_SCALE", scale)
-                    .env("GDK_DPI_SCALE", "1")
-                    .env("XCURSOR_SIZE", cursor_size),
-            )
+            let mut command = Command::new(session);
+            if preferences_enabled {
+                // Forced GDK_SCALE makes GTK ignore Gdk/UnscaledDPI and apply the
+                // scaled Xft/DPI to fonts a second time. XSettings supplies both
+                // the window scale and text DPI, including degraded startup defaults.
+                command.env_remove("GDK_SCALE").env_remove("GDK_DPI_SCALE");
+            } else {
+                command.env("GDK_SCALE", scale).env("GDK_DPI_SCALE", "1");
+            }
+
+            exec(command.env("XCURSOR_SIZE", cursor_size))
         }
     }
 }
