@@ -10,7 +10,17 @@ use rusix::{
 
 /// Build the normal QEMU lab release without copying VM payloads into dom0.
 pub(super) fn configuration(build: &Build) -> NixValue {
-    host(build, entries(build, "x86_64-linux".into()), None)
+    host(
+        build,
+        entries(build, "x86_64-linux".into()),
+        None,
+        NixValue::null(),
+    )
+}
+
+/// Assemble a release from completed entries without invoking guest factories.
+pub(super) fn completed(build: &Build, entries: NixValue, evidence: NixValue) -> NixValue {
+    host(build, entries, None, evidence)
 }
 
 /// Prepare the initial VM pool and state only when assembling a fresh disk image.
@@ -22,12 +32,17 @@ pub(super) fn image(build: &Build) -> NixValue {
             entries.clone(),
             seed_inputs().select("airlockMachineOfflineInputs"),
         )
-        .bind(|prepared| host(build, entries, Some(prepared)))
+        .bind(|prepared| host(build, entries, Some(prepared), NixValue::null()))
     })
 }
 
 /// Share the authored host and VM graph between ordinary releases and the initial carrier image.
-fn host(build: &Build, entries: NixValue, prepared: Option<NixValue>) -> NixValue {
+fn host(
+    build: &Build,
+    entries: NixValue,
+    prepared: Option<NixValue>,
+    evidence: NixValue,
+) -> NixValue {
     let generated = NixValue::builtin("import").call(
         build
             .source
@@ -61,6 +76,7 @@ fn host(build: &Build, entries: NixValue, prepared: Option<NixValue>) -> NixValu
         let release = crate::release::module(&crate::release::Build {
             source: build.source.clone(), workspace: build.workspace.clone(), entries: entries.clone(),
             metadata: identity.clone().merge_attrs(nix_record! {
+                "components": evidence.clone(),
                 "lockHash": NixValue::builtin("hashFile").call("sha256").call(build.file("flake.lock")),
             }),
         });
@@ -131,6 +147,11 @@ fn settings(identity: &NixValue, source: &NixPath) -> NixValue {
 
 /// Expose the exact guest systems used by the QEMU lab for normal guest admission.
 pub(super) fn entries(build: &Build, system: NixValue) -> NixValue {
+    entries_with(build, system, nix_record! {})
+}
+
+/// Supply realized native compilation only to the selected guest constructor.
+pub(super) fn entries_with(build: &Build, system: NixValue, extra: NixValue) -> NixValue {
     let directory = build.source.join_relative("generated/qemu-lab").unwrap();
     let generated =
         NixValue::builtin("import").call(directory.join_relative("default.nix").unwrap());
@@ -142,7 +163,7 @@ pub(super) fn entries(build: &Build, system: NixValue) -> NixValue {
         "airlockSupport": build.source.clone(),
         "modulesDirectory": directory,
         "userModulesDirectory": build.source.join_relative("vms").unwrap(),
-        "extraVmSpecialArgs": seed_inputs(),
+        "extraVmSpecialArgs": seed_inputs().merge_attrs(extra),
     });
     NixValue::builtin("mapAttrs")
         .call(NixValue::function(|name| {

@@ -4,6 +4,8 @@ mod nested;
 
 mod qemu_lab;
 
+mod components;
+
 mod packages;
 
 mod checks;
@@ -412,6 +414,8 @@ pub(super) fn outputs() -> NixValue {
                                     }),
                                 },
                                 "airlock": nix_record! {
+                                    "buildGuestComponent": components::guest(&build, &assembly),
+                                    "assembleComponentRelease": components::release(&build, &assembly),
                                     "configInputs": build.configuration_inputs(),
                                     "tests": nix_record! {
                                         "uplinkHotplug": uplink::fixture(&build),

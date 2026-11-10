@@ -23,6 +23,9 @@ use std::{
     process::Command,
 };
 
+/// Bound the number of declared evaluation roots before starting Nix subprocesses.
+pub(super) const MAX_GUESTS: usize = 64;
+
 /// Why an evaluation can use a narrower source projection, or requires the complete snapshot.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
@@ -285,10 +288,16 @@ pub fn prepare(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => captured.clone(),
         Err(error) => return Err(error.into()),
     };
-    let specs: BTreeMap<String, Spec> = serde_json::from_slice(&fs::read(captured_path(
-        &machine,
-        Path::new(&format!("generated/component-inputs-{profile}.json")),
-    )?)?)?;
+    let specs: BTreeMap<String, Spec> = airlock_nix_core::state::read_json(
+        &captured_path(
+            &machine,
+            Path::new(&format!("generated/component-inputs-{profile}.json")),
+        )?,
+        256 * 1024,
+    )?;
+    if specs.len() > MAX_GUESTS + 1 {
+        return Err("machine exceeds the component evaluation budget".into());
+    }
     let lock_path = captured_path(&machine, Path::new("flake.lock"))?;
     let lock: Value = serde_json::from_slice(&fs::read(&lock_path)?)?;
     let invocation = nix();

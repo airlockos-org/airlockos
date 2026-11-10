@@ -169,6 +169,7 @@ fn configuration(machine: &MachineSnapshot, inputs: &NixValue, factories: NixVal
             "extraModules",
             "hardwareModules",
             "machineEntries",
+            "componentEvidence",
             "extraSpecialArgs",
             "extraGuestSpecialArgs",
         ],
@@ -190,6 +191,7 @@ fn configuration(machine: &MachineSnapshot, inputs: &NixValue, factories: NixVal
                         .as_expression()]),
                 ),
                 ("machineEntries", NixValue::null()),
+                ("componentEvidence", NixValue::null()),
                 ("extraSpecialArgs", nix_record! {}),
                 ("extraGuestSpecialArgs", nix_record! {}),
             ];
@@ -250,6 +252,7 @@ fn configuration(machine: &MachineSnapshot, inputs: &NixValue, factories: NixVal
                     workspace: build.workspace.clone(),
                     entries: entries.clone(),
                     metadata: build.boot_source.clone().merge_attrs(nix_record! {
+                        "components": request.clone().select("componentEvidence"),
                         "lockHash": extra.clone().attr_or(
                             "airlockSourceLockHash",
                             NixValue::builtin("hashFile")

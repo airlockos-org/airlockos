@@ -2,7 +2,7 @@
 
 use airlock_nix_core::{
     admission::AdmissionReceipt,
-    identity::{GitRevision, GuestName, SourceIdentity},
+    identity::{GitRevision, GuestName, LockHash, SourceIdentity},
     root_artifact::RootDescriptor,
     runtime::{process, progress},
     store_path::{StoreArtifact, StoreFile, StorePath},
@@ -104,6 +104,15 @@ enum Source {
 
 #[derive(Subcommand)]
 enum BuildAction {
+    /// Evaluate and assemble the selected machine family without activating it.
+    Machine {
+        /// Installed release family selected by the checked controller.
+        profile: String,
+        /// Reviewed commit which must still be checked out before preparing anything.
+        revision: GitRevision,
+        /// Exact dependency lock bound into the same source grant.
+        lock_hash: LockHash,
+    },
     /// Check clean source, disk capacity and locked input availability.
     Preflight {
         /// Require the image's exact pinned offline inputs.
@@ -420,6 +429,8 @@ struct Prepared {
     applications: applications::Selected,
     /// Exact prepared-source reference returned by the existing authoring command.
     source: String,
+    /// True only when the installed compiler matched and emitted this capture.
+    installed_compiler: bool,
     /// Optional offline override argv validated against the checkout lock hash.
     overrides: Vec<String>,
     /// Effective immutable source identity included in admission receipts.
@@ -454,7 +465,11 @@ fn nix(action: &str, prepared: &Prepared, offline: bool) -> Command {
 }
 
 /// Validate source, capacity and pinned input availability before any build or admission.
-fn preflight(request: &Request, offline: bool) -> Result<Prepared> {
+fn preflight(
+    request: &Request,
+    offline: bool,
+    expected: Option<&SourceIdentity>,
+) -> Result<Prepared> {
     clean(&request.repo)?;
     private(&request.state)?;
     // The builder service owns the mount hierarchy. Its root stays root-owned
@@ -474,6 +489,10 @@ fn preflight(request: &Request, offline: bool) -> Result<Prepared> {
         "private Nix store needs at least 4 GiB free; available={available}"
     );
     let original = airlock_nix_core::runtime::protocol::identity(&request.repo)?;
+    ensure!(
+        expected.is_none_or(|expected| expected == &original),
+        "worker checkout differs from reviewed source"
+    );
     let applications = progress::phase("selecting_application_source", || {
         applications::select(request, offline)
     })?;
@@ -489,7 +508,8 @@ fn preflight(request: &Request, offline: bool) -> Result<Prepared> {
     } else {
         String::new()
     };
-    let source = if installed.is_empty() {
+    let installed_compiler = !installed.is_empty();
+    let source = if !installed_compiler {
         text(
             applications
                 .command("make")
@@ -513,6 +533,7 @@ fn preflight(request: &Request, offline: bool) -> Result<Prepared> {
     let mut prepared = Prepared {
         applications,
         source,
+        installed_compiler,
         overrides: Vec::new(),
         revision: original.revision.to_string(),
         lock: original.lock_hash.to_string(),
@@ -592,9 +613,83 @@ fn physical(request: &Request, logical: &str) -> PathBuf {
     request.store.join(logical.trim_start_matches('/'))
 }
 
+/// Use the same installed or Cargo-built compiler that prepared this reviewed source.
+/// The helper returns only a build result; the controller still checks its manifest
+/// and owns publication, plan review and activation.
+fn build_machine(request: &Request, profile: &str, expected: &SourceIdentity) -> Result<()> {
+    ensure!(
+        matches!(profile, "usb-lab" | "qemu-lab"),
+        "unsupported machine build profile"
+    );
+    let prepared = preflight(request, false, Some(expected))?;
+    let source = Path::new(
+        prepared
+            .source
+            .strip_prefix("path:")
+            .context("expected a prepared source path")?,
+    );
+    ensure!(
+        source.is_absolute(),
+        "prepared machine source must be absolute"
+    );
+    let nix = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .filter(|directory| directory.is_absolute())
+        .map(|directory| directory.join("airlock-config-nix"))
+        .find(|path| path.is_file())
+        .context("installed private Nix wrapper is unavailable")?;
+    let mut command = if prepared.installed_compiler {
+        let mut command = prepared.applications.command(&request.compiler);
+        command
+            .arg("build-components")
+            .arg(source)
+            .arg(&request.state)
+            .arg(profile)
+            .arg(&nix)
+            .arg(&request.store)
+            .arg(&prepared.revision)
+            .arg(&prepared.lock);
+        command
+    } else {
+        let mut command = prepared.applications.command("make");
+        command
+            .args(["--silent", "component-build"])
+            .env("AIRLOCK_COMPONENT_SOURCE", source)
+            .env("AIRLOCK_COMPONENT_STATE", &request.state)
+            .env("AIRLOCK_COMPONENT_PROFILE", profile)
+            .env("AIRLOCK_COMPONENT_NIX", &nix)
+            .env("AIRLOCK_COMPONENT_STORE", &request.store)
+            .env("AIRLOCK_COMPONENT_REVISION", &prepared.revision)
+            .env("AIRLOCK_COMPONENT_LOCK", &prepared.lock);
+        command
+    };
+    let release: StorePath = text(command.current_dir(&request.repo))?.parse()?;
+    clean(&request.repo)?;
+    let observed = airlock_nix_core::runtime::protocol::identity(&request.repo)?;
+    ensure!(
+        &observed == expected,
+        "machine source changed during component assembly"
+    );
+    println!("{release}");
+    Ok(())
+}
+
 /// Build a local prepared-source installable and optionally admit its complete closure.
 fn build(request: &Request, action: &BuildAction) -> Result<()> {
     let (offline, installable, target) = match action {
+        BuildAction::Machine {
+            profile,
+            revision,
+            lock_hash,
+        } => {
+            return build_machine(
+                request,
+                profile,
+                &SourceIdentity {
+                    revision: revision.clone(),
+                    lock_hash: lock_hash.clone(),
+                },
+            );
+        }
         BuildAction::Preflight { offline } => (*offline, None, None),
         BuildAction::Build {
             offline,
@@ -615,7 +710,7 @@ fn build(request: &Request, action: &BuildAction) -> Result<()> {
             "invalid admission target"
         );
     }
-    let prepared = preflight(request, offline)?;
+    let prepared = preflight(request, offline, None)?;
     if matches!(action, BuildAction::Preflight { .. }) {
         println!(
             "{record}",

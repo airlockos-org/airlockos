@@ -40,6 +40,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 return Err("component input consumer failed".into());
             }
         }
+        [command, source, state, profile, nix, store] if command == "build-components" => {
+            use airlock_config::preparation::component_build::{Request, build};
+            let release = build(Request {
+                source: Path::new(source),
+                state: Path::new(state),
+                profile,
+                nix: Path::new(nix),
+                store: Path::new(store),
+                expected: None,
+            })?;
+            println!("{release}");
+        }
         [command, directory] if command == "inspection" => {
             airlock_config::preparation::inspection(Path::new(directory))?;
         }
@@ -122,7 +134,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => {
             return Err(
-                "usage: airlock-config [prepare SOURCE CACHE | component-inputs SOURCE STATE PROFILE NIX CONSUMER [ARGS ...] | inspection DIR | runtime-seed DIR | flake KIND | bootstrap | desktop-module | \
+                "usage: airlock-config [prepare SOURCE CACHE | component-inputs SOURCE STATE PROFILE NIX CONSUMER [ARGS ...] | build-components SOURCE STATE PROFILE NIX STORE | inspection DIR | runtime-seed DIR | flake KIND | bootstrap | desktop-module | \
                  gui-service-packages | \
                  application-packages | vm-builders | display-builders | machine-modules | export DIR | \
                  machine DIR | diff BEFORE AFTER | inspect BEFORE AFTER [RUNNING_VM ...] | \

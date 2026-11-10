@@ -123,6 +123,7 @@ fn build_release(store: &StateStore, grant: &Grant, lock: &OperationLock) -> Res
         let link = records::root()?.join(format!("{build_name}-release"));
         if saved.get("revision") == Some(&json!(grant.header.revision))
             && saved.get("lock_hash") == Some(&json!(grant.header.lock_hash))
+            && saved.get("builder") == Some(&json!("components-v1"))
             && physical(&release).join("release.json").is_file()
             && fs::read_link(&link).ok().as_deref() == Some(Path::new(release.as_str()))
         {
@@ -138,8 +139,10 @@ fn build_release(store: &StateStore, grant: &Grant, lock: &OperationLock) -> Res
     let release = StorePath::try_from(process::text(
         "airlock-usr-assistant-machine-build",
         &[
-            "build",
-            &format!(".#airlock-machine-release-{profile}", profile = profile()?),
+            "machine",
+            profile()?,
+            grant.header.revision.as_str(),
+            grant.header.lock_hash.as_str(),
         ],
     )?)?;
     manifest(&release, grant)?;
@@ -164,7 +167,7 @@ fn build_release(store: &StateStore, grant: &Grant, lock: &OperationLock) -> Res
     records::save(
         store,
         &build_name,
-        &json!({"schema":MACHINE_SCHEMA,"release":release,"revision":grant.header.revision,"lock_hash":grant.header.lock_hash,"build_seconds":start.elapsed().as_secs_f64()}),
+        &json!({"schema":MACHINE_SCHEMA,"builder":"components-v1","release":release,"revision":grant.header.revision,"lock_hash":grant.header.lock_hash,"build_seconds":start.elapsed().as_secs_f64()}),
     )?;
 
     Ok(release)

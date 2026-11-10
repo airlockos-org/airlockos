@@ -39,5 +39,8 @@ pub mod application_source;
 /// Preserve reviewed root bindings and dependency nodes when Nix narrows a component lock.
 pub mod lock_projection;
 
+/// Reuse and completion checks for immutable Nix component recipes.
+pub mod component_build;
+
 /// Bounded native firewall recovery after an upstream Xen incarnation changes.
 pub mod network_recovery;

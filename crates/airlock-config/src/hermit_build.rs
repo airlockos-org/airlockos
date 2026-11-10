@@ -183,11 +183,18 @@ pub(crate) fn constructor(
             "ipv6",
             "clipboardAuthority",
             "scratchMiB",
+            "compiledApplication",
         ],
         |request| {
             let application = request.clone().select("application");
             let network = application.clone().equals("firewall");
-            let image = compilation(pkgs, workspace, &integration).call(application.clone());
+            let supplied = request.clone().select("compiledApplication");
+            let compile = supplied.clone().equals(NixValue::null());
+            let image = NixValue::if_else(
+                compile.clone(),
+                compilation(pkgs, workspace, &integration).call(application.clone()),
+                supplied,
+            );
             let authority = NixValue::if_else(
                 request
                     .clone()
@@ -196,7 +203,13 @@ pub(crate) fn constructor(
                 "disconnected",
                 "normal",
             );
-            let build_artifacts = image.clone().select("buildArtifacts");
+            // The incremental caller retains the actual compilation recipe. Only
+            // image callers need the separate list of reusable build artifacts.
+            let build_artifacts = NixValue::if_else(
+                compile,
+                image.clone().select("buildArtifacts"),
+                NixValue::list([]),
+            );
             let compiled_application = image.clone();
             let image = image.bind(|image| pkgs.clone().select("runCommand").call("airlock-hermit-executable").call(nix_record! {
             "allowedReferences": NixValue::list(["out".into()]),
@@ -276,7 +289,7 @@ pub(crate) fn constructor(
                     .equals(NixValue::null())
                     .and(request.clone().select("ipv6").equals(false)),
             );
-            (vec![("application", "clipboard".into()), ("upstream", NixValue::null()), ("autostart", false.into()), ("ipv6", false.into()), ("clipboardAuthority", NixValue::null()), ("scratchMiB", NixValue::null())],
+            (vec![("application", "clipboard".into()), ("upstream", NixValue::null()), ("autostart", false.into()), ("ipv6", false.into()), ("clipboardAuthority", NixValue::null()), ("scratchMiB", NixValue::null()), ("compiledApplication", NixValue::null())],
             NixValue::if_else(pinned.and(capabilities), output, NixValue::builtin("throw").call("Hermit requires the reviewed integration, source identity and application capabilities")))
         },
     )

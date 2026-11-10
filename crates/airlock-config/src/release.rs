@@ -31,9 +31,9 @@ pub(crate) fn module(build: &Build) -> NixValue {
             .lib
             .clone()
             .select("mapAttrs")
-            .call(NixValue::function(|_| {
+            .call(NixValue::function(|name| {
                 NixValue::function(|domain| {
-                    let entry = matching_entry(build, &domain);
+                    let entry = matching_entry(build, &name, &domain);
                     let backend = domain.clone().select("backend");
                     let updated = domain.clone().merge_attrs(nix_record! {
                         "backend": backend.clone().merge_attrs(nix_record! {
@@ -65,7 +65,38 @@ fn is_closure(domain: &NixValue) -> NixValue {
 }
 
 /// Require a VM artifact with the exact system identity selected by the deployment topology.
-fn matching_entry(build: &Build, domain: &NixValue) -> NixValue {
+fn matching_entry(build: &Build, name: &NixValue, domain: &NixValue) -> NixValue {
+    let direct = NixValue::if_else(
+        NixValue::builtin("hasAttr")
+            .call(name.clone())
+            .call(build.entries.clone()),
+        NixValue::builtin("getAttr")
+            .call(name.clone())
+            .call(build.entries.clone()),
+        nix_record! {},
+    );
+    let system = |entry: NixValue| {
+        entry
+            .select("configuration.config.system.build.toplevel")
+            .to_text()
+    };
+    let matched = system(direct.clone())
+        .equals(domain.clone().select("backend.system.source"))
+        .and(
+            direct
+                .clone()
+                .select("storeArtifact")
+                .to_text()
+                .equals(domain.clone().select("backend.store.source")),
+        )
+        .and(
+            NixValue::from(nix_text!(
+                "{root}/root.img",
+                root = direct.clone().select("rootImage")
+            ))
+            .equals(domain.clone().select("backend.root.source")),
+        );
+
     let matches = NixValue::builtin("filter")
         .call(NixValue::function(|entry| {
             NixValue::if_else(
@@ -81,13 +112,24 @@ fn matching_entry(build: &Build, domain: &NixValue) -> NixValue {
         }))
         .call(NixValue::builtin("attrValues").call(build.entries.clone()));
 
-    matches.bind(|matches| {
+    let legacy = matches.bind(|matches| {
         NixValue::if_else(
             matches.clone().equals(NixValue::list([])),
             NixValue::builtin("throw").call("No closure artifact for machine deployment domain"),
             NixValue::builtin("head").call(matches),
         )
-    })
+    });
+    // Completed entries belong to this exact guest. Legacy image and alternate
+    // graphics callers can still select the original entry by its system path.
+    NixValue::if_else(
+        direct.clone().attr_or("completed", false),
+        NixValue::if_else(
+            matched,
+            direct,
+            NixValue::builtin("throw").call("Completed component differs from deployment topology"),
+        ),
+        legacy,
+    )
 }
 
 /// Construct the runtime manifest using the final host configuration and captured source identity.
@@ -137,7 +179,7 @@ fn artifacts(context: &ModuleContext, build: &Build, topology: NixValue) -> NixV
         .select("mapAttrsToList")
         .call(NixValue::function(|name| {
             NixValue::function(|domain| {
-                let entry = matching_entry(build, &domain);
+                let entry = matching_entry(build, &name, &domain);
                 let script = nix_text!(
                     r#"
                 {jq}/bin/jq --arg name {name} \
@@ -228,6 +270,15 @@ fn artifacts(context: &ModuleContext, build: &Build, topology: NixValue) -> NixV
                 "guestTransport": "direct-pool-v1",
             }),
         );
+        let evidence = build.metadata.clone().attr_or("components", NixValue::null());
+        let evidence = NixValue::if_else(
+            evidence.clone().equals(NixValue::null()),
+            "",
+            nix_text!(
+                "cp {record} \"$out/component-builds.json\"",
+                record = json("airlock-component-builds.json", evidence),
+            ),
+        );
         let deployment_topology = topology.clone();
         let topology = json("airlock-machine-topology.json", topology);
         let detached = run(
@@ -264,12 +315,14 @@ fn artifacts(context: &ModuleContext, build: &Build, topology: NixValue) -> NixV
             cp {manifest} "$out/release.json"
             cp {topology} "$out/topology.json"
             cp {roots} "$out/root-artifacts.json"
+            {evidence}
             ln -s {transport} "$out/transport"
         "#,
                         hermit_links = hermit_links.clone(),
                         manifest = release_manifest,
                         topology = topology,
                         roots = root_artifacts.clone(),
+                        evidence = evidence.clone(),
                         transport = context
                             .config
                             .clone()

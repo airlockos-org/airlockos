@@ -5,6 +5,8 @@ pub mod cache;
 
 pub mod components;
 
+pub mod component_build;
+
 mod packaged;
 
 mod crates;
@@ -541,6 +543,30 @@ pub fn run_machine(
             Ok(())
         }
         [command, directory] if command == "--emit" => emit(&PathBuf::from(directory)),
+        [command, source, state, profile, nix, store, revision, lock]
+            if command == "build-components" =>
+        {
+            let expected = airlock_nix_core::identity::SourceIdentity {
+                revision: revision
+                    .to_str()
+                    .ok_or("non-UTF-8 reviewed revision")?
+                    .parse()?,
+                lock_hash: lock
+                    .to_str()
+                    .ok_or("non-UTF-8 reviewed lock hash")?
+                    .parse()?,
+            };
+            let release = component_build::build(component_build::Request {
+                source: Path::new(source),
+                state: Path::new(state),
+                profile: profile.to_str().ok_or("non-UTF-8 machine profile")?,
+                nix: Path::new(nix),
+                store: Path::new(store),
+                expected: Some(&expected),
+            })?;
+            println!("{release}");
+            Ok(())
+        }
         [command, cache] if command == "prepare" => {
             let tree = prepare(&std::env::current_dir()?, &PathBuf::from(cache), emit)?;
             println!("path:{path}", path = tree.display());
