@@ -29,7 +29,7 @@ pub(super) fn configuration(candidate: &Candidate, sources: &Sources) -> NixValu
             "airlockSupport": source.clone(),
             "airlockApps": workspace.root(),
         };
-        let builders = NixValue::function(|system| {
+        let builders = crate::flakes::systems(|system| {
             crate::vm_build::constructors()
                 .as_expression()
                 .call(nix_record! {
@@ -44,6 +44,9 @@ pub(super) fn configuration(candidate: &Candidate, sources: &Sources) -> NixValu
                     "nixpkgsLibvirt105Source": sources.libvirt.clone(),
                     "nixosQubesSource": sources.qubes.clone(),
                 })
+        });
+        let builders = builders.bind(|values| {
+            NixValue::function(|system| NixValue::builtin("getAttr").call(system).call(values))
         });
         let factories = crate::lowering::builders(&candidate.machine)
             .as_expression()

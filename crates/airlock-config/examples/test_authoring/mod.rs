@@ -60,6 +60,8 @@ mod guest_roles;
 
 mod native_etc;
 
+mod package_sharing;
+
 /// Select a fixture by its stable scenario name and supply JSON-derived caller values.
 pub(super) fn fixture(
     name: &str,
@@ -68,6 +70,7 @@ pub(super) fn fixture(
 ) -> Result<NixValue, String> {
     {
         let argument_1 = match name {
+            "packages/sharing" => package_sharing::expression(inputs),
             "hermit/build" => hermit::build(settings)?,
             "model/export" => authoring_boundary::export(settings)?,
             "candidate/evaluate" => candidate_value(inputs),

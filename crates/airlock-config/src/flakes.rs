@@ -53,7 +53,7 @@ pub(crate) fn configuration(kind: &str) -> Result<Config, String> {
 }
 
 /// Evaluate a factory once for each supported platform without fixing package derivations in Rust.
-fn systems(factory: impl FnOnce(NixValue) -> NixValue) -> NixValue {
+pub(crate) fn systems(factory: impl FnOnce(NixValue) -> NixValue) -> NixValue {
     nix_record! {
         "x86_64-linux": factory("x86_64-linux".into()),
     }

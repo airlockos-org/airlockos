@@ -2,6 +2,25 @@
 
 use super::*;
 
+/// Shared lazy applications preserve recipe identities, including override and source boundaries.
+#[test]
+#[ignore = "explicit prepared-source Nix evaluation; no package build"]
+fn package_sharing_preserves_recipes_and_input_boundaries() -> Result<()> {
+    let packages = Packages::new("package-sharing")?;
+    let report = packages.inspect(
+        "packages/sharing",
+        json!({
+            "root": packages.source.join("airlock-machine"),
+            "apps": packages.source.join("crates"),
+        }),
+    )?;
+    assert_eq!(report["original"], report["shared"]);
+    assert_eq!(report["original"], report["mismatch"]);
+    assert_eq!(report["extendedOriginal"], report["extendedShared"]);
+    assert_ne!(report["original"], report["extendedShared"]);
+    Ok(())
+}
+
 /// Require a textual field from the packaged interface report.
 fn text(value: &Value) -> &str {
     value.as_str().expect("interface text")

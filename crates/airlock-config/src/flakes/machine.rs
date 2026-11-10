@@ -277,6 +277,7 @@ pub(super) fn outputs() -> NixValue {
                                 "overlays": NixValue::list([
                                     inputs.clone().select("nixos-qubes.overlays.default"),
                                     apps_overlay.clone(),
+                                    airlock_build::Application::overlay(&workspace),
                                     constructors.clone().select("windowState"),
                                     overlays::codex(),
                                     overlays::memory_accounting(&workspace),
@@ -288,7 +289,7 @@ pub(super) fn outputs() -> NixValue {
                                 },
                             })
                     });
-                    let builders = NixValue::function(|system| {
+                    let builders = super::systems(|system| {
                         constructors.clone().select("template")
                             .call(nix_record! {
                                 "nixpkgs": inputs.clone().select("nixpkgs"),
@@ -303,6 +304,9 @@ pub(super) fn outputs() -> NixValue {
                                 "applicationRevision": inputs.clone().select("airlock-apps.rev"),
                             })
                     });
+                    let builders = builders.bind(|values| NixValue::function(|system| {
+                        NixValue::builtin("getAttr").call(system).call(values)
+                    }));
                     builders.bind(|builders| {
                         let factory_inputs = nix_record! {
                             "lib": lib.clone(),

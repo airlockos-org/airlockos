@@ -10,7 +10,7 @@ use rusix::{
 };
 
 /// A supported application build, including the installation-media executables built separately.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum Application {
     /// Build-directory VM boot filesystems and closure manifests.
     PrepareBoot,
@@ -61,7 +61,75 @@ pub enum Application {
 impl Application {
     /// Construct the application with the target's packages, preserving lazy build dependencies.
     /// This describes a derivation; Rust neither invokes Cargo nor realizes its output.
+    /// Reuse relies on upstream Nix's lazy selection and source-path equality over
+    /// the captured inputs; it grants no source approval or deployment authority.
     pub fn build(self, pkgs: &NixValue, workspace: &Workspace) -> Package {
+        let catalogue = pkgs
+            .clone()
+            .attr_or("airlockApplicationPackages", nix_record! {});
+        let key = format!("{self:?}");
+        let compatible = catalogue
+            .clone()
+            .attr_or("source", "")
+            .equals(workspace.root().as_expression().to_text())
+            .and(
+                catalogue
+                    .clone()
+                    .attr_or("packages", nix_record! {})
+                    .has_attr(key.clone()),
+            );
+        Package::from_expression(NixValue::if_else(
+            compatible,
+            catalogue.select("packages").select(&key),
+            self.build_uncached(pkgs, workspace).as_expression(),
+        ))
+    }
+
+    /// Share lazy application values inside one Nixpkgs fixed point. Source matching
+    /// keeps explicit alternative workspaces on their own recipes. Nixpkgs extensions
+    /// reapply this overlay with the extended package set, retaining override variants.
+    pub fn overlay(workspace: &Workspace) -> NixValue {
+        NixValue::function(|pkgs| {
+            NixValue::function(|_| {
+                let applications = [
+                    Self::PrepareBoot,
+                    Self::StoreCache,
+                    Self::StorePacker,
+                    Self::Observation,
+                    Self::Diagnostics,
+                    Self::Launcher,
+                    Self::UplinkTest,
+                    Self::InputTest,
+                    Self::TestReport,
+                    Self::QubesProbe,
+                    Self::Cli,
+                    Self::Development,
+                    Self::Dom0,
+                    Self::Dom0Qubes,
+                    Self::ControllerService,
+                    Self::ControllerGui,
+                    Self::VmService,
+                    Self::VmInit,
+                    Self::GuiSetup,
+                    Self::Image,
+                    Self::Usb,
+                    Self::PrepareRuntime,
+                ];
+                nix_record! {
+                    "airlockApplicationPackages": nix_record! {
+                        "source": workspace.root().as_expression().to_text(),
+                        "packages": NixValue::record(applications.map(|application| (
+                            format!("{application:?}"),
+                            application.build_uncached(&pkgs, workspace).as_expression(),
+                        ))),
+                    },
+                }
+            })
+        })
+    }
+
+    /// Describe the original recipe without looking up its own catalogue entry.
+    fn build_uncached(self, pkgs: &NixValue, workspace: &Workspace) -> Package {
         if matches!(self, Self::StorePacker) {
             return crate::store::packer(pkgs, workspace);
         }

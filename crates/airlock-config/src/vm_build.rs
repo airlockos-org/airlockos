@@ -131,6 +131,7 @@ impl Sources {
                     }
                 })
             }),
+            airlock_build::Application::overlay(&self.apps),
             image_tools,
             import.clone().call(qubes("pkgs/top-level/overlay.nix")),
             import.clone().call(by_name).call(qubes("pkgs/by-name")),
