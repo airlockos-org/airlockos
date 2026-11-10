@@ -402,6 +402,10 @@ fn assistant_selects_the_pinned_application_source() -> Result<()> {
     let machine = source.root.join("airlock-machine");
     let mut peers = Peers::new()?;
     setup(&mut peers, "", &machine)?;
+    // Match NixOS's installed /etc entry rather than only a regular-file fixture.
+    let binding = peers.path("installed-applications.json");
+    fs::rename(peers.path("applications.json"), &binding)?;
+    std::os::unix::fs::symlink(&binding, peers.path("applications.json"))?;
     let execute = |peers: &Peers| -> Result<airlock_vm_service::support::Output> {
         common::run(
             command(peers)?

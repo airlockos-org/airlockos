@@ -113,7 +113,10 @@ pub(super) fn select(request: &Request, offline: bool) -> Result<Selected> {
     );
 
     if request.applications_binding.try_exists()? {
-        let binding = read(&request.applications_binding)?;
+        // NixOS installs this trusted configuration through /etc symlinks. Resolve
+        // those before the regular-file reader, which still rejects final symlinks
+        // for mutable protocol records elsewhere in the worker.
+        let binding = read(&fs::canonicalize(&request.applications_binding)?)?;
         ensure!(
             binding["schema"] == "airlock.authoring-applications.v1",
             "unsupported installed application-source binding"
