@@ -481,6 +481,20 @@ fn assistant_selects_the_pinned_application_source() -> Result<()> {
 
     fs::write(
         machine.join("application-revision"),
+        format!("{revision}\n{padding}", padding = " ".repeat(128)),
+    )?;
+    git(
+        &machine,
+        &["commit", "-qam", "Reject oversized application pin"],
+    )?;
+    let before = peers.calls()?.len();
+    let oversized = execute(&peers)?;
+    assert!(!oversized.status.success());
+    assert!(String::from_utf8_lossy(&oversized.stderr).contains("exceeds its size limit"));
+    assert_eq!(peers.calls()?.len(), before);
+
+    fs::write(
+        machine.join("application-revision"),
         format!("{revision}\n", revision = "f".repeat(40)),
     )?;
     git(

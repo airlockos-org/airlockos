@@ -84,9 +84,15 @@ impl Selected {
 /// Select from the reviewed lock before executing any machine compiler. A missing
 /// image binding causes a normal Nix fetch; a failed fetch never falls back to image code.
 pub(super) fn select(request: &Request, offline: bool) -> Result<Selected> {
-    let requested: GitRevision = fs::read_to_string(request.repo.join("application-revision"))?
-        .trim()
-        .parse()?;
+    let mut revision = String::new();
+    File::open(request.repo.join("application-revision"))?
+        .take(129)
+        .read_to_string(&mut revision)?;
+    ensure!(
+        revision.len() <= 128,
+        "application revision file exceeds its size limit"
+    );
+    let requested: GitRevision = revision.trim().parse()?;
     let lock = read(&request.repo.join("flake.lock"))?;
     let root = lock["root"]
         .as_str()
