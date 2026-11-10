@@ -2,7 +2,7 @@
 //! Automatic approval deliberately permits raw evidence; sources are not secret-free.
 
 use crate::model::{AuthoringError, Machine, VmHandle, VmSnapshot};
-use airlock_build::{Application, Workspace};
+use airlock_build::{Application, Workspace, native};
 use airlock_diagnostics::{
     ApprovalMode, CONFIG_SCHEMA, CallerId, OUTPUT_LIMIT, Probe, ServerConfig, TargetId,
 };
@@ -289,6 +289,58 @@ fn client(access: &Access) -> NixosModule {
     })
 }
 
+/// Return a caller-checked RPC launcher and its exact sudo command. Dom0's
+/// qrexec daemon runs as the host user; force-user does not elevate a dom0 call.
+/// The privileged launcher restores only the statically authenticated observer
+/// identity, keeping the existing diagnostics checks intact after sudo's env reset.
+fn host_handler(
+    inputs: &ModuleContext,
+    workspace: &Workspace,
+    observer: &CallerId,
+    name: &str,
+    program: NixValue,
+) -> (NixValue, NixValue) {
+    let root_name = format!("{name}-root");
+    let root = native::package(
+        &inputs.pkgs,
+        workspace,
+        &root_name,
+        nix_record! {
+            "program": program,
+            "inherit_args": false,
+            "argument_count": 0_i64,
+            "env": nix_record! {
+                "QREXEC_REMOTE_DOMAIN": observer.as_str(),
+                "QREXEC_SERVICE_ARGUMENT": "",
+            },
+        },
+    );
+    let command: NixValue = nix_text!("{root}/bin/{name}", root = root, name = root_name).into();
+    let handler_name = format!("{name}-qrexec");
+    let handler = native::package(
+        &inputs.pkgs,
+        workspace,
+        &handler_name,
+        nix_record! {
+            "program": "/run/wrappers/bin/sudo",
+            "args": NixValue::list(["-n".into(), "--".into(), command.clone()]),
+            "inherit_args": false,
+            "argument_count": 0_i64,
+            "callers": NixValue::list([observer.as_str().into()]),
+            "empty_service_argument": true,
+        },
+    );
+    (
+        nix_text!(
+            "{handler}/bin/{name}",
+            handler = handler,
+            name = handler_name
+        )
+        .into(),
+        command,
+    )
+}
+
 /// Install host readers and policy without depending on the deployment controller's process.
 pub(crate) fn host_module(access: &Access, workspace: Workspace) -> NixValue {
     let host = access
@@ -298,6 +350,7 @@ pub(crate) fn host_module(access: &Access, workspace: Workspace) -> NixValue {
         .expect("configured host endpoint");
     let policy = policy(access);
     let host = host.clone();
+    let observer = access.observer.clone();
     let relay =
         serde_json::json!({"schema":"airlock.diagnostics-relay.v1", "observer":access.observer})
             .to_string();
@@ -312,20 +365,40 @@ pub(crate) fn host_module(access: &Access, workspace: Workspace) -> NixValue {
             .call("etc/qubes/policy.d/44-airlock-diagnostics.policy")
             .call(policy);
 
-        endpoint_body(inputs, &host, Some(workspace)).module(ModuleBody::new(nix_record! {
+        let (endpoint, endpoint_root) = host_handler(&inputs, &workspace, &observer, "airlock-diagnostics",
+            nix_text!("{package}/bin/airlock-diagnostics", package = package.clone()).into());
+        let (relay_handler, relay_root) = host_handler(&inputs, &workspace, &observer, "airlock-diagnostics-relay",
+            nix_text!("{package}/bin/airlock-diagnostics-relay", package = package).into());
+        let extra = ModuleBody::new(nix_record! {
             "virtualisation": nix_record! {
                 "qubes": nix_record! { "packages": NixValue::list([policy_package]) },
+            },
+            "security": nix_record! {
+                "sudo": nix_record! {
+                    "extraRules": NixValue::list([nix_record! {
+                        "users": NixValue::list([inputs.config.clone().select("airlock.dom0.user")]),
+                        "commands": NixValue::list([endpoint_root, relay_root].map(|command| nix_record! {
+                            "command": command,
+                            "options": NixValue::list(["NOPASSWD".into()]),
+                        })),
+                    }]),
+                },
             },
             "environment": nix_record! {
                 "etc": nix_record! {
                     "airlock/diagnostics-relay.json": nix_record! { "text": relay },
+                    "qubes-rpc/airlock.Diagnostics": nix_record! {
+                        "source": inputs.lib.clone().select("mkForce").call(endpoint),
+                        "mode": inputs.lib.clone().select("mkForce").call("symlink"),
+                    },
                     "qubes-rpc/airlock.Diagnostics.Self": nix_record! {
-                        "source": nix_text!("{package}/bin/airlock-diagnostics-relay", package = package),
-                        "mode": "0555",
+                        "source": relay_handler,
+                        "mode": "symlink",
                     },
                     "qubes/rpc-config/airlock.Diagnostics.Self": nix_record! { "text": "force-user='root'\n" },
                 },
             },
-        }))
+        });
+        endpoint_body(inputs, &host, Some(workspace)).module(extra)
     }).into_expression()
 }
