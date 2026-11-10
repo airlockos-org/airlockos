@@ -118,7 +118,6 @@ fn image(
     pkgs: &NixValue,
     workspace: &Workspace,
     integration: &NixValue,
-    revision: &NixValue,
     bin: &str,
     members: &[&str],
     vendor_hash: NixValue,
@@ -134,6 +133,9 @@ fn image(
             cp {lock} "$out/Cargo.lock"
         "#, lock=lock)),
     });
+    // The pinned upstream builder does not consume the application Git revision.
+    // Keep it in artifact.json below: changing release provenance must not rerun
+    // Cargo/build-std when the projected sources and compiler inputs are unchanged.
     let image = integration
         .clone()
         .select("lib.x86_64-linux.buildHermitApplication")
@@ -144,7 +146,6 @@ fn image(
         .select("overrideAttrs")
         .call(NixValue::function(|_| {
             nix_record! {
-                "AIRLOCK_SOURCE_REVISION": revision.clone(),
                 "AIRLOCK_BUILD_ARTIFACT": "1",
             }
         }));
@@ -194,7 +195,6 @@ pub(crate) fn constructor(
                             pkgs,
                             workspace,
                             &integration,
-                            &revision,
                             source.binary,
                             source.members,
                             source.vendor_hash.into(),
@@ -214,6 +214,7 @@ pub(crate) fn constructor(
                 "normal",
             );
             let build_artifacts = image.clone().select("buildArtifacts");
+            let compiled_application = image.clone();
             let image = image.bind(|image| pkgs.clone().select("runCommand").call("airlock-hermit-executable").call(nix_record! {
             "allowedReferences": NixValue::list(["out".into()]),
         }).call(nix_text!(r#"
@@ -242,6 +243,7 @@ pub(crate) fn constructor(
                 .merge_attrs(nix_record! { "executable": nix_text!("{image}/kernel.elf", image=image.clone()) });
             nix_record! {
                 "backendType": "hermit",
+                "compiledApplication": compiled_application,
                 "buildArtifacts": build_artifacts.clone(),
                 "executable": image.clone().merge_attrs(nix_record! { "buildArtifacts": build_artifacts.clone() }),
                 "domain": nix_record! {

@@ -24,6 +24,10 @@ pub(super) fn build(settings: &serde_json::Value) -> Result<NixValue, String> {
     let qubes = required("qubes")?;
     let libvirt = required("libvirt")?;
     let revision = required("revision")?;
+    let application = settings["application"]
+        .as_str()
+        .unwrap_or("clipboard")
+        .to_owned();
     Ok(rusix::nix_record! {
         "inputs": rusix::nix_record! {
             "hermit-xen": rusix::nix_record! { "url": integration },
@@ -34,15 +38,32 @@ pub(super) fn build(settings: &serde_json::Value) -> Result<NixValue, String> {
         },
         "outputs": NixValue::function_attrs(["self", "hermit-xen", "nixpkgs", "applications", "qubes", "libvirt"], |inputs| {
             let builders = NixValue::builtin("import").call(NixPath::from_expression(inputs.clone().select("self")).join_relative("builders.nix").unwrap());
-            let entry = builders.select("builders").call(rusix::nix_record! {
+            let entry = NixValue::function(|revision| builders.clone().select("builders").call(rusix::nix_record! {
                 "nixpkgs": inputs.clone().select("nixpkgs"), "hermitXen": inputs.clone().select("hermit-xen"),
-                "airlockAppsSource": inputs.clone().select("applications").to_text(), "applicationRevision": revision.clone(),
+                "airlockAppsSource": inputs.clone().select("applications").to_text(), "applicationRevision": revision,
                 "nixosQubesSource": inputs.clone().select("qubes").to_text(), "nixpkgsLibvirt105Source": inputs.clone().select("libvirt").to_text(),
                 "airlockSupport": inputs.clone().select("self"),
-            }).select("mkHermitDomain").call(rusix::nix_record! { "name": "sys-clipboard", "memory": 32_i64, "vcpus": 1_i64 });
-            (Vec::<(&str, NixValue)>::new(), entry.bind(|entry| rusix::nix_record! {
-                "packages": rusix::nix_record! { "x86_64-linux": rusix::nix_record! { "default": entry.clone().select("executable") } },
-                "airlock": rusix::nix_record! { "domain": entry.select("domain") },
+            }).select("mkHermitDomain").call(rusix::nix_record! { "name": "sys-clipboard", "application": application.clone(), "upstream": if application == "firewall" { NixValue::from("sys-net") } else { NixValue::null() }, "memory": if application == "firewall" { 256_i64 } else { 32_i64 }, "vcpus": 1_i64 }));
+            (Vec::<(&str, NixValue)>::new(), entry.bind(|factory| {
+                let entry = factory.clone().call(revision.clone());
+                let updated = factory.call("d".repeat(40));
+                rusix::nix_record! {
+                    "packages": rusix::nix_record! { "x86_64-linux": rusix::nix_record! {
+                        "default": entry.clone().select("executable"),
+                        "revision-update": updated.clone().select("executable"),
+                        "compilation": entry.clone().select("compiledApplication"),
+                    } },
+                    "airlock": rusix::nix_record! {
+                        "domain": entry.clone().select("domain"),
+                        "provenance": rusix::nix_record! {
+                            "compilation": entry.clone().select("compiledApplication.drvPath"),
+                            "updatedCompilation": updated.clone().select("compiledApplication.drvPath"),
+                            "descriptor": entry.clone().select("executable.drvPath"),
+                            "updatedDescriptor": updated.select("executable.drvPath"),
+                            "source": entry.select("compiledApplication.src.drvPath"),
+                        },
+                    },
+                }
             }))
         }),
     })

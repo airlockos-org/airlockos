@@ -48,6 +48,9 @@ pub(super) fn module(machine: &NixPath, workspace: &Workspace) -> NixValue {
                     "airlock/authoring/packer-vendor": nix_record! {
                         "source": packer_dependencies(&context.pkgs, &workspace.root()),
                     },
+                    // Offline authoring/recovery needs the complete application source,
+                    // not only the crates used by this VM's installed executables.
+                    // The installed binding below must continue identifying that exact tree.
                     "airlock/config-inputs/airlock-apps": nix_record! {
                         "source": workspace.root(),
                     },
