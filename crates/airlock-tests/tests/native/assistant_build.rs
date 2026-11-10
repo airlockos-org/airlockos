@@ -25,7 +25,9 @@ fn command(peers: &Peers) -> Result<std::process::Command> {
         .arg("--store")
         .arg(peers.path("store"))
         .arg("--offline-inputs")
-        .arg(peers.path("inputs.json"));
+        .arg(peers.path("inputs.json"))
+        .arg("--applications-binding")
+        .arg(peers.path("applications.json"));
     Ok(command)
 }
 
@@ -69,8 +71,36 @@ fn guest_outputs(peers: &Peers) -> Result<serde_json::Value> {
 }
 
 /// Fake only the build tools; Git identity, native failure propagation, metadata parsing and the sender barrier remain real.
-fn setup(peers: &mut Peers, failure: &str) -> Result<()> {
+fn setup(peers: &mut Peers, failure: &str, machine: &std::path::Path) -> Result<()> {
     fs::create_dir(peers.path("store"))?;
+    let locked = json!({"type":"git","url":"https://example.invalid/applications",
+        "dir":"crates","rev":"b".repeat(40),"narHash":"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="});
+    if !machine.join("application-revision").is_file() {
+        fs::write(
+            machine.join("application-revision"),
+            format!("{revision}\n", revision = "b".repeat(40)),
+        )?;
+        fs::write(
+            machine.join("flake.lock"),
+            serde_json::to_vec(&json!({"root":"root","nodes":{
+                "root":{"inputs":{"airlock-apps":"applications"}}, "applications":{"locked":locked}
+            }}))?,
+        )?;
+        git(machine, &["add", "application-revision", "flake.lock"])?;
+        git(machine, &["commit", "-qm", "Select authoring source"])?;
+    }
+    let applications = "/nix/store/cccccccccccccccccccccccccccccccc-applications";
+    fs::create_dir_all(
+        peers
+            .path("store")
+            .join(applications.trim_start_matches('/')),
+    )?;
+    fs::write(
+        peers.path("applications.json"),
+        serde_json::to_vec(&json!({
+            "schema":"airlock.authoring-applications.v1", "locked":locked, "applications":applications
+        }))?,
+    )?;
     guest_outputs(peers)?;
     if failure == "closure" {
         fs::remove_file(
@@ -78,7 +108,12 @@ fn setup(peers: &mut Peers, failure: &str) -> Result<()> {
         )?;
     }
 
-    peers.rules("make", json!([{"stdout": "path:/prepared-machine\n"}]))?;
+    peers.rules(
+        "make",
+        json!([{"stdout": "path:/prepared-machine\n",
+        "env":{"AIRLOCK_APPS":peers.path("store").join(applications.trim_start_matches('/')),
+            "AIRLOCK_APPLICATION_REVISION":"b".repeat(40)}}]),
+    )?;
     peers.rules(
         "stat",
         json!([{"contains": "%a", "stdout": "10000000\n"}, {"contains": "%S", "stdout": "4096\n"}]),
@@ -109,7 +144,7 @@ fn assistant_admission_stops_before_sending_on_failure() -> Result<()> {
         "closure",
     ] {
         let mut peers = Peers::new()?;
-        setup(&mut peers, failure)?;
+        setup(&mut peers, failure, &machine)?;
         if matches!(failure, "store-missing" | "store-file") {
             fs::remove_dir_all(peers.path("store"))?;
             if failure == "store-file" {
@@ -157,7 +192,7 @@ fn assistant_offline_build_binds_input_lock() -> Result<()> {
     let source = Repository::new()?;
     let machine = source.root.join("airlock-machine");
     let mut peers = Peers::new()?;
-    setup(&mut peers, "")?;
+    setup(&mut peers, "", &machine)?;
     let input = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-source";
     fs::create_dir_all(peers.path("store").join(input.trim_start_matches('/')))?;
     fs::set_permissions(peers.path("store"), fs::Permissions::from_mode(0o555))?;
@@ -278,7 +313,7 @@ fn assistant_admission_binds_boot_artifacts() -> Result<()> {
     let source = Repository::new()?;
     let machine = source.root.join("airlock-machine");
     let mut peers = Peers::new()?;
-    setup(&mut peers, "")?;
+    setup(&mut peers, "", &machine)?;
     let root = guest_outputs(&peers)?;
     peers.rules(
         "installed-compiler",
@@ -356,5 +391,225 @@ fn assistant_admission_binds_boot_artifacts() -> Result<()> {
             .iter()
             .any(|call| call["command"] == "airlock")
     );
+    Ok(())
+}
+
+/// Image inputs avoid fetching; a changed approved pin reaches Cargo as the new
+/// store source. Missing or substituted source cannot fall back to image code.
+#[test]
+fn assistant_selects_the_pinned_application_source() -> Result<()> {
+    let source = Repository::new()?;
+    let machine = source.root.join("airlock-machine");
+    let mut peers = Peers::new()?;
+    setup(&mut peers, "", &machine)?;
+    let execute = |peers: &Peers| -> Result<airlock_vm_service::support::Output> {
+        common::run(
+            command(peers)?
+                .args(["build", "preflight"])
+                .env("AIRLOCK_MACHINE_REPO", &machine),
+            None,
+        )
+    };
+    let original: serde_json::Value = serde_json::from_slice(&execute(&peers)?.checked()?)?;
+    assert_eq!(original["application_source_from_image"], true);
+    assert!(
+        !peers
+            .calls()?
+            .iter()
+            .any(|call| call["args"].as_array().unwrap().contains(&json!("eval")))
+    );
+
+    let revision = "d".repeat(40);
+    fs::write(
+        machine.join("application-revision"),
+        format!("{revision}\n"),
+    )?;
+    let mut lock: serde_json::Value =
+        serde_json::from_slice(&fs::read(machine.join("flake.lock"))?)?;
+    lock["nodes"]["applications"]["locked"]["rev"] = json!(revision);
+    fs::write(machine.join("flake.lock"), serde_json::to_vec(&lock)?)?;
+    git(&machine, &["commit", "-qam", "Update authoring library"])?;
+
+    let fetched = "/nix/store/ffffffffffffffffffffffffffffffff-updated-source";
+    let workspace = peers
+        .path("store")
+        .join(fetched.trim_start_matches('/'))
+        .join("crates");
+    fs::create_dir_all(&workspace)?;
+    peers.rules(
+        "make",
+        json!([{"stdout":"path:/prepared-machine\n",
+        "env":{"AIRLOCK_APPS":workspace,"AIRLOCK_PREPARED_APPLICATIONS":workspace,
+            "AIRLOCK_APPLICATION_REVISION":revision}}]),
+    )?;
+    let resolved = json!({"path":fetched,"rev":revision,
+        "narHash":"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="});
+    peers.rules(
+        "airlock-config-nix",
+        json!([
+            {"contains":"eval","stdout":serde_json::to_string(&resolved)?},
+            {"contains":"build","stdout":""}, {"contains":"metadata","stdout":"{}"}
+        ]),
+    )?;
+    let updated: serde_json::Value = serde_json::from_slice(&execute(&peers)?.checked()?)?;
+    assert_eq!(updated["application_source_from_image"], false);
+    assert_eq!(updated["application_source"], json!(workspace));
+    assert_eq!(updated["application_revision"], revision);
+    assert!(!fs::read_dir(peers.path("state"))?.any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("application-source-")
+    }));
+
+    let mut substituted = resolved.clone();
+    substituted["narHash"] = json!("different");
+    for reply in [
+        json!({"contains":"eval","exit":1,"stderr":"source unavailable"}),
+        json!({"contains":"eval","stdout":serde_json::to_string(&substituted)?}),
+    ] {
+        peers.rules("airlock-config-nix", json!([reply]))?;
+        let before = peers.calls()?.len();
+        assert!(!execute(&peers)?.status.success());
+        assert!(
+            !peers.calls()?[before..]
+                .iter()
+                .any(|call| call["command"] == "make")
+        );
+    }
+
+    fs::write(
+        machine.join("application-revision"),
+        format!("{revision}\n", revision = "f".repeat(40)),
+    )?;
+    git(
+        &machine,
+        &["commit", "-qam", "Select mismatched application pin"],
+    )?;
+    let before = peers.calls()?.len();
+    let rejected = execute(&peers)?;
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr)
+            .contains("differs from the locked application source")
+    );
+    assert_eq!(peers.calls()?.len(), before);
+    Ok(())
+}
+
+/// Exercise the actual Nix fetcher, JSON response, private-store mapping and GC
+/// root through the production worker. Only the compiler response is inert.
+#[test]
+#[ignore = "requires explicitly prepared Nix and AIRLOCK_NIX_ROOT; fetches a local Git fixture only"]
+fn external_tool_application_source_selection_uses_nix() -> Result<()> {
+    use anyhow::{Context, ensure};
+    use std::{path::PathBuf, process::Command};
+
+    let store = PathBuf::from(std::env::var_os("AIRLOCK_NIX_ROOT").context("guarded Nix store")?);
+    ensure!(
+        store.is_absolute() && store != std::path::Path::new("/"),
+        "select the guarded store"
+    );
+    let source = Repository::new()?;
+    let machine = source.root.join("airlock-machine");
+    let mut peers = Peers::new()?;
+    let repository = peers.path("applications");
+    fs::create_dir_all(repository.join("crates"))?;
+    fs::write(repository.join("crates/Cargo.toml"), "[workspace]\n")?;
+    fs::write(
+        repository.join("crates/flake.nix"),
+        "{ outputs = { self }: {}; }\n",
+    )?;
+    git(&repository, &["init", "--quiet"])?;
+    git(&repository, &["add", "."])?;
+    git(
+        &repository,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "Source fixture",
+        ],
+    )?;
+    let revision = git(&repository, &["rev-parse", "HEAD"])?;
+    let url = format!(
+        "git+file://{path}?rev={revision}&dir=crates",
+        path = repository.display()
+    );
+    let observed: serde_json::Value = serde_json::from_slice(
+        &common::run(
+            Command::new("nix").arg("--store").arg(&store).args([
+                "flake",
+                "metadata",
+                "--json",
+                "--no-write-lock-file",
+                &url,
+            ]),
+            None,
+        )?
+        .checked()?,
+    )?;
+    fs::write(
+        machine.join("application-revision"),
+        format!("{revision}\n"),
+    )?;
+    // Metadata includes Nix's internal fetcher-cache flag; its lock writer omits it.
+    let mut locked = observed["locked"].clone();
+    locked
+        .as_object_mut()
+        .context("Nix locked source")?
+        .remove("__final");
+    fs::write(
+        machine.join("flake.lock"),
+        serde_json::to_vec(&json!({"version":7,"root":"root","nodes":{
+            "root":{"inputs":{"airlock-apps":"apps"}},"apps":{"flake":false,"locked":locked}
+        }}))?,
+    )?;
+    git(&machine, &["add", "application-revision", "flake.lock"])?;
+    git(&machine, &["commit", "-qm", "Select exact local source"])?;
+
+    let fetched: airlock_nix_core::store_path::StorePath = observed["path"]
+        .as_str()
+        .context("Nix source path")?
+        .parse()?;
+    let applications = store
+        .join(fetched.as_str().trim_start_matches('/'))
+        .join("crates");
+    peers.rules("installed-compiler", json!([{
+        "env":{"AIRLOCK_APPS":applications,"AIRLOCK_PREPARED_APPLICATIONS":applications,"AIRLOCK_APPLICATION_REVISION":revision},
+        "stdout":format!("path:{path}\n", path=applications.display())
+    }]))?;
+    let nix = std::env::split_paths(&std::env::var_os("PATH").context("native tool PATH")?)
+        .map(|path| path.join("nix"))
+        .find(|path| path.is_file())
+        .context("prepared Nix executable")?;
+    std::os::unix::fs::symlink(nix, peers.path("bin/airlock-config-nix"))?;
+    let result: serde_json::Value = serde_json::from_slice(
+        &common::run(
+            command(&peers)?
+                .arg("--compiler")
+                .arg(peers.path("bin/installed-compiler"))
+                .args(["build", "preflight"])
+                .env("AIRLOCK_MACHINE_REPO", &machine)
+                .env("AIRLOCK_CONFIG_NIX_STORE_ROOT", &store)
+                .env("NIX_REMOTE", &store),
+            None,
+        )?
+        .checked()?,
+    )?;
+    assert_eq!(result["application_revision"], revision);
+    assert_eq!(result["application_source"], json!(applications));
+    assert_eq!(result["application_source_from_image"], false);
+    assert!(!fs::read_dir(peers.path("state"))?.any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("application-source-")
+    }));
     Ok(())
 }

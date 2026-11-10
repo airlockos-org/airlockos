@@ -10,6 +10,14 @@ use rusix::{
 /// Keep authoring offline and reproducible without provisioning tools in quick tests or on dom0.
 pub(super) fn module(machine: &NixPath, workspace: &Workspace) -> NixValue {
     ContextualModule::new(|context| {
+        let lock = NixValue::builtin("fromJSON").call(
+            NixValue::builtin("readFile").call(machine.join_relative("flake.lock").unwrap()),
+        );
+        let root = NixValue::builtin("getAttr").call(lock.clone().select("root")).call(lock.clone().select("nodes"));
+        let locked_applications = NixValue::builtin("getAttr")
+            .call(root.select("inputs.airlock-apps"))
+            .call(lock.select("nodes"))
+            .select("locked");
         let role = context.config.clone().select("airlock.qubeGuest.role");
         let enabled = NixValue::builtin("elem").call(role.clone()).call(NixValue::list([
             "sys-ctrl".into(),
@@ -43,7 +51,15 @@ pub(super) fn module(machine: &NixPath, workspace: &Workspace) -> NixValue {
                     "airlock/config-inputs/airlock-apps": nix_record! {
                         "source": workspace.root(),
                     },
-                }).merge_attrs(context.lib.clone().select("optionalAttrs").call(role.equals("sys-ctrl").and(machine_compiler)).call(nix_record! {
+                }).merge_attrs(context.lib.clone().select("optionalAttrs").call(machine_compiler.clone()).call(nix_record! {
+                    "airlock/authoring/applications.json": nix_record! {
+                        "text": NixValue::builtin("toJSON").call(nix_record! {
+                            "schema": "airlock.authoring-applications.v1",
+                            "locked": locked_applications,
+                            "applications": workspace.root(),
+                        }),
+                    },
+                })).merge_attrs(context.lib.clone().select("optionalAttrs").call(role.equals("sys-ctrl").and(machine_compiler)).call(nix_record! {
                     "airlock/authoring/compiler": nix_record! {
                         "source": compiler(&context.pkgs, workspace, machine),
                     },

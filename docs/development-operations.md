@@ -52,6 +52,14 @@ preparing source. Preparation never invokes Nix to install missing tools.
 The application and packer graphs are generated separately; ordinary package
 builds retain their own feature selections.
 
+After source approval, live builds select the application Git revision and tree
+hash from the machine lock. `application-revision` must agree with that lock.
+Matching image inputs reuse the installed compiler; changed inputs are resolved
+by Nix into the private builder store before Cargo compiles the configuration.
+Missing sources or locked Cargo dependencies stop preparation without reverting
+to the image's older library. Offline operation requires the selected inputs to
+be available already.
+
 Before editing system configuration, inspect its recorded deployed source and
 compare it with the checkout, including committed and uncommitted changes:
 

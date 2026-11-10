@@ -22,6 +22,8 @@ use std::{
     time::Duration,
 };
 
+mod applications;
+
 /// Installed worker paths, supplied by machine configuration rather than remote payloads.
 #[derive(Args)]
 pub(crate) struct Request {
@@ -52,6 +54,9 @@ pub(crate) struct Request {
         default_value = "/etc/airlock/authoring/compiler/airlock-machine-config"
     )]
     compiler: PathBuf,
+    /// Immutable image record binding its prepared application source to the original lock.
+    #[arg(long, default_value = "/etc/airlock/authoring/applications.json")]
+    applications_binding: PathBuf,
 }
 
 #[derive(Subcommand)]
@@ -411,6 +416,8 @@ fn seed(request: &Request, archive: &Path, user: &str, group: &str) -> Result<()
 
 /// Checked build inputs retained together so a successful preflight cannot be replaced by stale strings.
 struct Prepared {
+    /// Retain selected source and its temporary Nix GC root throughout this operation.
+    applications: applications::Selected,
     /// Exact prepared-source reference returned by the existing authoring command.
     source: String,
     /// Optional offline override argv validated against the checkout lock hash.
@@ -466,10 +473,15 @@ fn preflight(request: &Request, offline: bool) -> Result<Prepared> {
         available >= 4 * 1024 * 1024 * 1024,
         "private Nix store needs at least 4 GiB free; available={available}"
     );
+    let original = airlock_nix_core::runtime::protocol::identity(&request.repo)?;
+    let applications = progress::phase("selecting_application_source", || {
+        applications::select(request, offline)
+    })?;
     let preparation = progress::Span::start("preparing_inputs");
     let installed = if request.compiler.is_file() {
         text(
-            Command::new(&request.compiler)
+            applications
+                .command(&request.compiler)
                 .current_dir(&request.repo)
                 .arg("prepare-installed")
                 .arg(request.state.join("prepared")),
@@ -479,7 +491,8 @@ fn preflight(request: &Request, offline: bool) -> Result<Prepared> {
     };
     let source = if installed.is_empty() {
         text(
-            Command::new("make")
+            applications
+                .command("make")
                 .args(["--silent", "-C"])
                 .arg(&request.repo)
                 .arg("prepare")
@@ -491,13 +504,18 @@ fn preflight(request: &Request, offline: bool) -> Result<Prepared> {
     } else {
         installed
     };
+    ensure!(
+        airlock_nix_core::runtime::protocol::identity(&request.repo)? == original,
+        "machine source changed during application selection or preparation"
+    );
     preparation.complete();
     let evaluation = progress::Span::start("evaluating_inputs");
     let mut prepared = Prepared {
+        applications,
         source,
         overrides: Vec::new(),
-        revision: git(&request.repo, &["rev-parse", "HEAD"])?,
-        lock: hash(&request.repo.join("flake.lock"))?,
+        revision: original.revision.to_string(),
+        lock: original.lock_hash.to_string(),
         available,
         offline_ready: false,
     };
@@ -601,7 +619,8 @@ fn build(request: &Request, action: &BuildAction) -> Result<()> {
     if matches!(action, BuildAction::Preflight { .. }) {
         println!(
             "{record}",
-            record = json!({"schema":"airlock.sys-agent-machine-build-preflight.v1","repo":request.repo,"revision":prepared.revision,"lock_hash":prepared.lock,"store_root":request.store,"available_bytes":prepared.available,"offline_inputs_ready":prepared.offline_ready})
+            record = json!({"schema":"airlock.sys-agent-machine-build-preflight.v1","repo":request.repo,"revision":prepared.revision,"lock_hash":prepared.lock,"store_root":request.store,"available_bytes":prepared.available,"offline_inputs_ready":prepared.offline_ready,
+                "application_revision":prepared.applications.revision,"application_source":prepared.applications.path,"application_source_from_image":prepared.applications.image})
         );
         return Ok(());
     }

@@ -33,5 +33,8 @@ pub mod ipc_policy;
 /// Exact review-source, target-family and baseline comparisons before protected-record reuse.
 pub mod review_identity;
 
+/// Exact application pin, dependency lock and observed authoring-source correspondence.
+pub mod application_source;
+
 /// Bounded native firewall recovery after an upstream Xen incarnation changes.
 pub mod network_recovery;

@@ -438,6 +438,15 @@ pub fn run_machine(
 ) -> Result<()> {
     let arguments: Vec<_> = std::env::args_os().skip(1).collect();
     let emit = |directory: &Path| {
+        // Check only when emitting: an image compiler with older inputs must
+        // still be able to return its ordinary cache miss to the reviewed worker.
+        if let Ok(selected) = std::env::var("AIRLOCK_APPLICATION_REVISION")
+            && selected != application_revision
+        {
+            return Err(
+                "selected application source differs from the machine application pin".into(),
+            );
+        }
         packaged::source(
             directory,
             &directory.join("generated/machine-compiler-source"),
@@ -461,18 +470,21 @@ pub fn run_machine(
             applications
         };
 
-        // Admitted applications already contain their source-bound graphs. Machine
-        // edits cannot change that immutable workspace. Reuse its recipes rather
-        // than regenerating and overwriting read-only Nix store copies.
-        for workspace in ["", "tooling/airlock-store-packer"] {
-            for name in ["Cargo.nix", "airlock-crate-build.nix"] {
-                if !applications.join(workspace).join(name).is_file() {
-                    return Err("admitted application graph was not prepared".into());
-                }
-            }
+        let captured = directory.join("generated/crate2nix");
+        mirror(&applications, &captured)?;
+        // Image inputs already include recipes. A newly fetched pinned source is
+        // raw Git content: generate recipes only inside the captured writable tree,
+        // using Cargo's locked resolution and the installed dependency vendor inputs.
+        if ["", "tooling/airlock-store-packer"]
+            .iter()
+            .any(|workspace| {
+                ["Cargo.nix", "airlock-crate-build.nix"]
+                    .iter()
+                    .any(|name| !captured.join(workspace).join(name).is_file())
+            })
+        {
+            self::applications(&captured)?;
         }
-
-        mirror(&applications, &directory.join("generated/crate2nix"))?;
         crate::export_machine(
             snapshot,
             &crate::profiles::bootstrap::machine()?,
