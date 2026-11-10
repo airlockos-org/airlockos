@@ -36,5 +36,8 @@ pub mod review_identity;
 /// Exact application pin, dependency lock and observed authoring-source correspondence.
 pub mod application_source;
 
+/// Preserve reviewed root bindings and dependency nodes when Nix narrows a component lock.
+pub mod lock_projection;
+
 /// Bounded native firewall recovery after an upstream Xen incarnation changes.
 pub mod network_recovery;

@@ -19,6 +19,7 @@ anyhow = "1.0"
 airlock-diagnostics = { path = "../airlock-common/diagnostics" }
 airlock-build = { path = "../airlock-common/build" }
 airlock-machine-core = { path = "../airlock-common/machine" }
+airlock-machine-planning = { path = "../airlock-common/machine-planning" }
 rusix = { workspace = true }
 airlock-nix-core = { path = "../airlock-common/nix" }
 serde = { version = "1", features = ["derive"] }

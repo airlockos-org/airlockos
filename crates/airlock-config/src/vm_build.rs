@@ -248,6 +248,8 @@ pub(crate) fn constructors() -> PackageFunction {
                             },
                         ),
                         "mkNixNativeDomain": domain_constructor(&sources, &pkgs),
+                        "mkHermitApplication": crate::hermit_build::compilation(&pkgs, &sources.apps,
+                            &arguments.clone().select("hermitXen")),
                         "mkHermitDomain": crate::hermit_build::constructor(&pkgs, &sources.apps,
                             arguments.clone().select("hermitXen"), arguments.clone().select("applicationRevision")),
                     }

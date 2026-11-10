@@ -3,13 +3,15 @@
 
 pub mod cache;
 
+pub mod components;
+
 mod packaged;
 
 mod crates;
 
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     error::Error,
     fs,
     path::{Path, PathBuf},
@@ -110,12 +112,19 @@ fn snapshot(source: &Path, destination: &Path) -> Result<BTreeMap<String, String
     Ok(files)
 }
 
-/// Hash the complete prepared tree in stable path order, excluding its own receipt.
-fn inventory(root: &Path, directory: &Path, files: &mut BTreeMap<String, String>) -> Result<()> {
+/// Capture files and directory presence in stable order, excluding only the receipt at the caller.
+/// Empty directories matter to Nix's directory enumeration and absence checks too.
+fn inventory(
+    root: &Path,
+    directory: &Path,
+    files: &mut BTreeMap<String, String>,
+    directories: &mut BTreeSet<String>,
+) -> Result<()> {
     for entry in fs::read_dir(directory)? {
         let path = entry?.path();
         if fs::symlink_metadata(&path)?.is_dir() {
-            inventory(root, &path, files)?;
+            directories.insert(path.strip_prefix(root)?.to_string_lossy().into_owned());
+            inventory(root, &path, files, directories)?;
         } else {
             files.insert(
                 path.strip_prefix(root)?.to_string_lossy().into_owned(),
@@ -188,7 +197,13 @@ pub fn prepare_leased(
     }
 
     let mut artifacts = BTreeMap::new();
-    inventory(staging.path(), staging.path(), &mut artifacts)?;
+    let mut directories = BTreeSet::new();
+    inventory(
+        staging.path(),
+        staging.path(),
+        &mut artifacts,
+        &mut directories,
+    )?;
     let artifact_hash = format!(
         "{hash:x}",
         hash = Sha256::digest(serde_json::to_vec(&artifacts)?)
@@ -201,6 +216,7 @@ pub fn prepare_leased(
         "source_files": files,
         "artifact_sha256": artifact_hash,
         "artifact_files": artifacts,
+        "artifact_directories": directories,
     });
     let receipt = serde_json::to_vec_pretty(&receipt)?;
     let identity = format!("{hash:x}", hash = Sha256::digest(&receipt));
@@ -220,9 +236,15 @@ pub fn prepare_leased(
             return Err("prepared source identity collision".into());
         }
         let mut existing = BTreeMap::new();
-        inventory(&destination, &destination, &mut existing)?;
+        let mut existing_directories = BTreeSet::new();
+        inventory(
+            &destination,
+            &destination,
+            &mut existing,
+            &mut existing_directories,
+        )?;
         existing.remove("airlock-prepared.json");
-        if existing != artifacts {
+        if existing != artifacts || existing_directories != directories {
             return Err("existing prepared source was modified".into());
         }
     } else {
@@ -325,6 +347,9 @@ fn mirror(source: &Path, destination: &Path) -> Result<()> {
         let from = entry.path();
         let to = destination.join(entry.file_name());
         let metadata = fs::symlink_metadata(&from)?;
+        if !metadata.is_dir() && !metadata.is_file() && !metadata.file_type().is_symlink() {
+            return Err("source mirror contains an unsupported special file".into());
+        }
         if metadata.is_dir() {
             if let Ok(existing) = fs::symlink_metadata(&to)
                 && !existing.is_dir()

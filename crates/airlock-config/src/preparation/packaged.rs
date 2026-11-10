@@ -198,7 +198,7 @@ pub(super) fn source(source: &Path, destination: &Path) -> Result<()> {
         None
     };
     let mut files = BTreeMap::new();
-    super::inventory(source, source, &mut files)?;
+    super::inventory(source, source, &mut files, &mut Default::default())?;
     capture(source, destination, &files, inputs.as_ref())
 }
 
@@ -340,11 +340,16 @@ mod tests {
         let embedded = std::collections::BTreeSet::from(["vms/embedded.nix".to_owned()]);
         let snapshot = |name: &str| -> Result<BTreeMap<String, String>> {
             let mut inputs = BTreeMap::new();
-            super::super::inventory(&source, &source, &mut inputs)?;
+            super::super::inventory(&source, &source, &mut inputs, &mut Default::default())?;
             let destination = fixture.path().join(name);
             capture(&source, &destination, &inputs, Some(&embedded))?;
             let mut output = BTreeMap::new();
-            super::super::inventory(&destination, &destination, &mut output)?;
+            super::super::inventory(
+                &destination,
+                &destination,
+                &mut output,
+                &mut Default::default(),
+            )?;
             Ok(output)
         };
         let first = snapshot("first")?;

@@ -112,6 +112,7 @@ dependencies = [
  "airlock-build",
  "airlock-diagnostics",
  "airlock-machine-core",
+ "airlock-machine-planning",
  "airlock-nix-core",
  "airlock-sys-gui-service",
  "anyhow",

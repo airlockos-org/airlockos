@@ -286,14 +286,14 @@ pub fn export_machine(
 ) -> Result<(), Box<dyn std::error::Error>> {
     export_installation(physical, &directory.join("generated/machine"))?;
     export_installation(bootstrap, &directory.join("generated/bootstrap"))?;
-    export_installation(
-        &profiles::qemu_lab::machine()?,
-        &directory.join("generated/qemu-lab"),
-    )?;
+    let qemu = profiles::qemu_lab::machine()?;
+    export_installation(&qemu, &directory.join("generated/qemu-lab"))?;
     let flake = crate::compile(flakes::machine_configuration(application_revision))
         .map_err(|diagnostic| diagnostic.render(directory))?;
     std::fs::write(directory.join("flake.nix"), flake.source)?;
     std::fs::write(directory.join("generated/schemas.nix"), schemas()?.source)?;
+    preparation::components::export(physical, directory, "usb-lab")?;
+    preparation::components::export(&qemu, directory, "qemu-lab")?;
 
     Ok(())
 }

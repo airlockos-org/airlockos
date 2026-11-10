@@ -187,24 +187,7 @@ pub(crate) fn constructor(
         |request| {
             let application = request.clone().select("application");
             let network = application.clone().equals("firewall");
-            let images = NixValue::record(airlock_build::hermit::APPLICATIONS.into_iter().map(
-                |source| {
-                    (
-                        source.profile,
-                        image(
-                            pkgs,
-                            workspace,
-                            &integration,
-                            source.binary,
-                            source.members,
-                            source.vendor_hash.into(),
-                        ),
-                    )
-                },
-            ));
-            let image = NixValue::builtin("getAttr")
-                .call(application.clone())
-                .call(images);
+            let image = compilation(pkgs, workspace, &integration).call(application.clone());
             let authority = NixValue::if_else(
                 request
                     .clone()
@@ -297,4 +280,35 @@ pub(crate) fn constructor(
             NixValue::if_else(pinned.and(capabilities), output, NixValue::builtin("throw").call("Hermit requires the reviewed integration, source identity and application capabilities")))
         },
     )
+}
+
+/// Select compilation inputs without manufacturing a release revision or boot descriptor.
+/// The upstream integration pin still constrains the kernel and compiler pipeline.
+pub(crate) fn compilation(
+    pkgs: &NixValue,
+    workspace: &Workspace,
+    integration: &NixValue,
+) -> NixValue {
+    let images = NixValue::record(airlock_build::hermit::APPLICATIONS.map(|source| {
+        (
+            source.profile,
+            image(
+                pkgs,
+                workspace,
+                integration,
+                source.binary,
+                source.members,
+                source.vendor_hash.into(),
+            ),
+        )
+    }));
+    NixValue::function(|application| {
+        NixValue::assert(
+            integration
+                .clone()
+                .attr_or("rev", "")
+                .equals(INTEGRATION_REVISION),
+            NixValue::builtin("getAttr").call(application).call(images),
+        )
+    })
 }

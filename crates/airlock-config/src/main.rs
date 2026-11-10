@@ -19,6 +19,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 airlock_config::preparation::development(Path::new(source), Path::new(cache))?;
             println!("path:{path}", path = tree.display());
         }
+        [command, source, state, profile, nix, consumer, args @ ..]
+            if command == "component-inputs" =>
+        {
+            let roots = airlock_config::preparation::components::prepare(
+                Path::new(source),
+                Path::new(state),
+                profile,
+                &|| {
+                    let mut command = std::process::Command::new(nix);
+                    command.args(["--extra-experimental-features", "nix-command flakes"]);
+                    command
+                },
+            )?;
+            let status = std::process::Command::new(consumer)
+                .arg(roots.manifest())
+                .args(args)
+                .status()?;
+            if !status.success() {
+                return Err("component input consumer failed".into());
+            }
+        }
         [command, directory] if command == "inspection" => {
             airlock_config::preparation::inspection(Path::new(directory))?;
         }
@@ -101,7 +122,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => {
             return Err(
-                "usage: airlock-config [prepare SOURCE CACHE | inspection DIR | runtime-seed DIR | flake KIND | bootstrap | desktop-module | \
+                "usage: airlock-config [prepare SOURCE CACHE | component-inputs SOURCE STATE PROFILE NIX CONSUMER [ARGS ...] | inspection DIR | runtime-seed DIR | flake KIND | bootstrap | desktop-module | \
                  gui-service-packages | \
                  application-packages | vm-builders | display-builders | machine-modules | export DIR | \
                  machine DIR | diff BEFORE AFTER | inspect BEFORE AFTER [RUNNING_VM ...] | \
