@@ -146,6 +146,9 @@ impl Machine {
                 .join("view")
                 .join(Path::new(HOST).file_name().unwrap()),
         )?;
+        // The namespace replaces /run, which may contain the Cargo target
+        // directory. Keep command peers reachable through the fixture mount.
+        fs::copy(common::peer(), temporary.path().join("bin/fixture-peer"))?;
         for name in [
             "qvm-ls",
             "qvm-check",
@@ -165,7 +168,7 @@ impl Machine {
             "qvm-remove",
             "machine-lock-race",
         ] {
-            common::peer_link(&temporary.path().join("bin"), name)?;
+            symlink("fixture-peer", temporary.path().join("bin").join(name))?;
         }
         for name in ["airlock-setup-config", "airlock-dom0-service"] {
             fs::copy(
@@ -334,7 +337,7 @@ impl Machine {
             )
             .env(
                 "AIRLOCK_FIXTURE_DOM0_BINARY",
-                common::binary("AIRLOCK_DOM0_BIN", "airlock-dom0-service"),
+                "/var/lib/airlock/fixture-dom0",
             )
             .env("AIRLOCK_LOG_DIR", "/var/lib/airlock/log")
             .env("AIRLOCK_STARTUP_STATE_DIR", "/var/lib/airlock/startup")
@@ -362,7 +365,20 @@ impl Machine {
                 .arg(pci)
                 .arg("/sys/bus/pci/devices");
         }
-        command.arg(executable).args(arguments);
+        command
+            .arg("--ro-bind")
+            .arg(common::binary("AIRLOCK_DOM0_BIN", "airlock-dom0-service"))
+            .arg("/var/lib/airlock/fixture-dom0");
+        if executable.starts_with("/var/lib/airlock") {
+            command.arg(executable);
+        } else {
+            command
+                .arg("--ro-bind")
+                .arg(executable)
+                .arg("/var/lib/airlock/fixture-command")
+                .arg("/var/lib/airlock/fixture-command");
+        }
+        command.args(arguments);
         Ok(command)
     }
 
