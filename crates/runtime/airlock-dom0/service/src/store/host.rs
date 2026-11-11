@@ -76,11 +76,6 @@ impl serde::Serialize for ValidatedHost {
     }
 }
 
-/// Open the same selected overlay configured for the host's Nix daemon.
-pub(super) fn overlay_uri() -> String {
-    airlock_machine_core::host_store::URI.into()
-}
-
 pub(super) fn validate(
     root: &Path,
     logical: &Path,
@@ -430,14 +425,24 @@ pub(super) fn refresh_builder(
 }
 
 fn publication_registration(system: &str) -> Result<String> {
+    // The QEMU carrier installs a regular local store. USB hosts open the
+    // same overlay backend as their daemon, including when publication is
+    // retried during recovery.
+    let store = if crate::state::profile().is_ok_and(|profile| profile.as_str() == "qemu-lab")
+        && !Path::new("/etc/airlock/host-store").try_exists()?
+    {
+        "local"
+    } else {
+        airlock_machine_core::host_store::URI
+    };
     let live = command(
         "nix-store",
-        &["--store", &overlay_uri(), "--gc", "--print-live"],
+        &["--store", store, "--gc", "--print-live"],
         None,
     )?;
     let records = builder::registration(&command(
         "nix-store",
-        &["--store", &overlay_uri(), "--dump-db"],
+        &["--store", store, "--dump-db"],
         None,
     )?)?;
     let mut roots: BTreeSet<String> = live.lines().map(str::to_owned).collect();

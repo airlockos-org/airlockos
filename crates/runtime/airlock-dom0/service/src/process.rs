@@ -746,13 +746,29 @@ impl Runner {
                 };
             anyhow::bail!("{program} {reason}", program = program.to_string_lossy());
         }
-        ensure!(
-            captured.status.success(),
-            "{program} failed ({status}): {stderr}",
-            program = program.to_string_lossy(),
-            status = captured.status,
-            stderr = stderr.trim()
-        );
+        if !captured.status.success() {
+            // Storage subcommands send their bounded protocol error on stdout.
+            let report = if stderr.trim().is_empty() {
+                airlock_nix_core::state::parse_json::<serde_json::Value>(
+                    stdout.as_bytes(),
+                    std::path::Path::new("<storage-error>"),
+                )
+                .ok()
+                .filter(|report| report["schema"] == "airlock.pool-artifact-error.v1")
+            } else {
+                None
+            };
+            let detail = report
+                .as_ref()
+                .and_then(|report| report["error"].as_str())
+                .map(|detail| detail.chars().take(4096).collect::<String>())
+                .unwrap_or_else(|| stderr.trim().to_owned());
+            anyhow::bail!(
+                "{program} failed ({status}): {detail}",
+                program = program.to_string_lossy(),
+                status = captured.status
+            );
+        }
 
         Ok(stdout.trim().to_owned())
     }
