@@ -363,12 +363,12 @@ fn tailscale_local() -> Result<()> {
     enroll_tailscale()
 }
 
-/// Check the assistant's network path before invoking the upstream interactive login once.
+/// Check this VM's network path before invoking the upstream interactive login once.
 fn enroll_tailscale() -> Result<()> {
-    println!("Checking the Internet connection from usr-assistant...");
+    println!("Checking the Internet connection from this VM...");
     ensure!(
         !text(Command::new("ip").args(["-4", "route", "show", "default"]))?.is_empty(),
-        "No network route in usr-assistant. Check sys-net and sys-firewall, then retry."
+        "No network route in this VM. Check sys-net and sys-firewall, then retry."
     );
     ensure!(
         process::run(
@@ -378,7 +378,7 @@ fn enroll_tailscale() -> Result<()> {
         )?
         .status
         .success(),
-        "DNS is not working from usr-assistant. Check sys-net and sys-firewall, then retry."
+        "DNS is not working from this VM. Check sys-net and sys-firewall, then retry."
     );
     run(Command::new("curl").args([
         "--silent",

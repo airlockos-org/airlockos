@@ -263,13 +263,13 @@ pub(crate) fn contract<const N: usize>(
             &["runtime", "store-check"],
             false,
         ),
-        "usr-assistant-tailscale-window" => (
+        "tailscale-window" => (
             "@console@/bin/kgx",
             &[
                 "--gapplication-app-id",
                 airlock_build::desktop::TAILSCALE_ID,
                 "--title",
-                "Connect Tailscale — usr-assistant",
+                "@title@",
                 "--",
                 "@service@/bin/airlock-vm-service",
                 "desktop",
