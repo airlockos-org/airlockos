@@ -556,18 +556,18 @@ impl Engine {
         }
         let Some(external) = policy::external(config, packet.tuple.src.version()) else { return; };
         let quota = binding.assigned().primary();
-        let port = match self.flows.find(owner, packet.tuple) {
-            Some(port) => Some(port),
+        let flow_id = match self.flows.find(owner, packet.tuple) {
+            Some(flow_id) => Some(flow_id),
             None => self.flows.create(NewMapping { owner, quota, policy: policy_tuple, external, mac, revision: view.generation() }, &packet, now, &mut self.random),
         };
-        let Some(port) = port else { return; };
-        let Some(flow) = self.flows.entries.get(&port) else { return; };
+        let Some(flow_id) = flow_id else { return; };
+        let Some(flow) = self.flows.entries.get(&flow_id) else { return; };
         if flow.policy != policy_tuple || flow.external != external || flow.revision != view.generation() { return; }
-        if !self.flows.accept(port, &packet, true, Some(mac), now) { return; }
-        let translated = Tuple { src: external, sport: port, ..policy_tuple };
+        let translated = flow.translated();
+        if !self.flows.accept(flow_id, &packet, true, Some(mac), now) { return; }
         if let Some(fragment) = &mut layout {
             let Some(id) = self.fragment_id() else { return; };
-            self.history.record(Emission { id, original: fragment.id, port, quota, source: translated.src,
+            self.history.record(Emission { id, original: fragment.id, flow_id, quota, source: translated.src,
                 destination: translated.dst, protocol: fragment.protocol, client: None,
                 deadline: now.saturating_add(30 * SECOND) });
             fragment.id = id;
@@ -603,9 +603,15 @@ impl Engine {
         if self.dns.receive(&packet, view, now) { return; }
         if wire::is_error(packet.tuple.proto, packet.icmp) { self.related(view, &packet, now); return; }
         if packet.tuple.icmp() && packet.icmp != packet.tuple.reply() { return; }
-        let port = if packet.tuple.icmp() { packet.tuple.sport } else { packet.tuple.dport };
-        let Some(flow) = self.flows.entries.get(&port) else { return; };
-        if !flow.live(now) || !flow.reply(packet.tuple, port) || flow.revision != view.generation()
+        let wire_tuple = if packet.tuple.icmp() {
+            Tuple { src: packet.tuple.dst, dst: packet.tuple.src, ..packet.tuple }
+        } else {
+            Tuple { src: packet.tuple.dst, dst: packet.tuple.src,
+                sport: packet.tuple.dport, dport: packet.tuple.sport, proto: packet.tuple.proto }
+        };
+        let Some(flow_id) = self.flows.translated_id(wire_tuple) else { return; };
+        let Some(flow) = self.flows.entries.get(&flow_id) else { return; };
+        if !flow.live(now) || !flow.reply(packet.tuple, flow.translated_port) || flow.revision != view.generation()
             || !policy::allows(view, flow.policy, if flow.policy.icmp() { flow.policy.request() } else { 0 }, now) { return; }
         if packet.ttl <= 1 || (packet.bytes.len() > MTU && layout.is_none()) {
             let owner = flow.owner; let external = flow.external;
@@ -620,9 +626,9 @@ impl Engine {
             Tuple { src: flow.original.dst, dst: flow.original.src, sport: flow.original.sport, dport: 0, proto: flow.original.proto }
         } else { Tuple { src: flow.original.dst, dst: flow.original.src,
             sport: flow.original.dport, dport: flow.original.sport, proto: flow.original.proto } };
-        if !self.flows.accept(port, &packet, false, None, now) { return; }
+        if !self.flows.accept(flow_id, &packet, false, None, now) { return; }
         if let Some(fragment) = layout {
-            self.history.record(Emission { id: fragment.id, original: fragment.id, port, quota, source: tuple.src,
+            self.history.record(Emission { id: fragment.id, original: fragment.id, flow_id, quota, source: tuple.src,
                 destination: tuple.dst, protocol: fragment.protocol, client: Some(owner),
                 deadline: now.saturating_add(30 * SECOND) });
         }
@@ -969,11 +975,11 @@ impl Engine {
         if identity.extensions > 8 || identity.fragment_headers != 1 || identity.routing || identity.authenticated
             || identity.options.iter().any(|kind: &u8| -> (reject: bool) ensures reject == (*kind >= 64), { *kind >= 64 }) { return true; }
         let Some(emission) = self.history.find(&identity, client, now) else { return true; };
-        let Some(flow) = self.flows.entries.get(&emission.port) else { return true; };
+        let Some(flow) = self.flows.entries.get(&emission.flow_id) else { return true; };
         if packet.tuple.proto != 58 || !flow.live(now) || flow.quota != emission.quota
             || flow.revision != view.generation() || client.is_some_and(|owner| owner != flow.owner)
             || !policy::allows(view, flow.policy, if flow.policy.icmp() { flow.policy.request() } else { 0 }, now) { return true; }
-        let port = emission.port;
+        let port = flow.translated_port;
         let (before, after, source, destination) = if client.is_some() {
             if packet.tuple.src != flow.original.src || packet.tuple.dst != flow.original.dst { return true; }
             let before = if flow.original.icmp() {
@@ -1028,11 +1034,12 @@ impl Engine {
             Tuple { src: quote_tuple.dst, dst: quote_tuple.src, sport: quote_tuple.dport,
                 dport: quote_tuple.sport, proto: quote_tuple.proto }
         };
-        let Some(port) = self.flows.find(owner, original) else { return; };
-        let Some(flow) = self.flows.entries.get(&port) else { return; };
+        let Some(flow_id) = self.flows.find(owner, original) else { return; };
+        let Some(flow) = self.flows.entries.get(&flow_id) else { return; };
         if packet.tuple.src != flow.original.src || packet.tuple.dst != flow.original.dst
             || !flow.live(now) || flow.revision != view.generation()
             || !policy::allows(view, flow.policy, if flow.policy.icmp() { flow.policy.request() } else { 0 }, now) { return; }
+        let port = flow.translated_port;
         let translated = if quote_tuple.icmp() {
             Tuple { src: flow.policy.dst, dst: flow.external, sport: port, ..quote_tuple }
         } else {
@@ -1058,9 +1065,9 @@ impl Engine {
         let Some((tuple, quote)) = wire::quote(&packet.bytes[packet.transport + 8..]) else { return; };
         if tuple.src.version() != packet.tuple.src.version() { return; }
         if tuple.icmp() && !wire::quoted_echo(&quote, tuple.request()) { return; }
-        let port = tuple.sport;
-        let Some(flow) = self.flows.entries.get(&port) else { return; };
-        let translated = Tuple { src: flow.external, sport: port, ..flow.policy };
+        let Some(id) = self.flows.translated_id(tuple) else { return; };
+        let Some(flow) = self.flows.entries.get(&id) else { return; };
+        let translated = flow.translated();
         if tuple != translated || !flow.live(now) || flow.revision != view.generation()
             || !policy::allows(view, flow.policy, if flow.policy.icmp() { flow.policy.request() } else { 0 }, now) { return; }
         // DNS redirection errors are presented from the provider DNS identity.
@@ -1086,3 +1093,7 @@ fn arp(operation: u16, src_mac: [u8; 6], src: [u8; 4], dst_mac: [u8; 6], dst: [u
 }
 
 }
+
+#[cfg(test)]
+#[path = "flow_tests.rs"]
+mod flow_tests;

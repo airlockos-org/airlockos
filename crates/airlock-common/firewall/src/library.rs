@@ -120,6 +120,7 @@ pub(crate) fn retain_deque<T, F: Fn(&T) -> bool>(values: &mut VecDeque<T>, keep:
 #[verifier::external_body]
 pub(crate) proof fn derived_key_order()
     ensures vstd::std_specs::btree::key_obeys_cmp_spec::<(crate::engine::Owner, crate::wire::Tuple)>(),
+        vstd::std_specs::btree::key_obeys_cmp_spec::<crate::wire::Tuple>(),
 { }
 
 /// Native Option construction preserves the caller's value exactly.
@@ -148,6 +149,16 @@ pub(crate) fn count_values<V, F: Fn(&V) -> bool>(map: &BTreeMap<u16, V>, keep: F
         count <= map@.len(),
         forall|port: u16| map@.dom().contains(port) ==> call_ensures(keep, (&map@[port],), selected_keys(map@, keep).contains(port)),
 { map.values().filter(|value| keep(value)).count() }
+
+/// Select the first matching value using std's ordered iterator. Only iterator
+/// correspondence is trusted; the caller's predicate is verified separately.
+#[verifier::external_body]
+pub(crate) fn find_key<V, F: Fn(&V) -> bool>(map: &BTreeMap<u16, V>, matches: F) -> (key: Option<u16>)
+    requires forall|id: u16| map@.dom().contains(id) ==> call_requires(matches, (&map@[id],)),
+    ensures key.is_some() ==> map@.dom().contains(key.unwrap())
+            && call_ensures(matches, (&map@[key.unwrap()],), true),
+        key.is_none() ==> forall|id: u16| map@.dom().contains(id) ==> call_ensures(matches, (&map@[id],), false),
+{ map.iter().find_map(|(&id, value)| matches(value).then_some(id)) }
 
 /// Select the standard map's first bounded ascending port window. The caller
 /// supplies its work budget; expiry and quota decisions are not made here.

@@ -357,8 +357,8 @@ pub(crate) struct Emission {
     pub id: u32,
     /// Original pre-NAT identifier restored in a related error.
     pub original: u32,
-    /// Existing mapped port whose current flow must still authorize the error.
-    pub port: u16,
+    /// Internal peer lease ID; shared UDP wire ports cannot identify a peer.
+    pub flow_id: u16,
     /// Stable interface quota shared across address families and incarnations.
     pub quota: Ip,
     /// Recipient-side source address used to correlate the native quote.
@@ -378,7 +378,7 @@ impl Emission {
     pub(crate) open spec fn valid(&self) -> bool {
         self.quota.valid() && self.source.valid() && self.source.family() == 6
             && self.destination.valid() && self.destination.family() == 6
-            && self.port >= crate::flow::FIRST && (self.client.is_some() ==> self.client.unwrap().valid())
+            && self.flow_id >= crate::flow::FIRST && (self.client.is_some() ==> self.client.unwrap().valid())
     }
 }
 
