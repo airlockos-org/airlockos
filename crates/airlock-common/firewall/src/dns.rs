@@ -180,6 +180,7 @@ impl Resolver {
     { Self { cache: VecDeque::new(), pending: None, cursor: 0, next: 0 } }
 
     /// Make at most one query or one whole-source publication per scheduler turn.
+    /// An unrelated source refresh cannot cancel this source's outstanding query.
     /// Returns a private IP datagram; the engine handles ARP and output queues.
     pub(crate) fn tick(&mut self, view: &View, now: u64, random: &mut impl RngCore) -> (work: (Option<Vec<u8>>, Option<Resolved>))
         requires old(self).valid(), view.valid(),
@@ -190,7 +191,7 @@ impl Resolver {
                     view.awaiting(work.1.unwrap().source_value(), snapshot) && work.1.unwrap().matches(snapshot),
     {
         if let Some(pending) = &self.pending {
-            if pending.revision != view.generation() || view.candidate(&pending.source).is_none() { self.pending = None; }
+            if !view.source_unchanged(&pending.source, pending.revision) || view.candidate(&pending.source).is_none() { self.pending = None; }
             else if now >= pending.deadline {
                 let Some(pending) = self.pending.take() else { return (None, None); };
                 self.insert(Entry { server: pending.server, name: pending.name, family: pending.source.version(),
@@ -278,7 +279,7 @@ impl Resolver {
         let protocol = match pending.transport { Transport::Datagram => 17u8, Transport::Stream(_) => 6u8 };
         if packet.tuple.proto != protocol || packet.tuple.dst != Ip::from_ipv4(pending.local) || packet.tuple.dport != pending.port
             || packet.tuple.src != Ip::from_ipv4(pending.server) || packet.tuple.sport != 53 { return false; }
-        if now >= pending.deadline || pending.revision != view.generation() { self.pending = None; return true; }
+        if now >= pending.deadline || !view.source_unchanged(&pending.source, pending.revision) { self.pending = None; return true; }
         if protocol == 6 {
             if packet.bytes.len() > crate::MTU { return true; }
             let Some(Pending { transport: Transport::Stream(stream), .. }) = &mut self.pending else { return true; };
@@ -311,7 +312,7 @@ impl Resolver {
         ensures final(self).valid(), packet.is_some() ==> packet.unwrap()@.len() <= crate::MTU && view.revision() > 0,
     {
         let mut pending = self.pending.take()?;
-        if pending.revision != view.generation() || pending.deadline <= now { return None; }
+        if !view.source_unchanged(&pending.source, pending.revision) || pending.deadline <= now { return None; }
         let Transport::Stream(stream) = &mut pending.transport else { self.pending = Some(pending); return None; };
         let sent = tcp::write(&mut stream.connection, &stream.query[stream.sent..]);
         stream.sent += sent;

@@ -117,12 +117,13 @@ impl Output {
 
     /// Current authorization condition, including every assigned family's DNS TTL.
     pub closed spec fn sendable(&self, view: View, binding: Option<Bound>, now: u64) -> bool {
-        now < self.deadline && self.revision == view.revision() && view.configuration_value().is_some()
+        now < self.deadline && view.network_unchanged_since(self.revision)
             && match (self.owner, binding) {
                 (None, None) => self.target == Target::Upstream,
                 (Some(owner), Some(binding)) => binding.labels() == owner.labels()
                     && (forall|i: int| 0 <= i < binding.assigned_value().addresses().len() ==>
                         view.member_ready(binding.assigned_value().addresses()[i])
+                        && view.source_unchanged_since(binding.assigned_value().addresses()[i], self.revision)
                         && forall|answers: Resolved| view.resolved_for(binding.assigned_value().addresses()[i], answers)
                             ==> answers.unexpired(now)),
                 _ => false,
@@ -144,21 +145,21 @@ impl Output {
         requires self.valid(), ensures bytes@ == self.value().3,
     { &self.bytes }
 
-    /// Check exact revision, queue lifetime and original binding immediately
+    /// Check relevant policy history, queue lifetime and original binding immediately
     /// before send. A copied Owner alone cannot authorize an interface effect.
     pub fn authorized(&self, view: &View, binding: Option<&Bound>, now: u64) -> (authorized: bool)
         requires self.valid(), view.valid(), binding.is_some() ==> binding.unwrap().valid(),
         ensures authorized == self.sendable(*view, match binding { Some(value) => Some(*value), None => None }, now),
     {
-        if now >= self.deadline || self.revision != view.generation() || view.config().is_none() { return false; }
+        if now >= self.deadline || !view.network_unchanged(self.revision) { return false; }
         match (self.owner, binding) {
             (None, None) => self.target == Target::Upstream,
             (Some(owner), Some(binding)) if owner == Owner::from_binding(binding) => {
                 binding.assigned().all().iter().all(|ip: &Ip| -> (ready: bool)
                     requires ip.valid(),
-                    ensures ready == (view.member_ready(*ip)
+                    ensures ready == (view.member_ready(*ip) && view.source_unchanged_since(*ip, self.revision)
                         && forall|answers: Resolved| view.resolved_for(*ip, answers) ==> answers.unexpired(now)),
-                { view.policy(ip).is_some() && view.resolution(ip).is_none_or(|answers: &Resolved| -> (fresh: bool)
+                { view.policy(ip).is_some() && view.source_unchanged(ip, self.revision) && view.resolution(ip).is_none_or(|answers: &Resolved| -> (fresh: bool)
                     requires answers.valid(), ensures fresh == answers.unexpired(now),
                 { answers.fresh(now) }) })
             }
@@ -203,6 +204,8 @@ impl Routed {
 struct Link {
     /// Actual validated native incarnation associated with both queues.
     owner: Owner,
+    /// Complete native assignment retained for source-scoped queue invalidation.
+    assigned: Vec<Ip>,
     /// Complete frames waiting for the original client.
     incoming: VecDeque<Output>,
     /// Bounded datagrams waiting for upstream neighbor resolution.
@@ -219,7 +222,9 @@ struct Link {
 impl Link {
     /// Both directions retain the same exact original-owner reservation.
     closed spec fn valid(&self) -> bool {
-        self.owner.valid() && (self.fragmented.is_some() ==> self.fragmented.unwrap().packet.valid()
+        self.owner.valid() && 0 < self.assigned@.len() <= 2
+            && (forall|i: int| 0 <= i < self.assigned@.len() ==> self.assigned@[i].valid())
+            && (self.fragmented.is_some() ==> self.fragmented.unwrap().packet.valid()
             && self.fragmented.unwrap().packet.layout.is_some() && self.fragmented.unwrap().packet.owner == Some(self.owner))
             && self.incoming@.len() <= QUEUE_FRAMES && self.outgoing@.len() <= QUEUE_FRAMES
             && (forall|i: int| 0 <= i < self.incoming@.len() ==> self.incoming@[i].valid()
@@ -425,10 +430,23 @@ impl Engine {
             !attached ==> *final(self) == *old(self),
     {
         let owner = Owner::from_binding(binding);
-        if self.link_index(owner).is_some() { return true; }
+        if let Some(index) = self.link_index(owner) {
+            if self.links[index].assigned.as_slice() != binding.assigned().all() {
+                // A fresh native barrier may observe reassigned addresses on
+                // the same handle. Never deliver the former owner's flows to it.
+                self.flows.retire(owner, self.time);
+                self.fragments.expire(Some(owner), self.time);
+                self.links[index].incoming.clear(); self.links[index].outgoing.clear(); self.links[index].fragmented = None;
+                self.links[index].assigned = slice_to_vec(binding.assigned().all());
+                crate::library::retain_deque(&mut self.control, |output: &Output| -> (keep: bool)
+                    ensures keep == (output.owner != Some(owner)),
+                { output.owner != Some(owner) });
+            }
+            return true;
+        }
         if self.links.len() == MAX_CLIENTS { return false; }
         let ghost index = self.links@.len();
-        self.links.push(Link { owner, incoming: VecDeque::new(), outgoing: VecDeque::new(), fragmented: None, fragment_turn: false, response_at: 0 });
+        self.links.push(Link { owner, assigned: slice_to_vec(binding.assigned().all()), incoming: VecDeque::new(), outgoing: VecDeque::new(), fragmented: None, fragment_turn: false, response_at: 0 });
         proof { assert(self.links@[index as int].owner.labels() == binding.labels()); }
         true
     }
@@ -451,8 +469,10 @@ impl Engine {
     }
 
     /// Observe every control event before polling another one or sending data.
-    /// Tightening deletes newly denied flows as upstream does; unfinished policy
-    /// updates also revoke flows. Later relaxation cannot revive retired state.
+    /// Tightening deletes newly denied flows; unfinished updates also revoke flows.
+    /// Queue invalidation follows the affected native assignment. Shared network
+    /// changes clear every queue; unrelated DNS refreshes preserve queued work
+    /// and neighbor observations. Later relaxation cannot revive stale output.
     pub fn observe(&mut self, view: &View, now: u64) -> (live: bool)
         requires old(self).valid(), view.valid(),
         ensures final(self).valid(),
@@ -465,13 +485,28 @@ impl Engine {
         if matches!(view.state(), airlock_qubes_network::projection::Phase::Lost) { self.lost = true; return false; }
         if self.revision != view.generation() {
             self.flows.observe(view, now);
-            self.internal.clear(); self.control.clear(); self.neighbors.clear(); self.fragments.clear(); self.history.clear();
+            let shared = !view.network_unchanged(self.revision);
+            if shared {
+                self.internal.clear(); self.control.clear(); self.neighbors.clear(); self.fragments.clear(); self.history.clear();
+            }
             let mut index = 0;
             while index < self.links.len()
                 invariant self.valid(), view.valid(), self.time == now, !self.lost, index <= self.links@.len() <= MAX_CLIENTS,
                 decreases self.links.len() - index,
             {
-                self.links[index].incoming.clear(); self.links[index].outgoing.clear(); self.links[index].fragmented = None;
+                let unchanged = self.links[index].assigned.iter().all(|source: &Ip| -> (same: bool)
+                    requires source.valid(), ensures same == view.source_unchanged_since(*source, self.revision),
+                { view.source_unchanged(source, self.revision) });
+                if shared || !unchanged {
+                    let owner = self.links[index].owner;
+                    self.links[index].incoming.clear(); self.links[index].outgoing.clear(); self.links[index].fragmented = None;
+                    crate::library::retain_deque(&mut self.control, |output: &Output| -> (keep: bool)
+                        ensures keep == (output.owner != Some(owner)),
+                    { output.owner != Some(owner) });
+                    self.fragments.expire(Some(owner), now);
+                    // Upstream reassembly and ICMP history have no send authority:
+                    // completed datagrams and quotes still require a live flow.
+                }
                 index += 1;
             }
             self.revision = view.generation();
@@ -697,7 +732,10 @@ impl Engine {
                 assert(after_queue.filter(|packet: Routed| packet.layout.is_some()).len() <= 1);
             }
             let Some(mut pending) = pending else { continue; };
-            if pending.deadline <= now || pending.revision != view.generation() { continue; }
+            if pending.deadline <= now || !view.network_unchanged(pending.revision) { continue; }
+            if index < self.links.len() && !self.links[index].assigned.iter().all(|source: &Ip| -> (same: bool)
+                requires source.valid(), ensures same == view.source_unchanged_since(*source, pending.revision),
+            { view.source_unchanged(source, pending.revision) }) { continue; }
             let config = view.config()?;
             let family = pending.destination.version();
             let local = policy::external(config, family)?;
@@ -1097,3 +1135,7 @@ fn arp(operation: u16, src_mac: [u8; 6], src: [u8; 4], dst_mac: [u8; 6], dst: [u
 #[cfg(test)]
 #[path = "flow_tests.rs"]
 mod flow_tests;
+
+#[cfg(all(test, not(verus_keep_ghost)))]
+#[path = "invalidation_tests.rs"]
+mod invalidation_tests;

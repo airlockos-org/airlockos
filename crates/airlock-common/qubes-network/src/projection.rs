@@ -64,6 +64,8 @@ struct Slot {
     source: Ip,
     /// Governs whether a complete policy may be borrowed.
     publication: Publication,
+    /// Last mutation of this source, including incomplete updates and DNS expiry.
+    changed_at: u64,
 }
 
 impl Slot {
@@ -94,6 +96,8 @@ pub struct View {
     slots: Vec<Slot>,
     /// Monotonic volatile revision used to invalidate cached connection decisions.
     generation: u64,
+    /// Last shared addressing/membership observation; source-only changes leave it intact.
+    network_revision: u64,
 }
 
 /// A publication exposes one exact completed policy, with DNS data when needed.
@@ -196,7 +200,7 @@ impl View {
     /// Initial closed projection, with no trusted transport or client implied.
     pub fn synchronizing() -> (view: Self)
         ensures view.valid(), view.phase() == Phase::Synchronizing, view.revision() == 0,
-    { Self { phase: Phase::Synchronizing, config: None, slots: Vec::new(), generation: 0 } }
+    { Self { phase: Phase::Synchronizing, config: None, slots: Vec::new(), generation: 0, network_revision: 0 } }
 
     /// Irreversibly block every source on control loss. Retained cache bytes or
     /// later marker writes cannot revive this projection in the same boot.
@@ -217,7 +221,8 @@ impl View {
         ensures final(self).valid(),
             advanced == (old(self).phase() == Phase::Synchronized && old(self).revision() < u64::MAX),
             advanced ==> final(self).revision() == old(self).revision()+1 && final(self).phase() == Phase::Synchronized
-                && final(self).slots@ == old(self).slots@ && final(self).config == old(self).config,
+                && final(self).slots@ == old(self).slots@ && final(self).config == old(self).config
+                && final(self).network_revision == old(self).network_revision,
             !advanced ==> final(self).phase() == Phase::Lost,
     {
         if !matches!(self.phase, Phase::Synchronized) || self.generation == u64::MAX {
@@ -244,6 +249,7 @@ impl View {
                 None => !(exists|config: Config| config.describes(*cache)),
             },
     {
+        self.network_revision = self.generation;
         let config = match Config::read(cache) {
             Some(value) => value,
             None => { self.config = None; self.slots.clear(); return; }
@@ -303,7 +309,7 @@ impl View {
                     proof { remaining.remove_ensures(index as int); }
                     slot
                 },
-                None => Slot { source, publication: Publication::Waiting },
+                None => Slot { source, publication: Publication::Waiting, changed_at: self.generation },
             };
             proof { assert((preserve && previous.contains(slot)) || slot.publication is Waiting); }
             let ghost built = slots@;
@@ -361,11 +367,12 @@ impl View {
     /// Replace one source's gate without changing membership or other sources.
     fn publish(&mut self, index: usize, publication: Publication)
         requires old(self).valid(), index < old(self).slots@.len(),
-            (Slot { source: old(self).slots@[index as int].source, publication }).valid(),
+            (Slot { source: old(self).slots@[index as int].source, publication, changed_at: old(self).generation }).valid(),
         ensures final(self).valid(), final(self).phase() == old(self).phase(),
             final(self).revision() == old(self).revision(), final(self).config == old(self).config,
+            final(self).network_revision == old(self).network_revision,
             final(self).slots@ == old(self).slots@.update(index as int,
-                Slot { source: old(self).slots@[index as int].source, publication }),
+                Slot { source: old(self).slots@[index as int].source, publication, changed_at: old(self).generation }),
             forall|source: Ip, snapshot: Snapshot| final(self).complete_for(source, snapshot) ==
                 (if source == old(self).slots@[index as int].source { installed(publication, snapshot) }
                     else { old(self).complete_for(source, snapshot) }),
@@ -374,6 +381,7 @@ impl View {
         let ghost previous = self.slots@;
         let ghost chosen = publication;
         self.slots[index].publication = publication;
+        self.slots[index].changed_at = self.generation;
         proof {
             assert(identities(self.slots@) =~= identities(previous));
             assert forall|source: Ip, snapshot: Snapshot| self.complete_for(source, snapshot) ==
@@ -413,9 +421,10 @@ impl View {
         requires old(self).valid(), index < old(self).slots@.len(),
         ensures final(self).valid(), final(self).phase() == old(self).phase(),
             final(self).revision() == old(self).revision(), final(self).config == old(self).config,
+            final(self).network_revision == old(self).network_revision,
             publication == old(self).slots@[index as int].publication,
             final(self).slots@ == old(self).slots@.update(index as int,
-                Slot { source: old(self).slots@[index as int].source, publication: Publication::Waiting }),
+                Slot { source: old(self).slots@[index as int].source, publication: Publication::Waiting, changed_at: old(self).slots@[index as int].changed_at }),
     {
         let ghost previous = self.slots@;
         let publication = core::mem::replace(&mut self.slots[index].publication, Publication::Waiting);
@@ -536,6 +545,7 @@ impl View {
             cache.valid(), path.valid(), source_path_for(path, key@),
         ensures final(self).valid(), final(self).phase() == old(self).phase(),
             final(self).revision() == old(self).revision(), final(self).config == old(self).config,
+            final(self).network_revision == old(self).network_revision,
             forall|source: Ip, snapshot: Snapshot| source != path.source() ==>
                 final(self).complete_for(source, snapshot) == old(self).complete_for(source, snapshot),
             removed || path.end() < key@.len() ==> !final(self).has_complete(path.source()),
@@ -551,6 +561,7 @@ impl View {
             invariant self.valid(), self.phase == Phase::Synchronized,
                 old(self).phase() == Phase::Synchronized,
                 self.generation == old(self).generation, self.config == old(self).config,
+                self.network_revision == old(self).network_revision,
                 self.slots@ == old(self).slots@,
                 forall|j: int| 0 <= j < i ==> self.slots@[j].source != path.source(),
                 i <= self.slots.len() <= 2*MAX_CLIENTS,
@@ -681,6 +692,23 @@ impl View {
         match &self.slots[index].publication { Publication::CompleteDns(_, answers) => Some(answers), _ => None }
     }
 
+    /// DNS completion changes only the selected source's invalidation history.
+    pub closed spec fn resolved_history(&self, before: Self, source: Ip) -> bool {
+        self.network_revision == before.network_revision && identities(self.slots@) == identities(before.slots@)
+            && forall|i: int| 0 <= i < before.slots@.len() ==>
+                self.slots@[i].changed_at == if before.slots@[i].source == source
+                    { self.revision() } else { before.slots@[i].changed_at }
+    }
+
+    /// Expiry preserves every still-fresh source's history and the shared network.
+    pub closed spec fn expired_history(&self, before: Self, now: u64) -> bool {
+        self.network_revision == before.network_revision && identities(self.slots@) == identities(before.slots@)
+            && forall|i: int| 0 <= i < before.slots@.len() ==>
+                self.slots@[i].changed_at == if (match before.slots@[i].publication {
+                    Publication::CompleteDns(_, answers) => !answers.unexpired(now), _ => false })
+                    { self.revision() } else { before.slots@[i].changed_at }
+    }
+
     /// Consume complete answers only for the still-current policy observation.
     /// Any intervening QubesDB mutation forces the resolver to obtain a new view.
     pub fn resolve(&mut self, answers: Resolved, now: u64) -> (accepted: bool)
@@ -691,6 +719,7 @@ impl View {
                 && final(self).revision() == old(self).revision() + 1
                 && final(self).configuration_value() == old(self).configuration_value()
                 && final(self).resolved_for(answers.source_value(), answers),
+            accepted ==> final(self).resolved_history(*old(self), answers.source_value()),
             !accepted ==> *final(self) == *old(self) || final(self).phase() == Phase::Lost,
     {
         if !matches!(self.phase, Phase::Synchronized) || answers.revision() != self.generation { return false; }
@@ -718,6 +747,7 @@ impl View {
                 && final(self).configuration_value() == old(self).configuration_value()
                 && final(self).revision() == old(self).revision() + if old(self).needs_expiry(now) { 1u64 } else { 0u64 }
                 && !final(self).needs_expiry(now),
+            live ==> final(self).expired_history(*old(self), now),
             !live ==> final(self).phase() == Phase::Lost,
     {
         if matches!(self.phase, Phase::Lost) { return false; }
@@ -733,6 +763,11 @@ impl View {
         while i < self.slots.len()
             invariant self.valid(), self.phase() == Phase::Synchronized, i <= self.slots@.len() <= 2*MAX_CLIENTS,
                 self.config == old(self).config, self.generation == old(self).generation + 1,
+                self.network_revision == old(self).network_revision,
+                identities(self.slots@) == identities(old(self).slots@),
+                forall|j: int| i <= j < self.slots@.len() ==> self.slots@[j] == old(self).slots@[j],
+                forall|j: int| 0 <= j < i ==> self.slots@[j].changed_at == if (match old(self).slots@[j].publication { Publication::CompleteDns(_, answers) => !answers.unexpired(now), _ => false })
+                    { self.generation } else { old(self).slots@[j].changed_at },
                 old(self).phase() == Phase::Synchronized, old(self).needs_expiry(now),
                 forall|j: int| 0 <= j < i ==> match #[trigger] self.slots@[j].publication {
                     Publication::CompleteDns(_, answers) => answers.unexpired(now), _ => true,
@@ -842,6 +877,40 @@ impl View {
     pub fn state(&self) -> (phase: Phase)
         requires self.valid(), ensures phase == self.phase(),
     { self.phase }
+
+    /// A prior packet observation still describes the shared network. This does
+    /// not grant access: source readiness and current native ownership also apply.
+    pub closed spec fn network_unchanged_since(&self, revision: u64) -> bool {
+        self.phase == Phase::Synchronized && self.config.is_some()
+            && 0 < revision <= self.generation && self.network_revision <= revision
+    }
+
+    /// No shared-network or same-source mutation occurred after this decision.
+    /// An incomplete update followed by an identical replacement still invalidates it.
+    pub closed spec fn source_unchanged_since(&self, source: Ip, revision: u64) -> bool {
+        self.network_unchanged_since(revision) && exists|i: int| 0 <= i < self.slots@.len()
+            && self.slots@[i].source == source && self.slots@[i].changed_at <= revision
+    }
+
+    /// Check shared addressing without coupling it to another client's DNS TTL.
+    pub fn network_unchanged(&self, revision: u64) -> (unchanged: bool)
+        requires self.valid(),
+        ensures unchanged == self.network_unchanged_since(revision),
+    {
+        matches!(self.phase, Phase::Synchronized) && self.config.is_some()
+            && revision > 0 && revision <= self.generation && self.network_revision <= revision
+    }
+
+    /// Check the complete mutation history relevant to a queued source decision.
+    pub fn source_unchanged(&self, source: &Ip, revision: u64) -> (unchanged: bool)
+        requires self.valid(), source.valid(),
+        ensures unchanged == self.source_unchanged_since(*source, revision),
+            unchanged ==> 0 < revision <= self.revision(),
+    {
+        if !self.network_unchanged(revision) { return false; }
+        let Some(index) = self.slot_index(source) else { return false; };
+        self.slots[index].changed_at <= revision
+    }
 
     /// Current volatile revision for invalidating any cached flow decision.
     pub fn generation(&self) -> (generation: u64)

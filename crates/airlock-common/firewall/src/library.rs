@@ -103,13 +103,14 @@ pub(crate) fn retain_vec<T, F: Fn(&T) -> bool>(values: &mut Vec<T>, keep: F)
         forall|value: T| old(values)@.contains(value) ==> call_ensures(keep, (&value,), final(values)@.contains(value)),
 { values.retain(keep); }
 
-/// Delegate queue-record retention with the same exact stable predicate model.
+/// Delegate queue retention, including repeated packets, to std. A stable
+/// predicate keeps every occurrence of a matching value; uniqueness is preserved
+/// only when the input already has it. No custom filtering algorithm is used.
 #[verifier::external_body]
 pub(crate) fn retain_deque<T, F: Fn(&T) -> bool>(values: &mut VecDeque<T>, keep: F)
-    requires old(values)@.no_duplicates(),
-        forall|value: T| old(values)@.contains(value) ==> call_requires(keep, (&value,)),
+    requires forall|value: T| old(values)@.contains(value) ==> call_requires(keep, (&value,)),
     ensures final(values)@ == old(values)@.filter(|value: T| final(values)@.contains(value)),
-        final(values)@.no_duplicates(), final(values)@.len() <= old(values)@.len(),
+        (old(values)@.no_duplicates() ==> final(values)@.no_duplicates()), final(values)@.len() <= old(values)@.len(),
         forall|i: int| 0 <= i < final(values)@.len() ==> old(values)@.contains(final(values)@[i]),
         forall|value: T| old(values)@.contains(value) ==> call_ensures(keep, (&value,), final(values)@.contains(value)),
 { values.retain(keep); }

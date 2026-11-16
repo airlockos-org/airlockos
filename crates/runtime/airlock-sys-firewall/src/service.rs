@@ -18,7 +18,8 @@ use xen_transport::hermit::{
 /// must allow daemon scheduling independently of the maintenance wake interval.
 const CONTROL_TIMEOUT_NS: u64 = 500_000_000;
 
-/// Fatal errors preserve uncertain native resources until VM teardown. No
+/// Shared failures stop forwarding; downstream failures quarantine only their
+/// owner. Uncertain native resources remain charged until VM teardown. No
 /// failure path fabricates a replacement connection or retries ambiguous closes.
 /// The host's Qubes lifecycle adapter recovers an upstream incarnation change
 /// with a fresh firewall VM. Existing connections are lost. Fresh boot supplies
@@ -38,6 +39,13 @@ pub enum Error {
         /// Original error code, without packet contents.
         source: xen_transport::Error,
     },
+    /// A downstream operation failed; only that client's resources are uncertain.
+    Client {
+        /// Fixed native operation, never supplied by the client.
+        operation: &'static str,
+        /// Original interface failure; no packet data is logged.
+        source: xen_transport::Error,
+    },
     /// Native directory/backend metadata was malformed or outside capacity.
     Discovery,
     /// The core rejected a clock/control transition or ownership reservation.
@@ -53,6 +61,8 @@ impl From<airlock_hermit_control::xen::Error> for Error {
 
 /// Admission cannot represent independent ready/pending flags.
 enum Admission {
+    /// Terminal local failure. The native reservation stays charged until VM teardown.
+    Quarantined,
     /// Native interface exists but no current complete barrier has succeeded.
     Waiting,
     /// Exactly one native barrier is outstanding for this owner.
@@ -70,13 +80,37 @@ enum Admission {
 /// Actual owned backend and its inseparable admission state.
 struct Client {
     /// Sole native handle for this original peer/interface incarnation.
-    interface: Netback,
+    interface: Option<Netback>,
+    /// Retained even when a consuming close/failed attach leaves no Rust handle.
+    peer: u16,
     /// Barrier state; packet processing requires Ready plus a current Permit.
     admission: Admission,
-    /// Last admitted labels retained through re-admission for exact retirement.
+    /// Original admitted labels retained until explicit retirement or quarantine.
     owner: Option<Owner>,
-    /// Revision at which admission was last completed or reset.
+    /// View revision at admission; only relevant changes require a new assignment barrier.
     revision: u64,
+}
+
+impl Client {
+    /// Stop this owner permanently without releasing or reopening uncertain native
+    /// resources. Only explicitly interface-scoped failures can take this path;
+    /// control-stream loss, upstream failure and core invariant failures stay fatal.
+    fn contain(&mut self, error: Error, engine: &mut Engine, now: u64) -> Result<(), Error> {
+        match error {
+            Error::Client { .. }
+            | Error::Control(airlock_hermit_control::xen::Error::Interface { .. }) => (),
+            _ => return Err(error),
+        }
+        log::warn!(
+            "operation=client.quarantine peer={peer} error={error:?}",
+            peer = self.peer
+        );
+        self.admission = Admission::Quarantined;
+        if let Some(owner) = self.owner.take() {
+            engine.retire(owner, now);
+        }
+        Ok(())
+    }
 }
 
 /// Start the existing dom0 QubesDB session and the toolstack-owned upstream vif.
@@ -164,25 +198,8 @@ pub fn run(challenge: Challenge, seed: [u8; 32]) -> Result<(), Error> {
                 for client in &mut clients {
                     if matches!(&client.admission, Admission::Barrier(pending) if pending.serial() == serial)
                     {
-                        let admission =
-                            core::mem::replace(&mut client.admission, Admission::Waiting);
-                        if let Admission::Barrier(pending) = admission {
-                            if let Some(certificate) =
-                                control.admit(&mut client.interface, pending)?
-                            {
-                                if !engine.attach(certificate.binding()) {
-                                    return Err(Error::State);
-                                }
-                                log::debug!(
-                                    "operation=client.admit peer={peer} handle={handle:?} revision={revision}",
-                                    peer = client.interface.peer(),
-                                    handle = client.interface.handle(),
-                                    revision = control.projection().generation()
-                                );
-                                client.owner = Some(Owner::from_binding(certificate.binding()));
-                                client.admission = Admission::Ready(certificate);
-                                client.revision = control.projection().generation();
-                            }
+                        if let Err(error) = admit_client(client, &mut control, &mut engine) {
+                            client.contain(error, &mut engine, endpoint::now_ns())?;
                         }
                     }
                 }
@@ -218,79 +235,11 @@ pub fn run(challenge: Challenge, seed: [u8; 32]) -> Result<(), Error> {
         }
         retire_closed(&mut clients, &mut engine, now)?;
         for client in &mut clients {
-            let status = client
-                .interface
-                .progress()
-                .map_err(|source| Error::Transport {
-                    operation: "progress_client",
-                    source,
-                })?;
-            if status != Status::Ready {
+            if matches!(client.admission, Admission::Quarantined) {
                 continue;
             }
-            let revision = control.projection().generation();
-            if client.revision != revision && matches!(client.admission, Admission::Ready(_)) {
-                log::debug!(
-                    "operation=client.invalidate peer={peer} previous_revision={previous} revision={revision}",
-                    peer = client.interface.peer(),
-                    previous = client.revision
-                );
-                client.admission = Admission::Waiting;
-                client.revision = revision;
-            }
-            if matches!(client.admission, Admission::Waiting) {
-                if let Some(pending) = control.prepare(&mut client.interface)? {
-                    log::debug!(
-                        "operation=client.barrier peer={peer} serial={serial} revision={revision}",
-                        peer = client.interface.peer(),
-                        serial = pending.serial()
-                    );
-                    client.admission = Admission::Barrier(pending);
-                }
-            }
-            let Admission::Ready(certificate) = &client.admission else {
-                continue;
-            };
-            for _ in 0..8 {
-                let Some(permit) = control.permit(&mut client.interface, certificate)? else {
-                    break;
-                };
-                let Some(received) = permit.receive(&mut scratch)? else {
-                    break;
-                };
-                engine.client(
-                    received.binding(),
-                    received.projection(),
-                    received.bytes(),
-                    endpoint::now_ns(),
-                );
-            }
-            // permit may have retained new control bytes; observe before polling
-            // again so a tightening followed by relaxation still revokes flows.
-            if !engine.observe(control.projection(), endpoint::now_ns()) {
-                return Err(Error::State);
-            }
-            let owner = Owner::from_binding(certificate.binding());
-            for _ in 0..8 {
-                let Some(output) = engine.next_client(owner) else {
-                    break;
-                };
-                let Some(permit) = control.permit(&mut client.interface, certificate)? else {
-                    engine.retry(output);
-                    break;
-                };
-                if output.authorized(
-                    permit.projection(),
-                    Some(permit.binding()),
-                    endpoint::now_ns(),
-                ) && !permit.send(output.bytes())?
-                {
-                    engine.retry(output);
-                    break;
-                }
-            }
-            if !engine.observe(control.projection(), endpoint::now_ns()) {
-                return Err(Error::State);
+            if let Err(error) = service_client(client, &mut control, &mut engine, &mut scratch) {
+                client.contain(error, &mut engine, endpoint::now_ns())?;
             }
         }
         for _ in 0..16 {
@@ -320,7 +269,13 @@ pub fn run(challenge: Challenge, seed: [u8; 32]) -> Result<(), Error> {
             else {
                 break;
             };
-            if !send_upstream(&mut control, &mut upstream, &mut clients, &output)? {
+            if !send_upstream(
+                &mut control,
+                &mut upstream,
+                &mut clients,
+                &mut engine,
+                &output,
+            )? {
                 engine.retry(output);
                 break;
             }
@@ -328,7 +283,7 @@ pub fn run(challenge: Challenge, seed: [u8; 32]) -> Result<(), Error> {
                 return Err(Error::State);
             }
         }
-        let status = network_status(&mut control, &mut clients, &engine)?;
+        let status = network_status(&mut control, &mut clients, &mut engine)?;
         if status.state == airlock_qubes_network::status::State::Fault {
             return Err(Error::State);
         }
@@ -359,23 +314,143 @@ pub fn run(challenge: Challenge, seed: [u8; 32]) -> Result<(), Error> {
     }
 }
 
+/// Consume one completed barrier before this client can use its native lease.
+fn admit_client(
+    client: &mut Client,
+    control: &mut Session,
+    engine: &mut Engine,
+) -> Result<(), Error> {
+    let admission = core::mem::replace(&mut client.admission, Admission::Waiting);
+    if let Admission::Barrier(pending) = admission {
+        let interface = client.interface.as_mut().ok_or(Error::State)?;
+        if let Some(certificate) = control.admit(interface, pending)? {
+            if !engine.attach(certificate.binding()) {
+                return Err(Error::State);
+            }
+            log::debug!(
+                "operation=client.admit peer={peer} handle={handle:?} revision={revision}",
+                peer = client.peer,
+                handle = interface.handle(),
+                revision = control.projection().generation()
+            );
+            client.owner = Some(Owner::from_binding(certificate.binding()));
+            client.admission = Admission::Ready(certificate);
+            client.revision = control.projection().generation();
+        }
+    }
+    Ok(())
+}
+
+/// Run a bounded turn on one active owner. Certificates retain the original
+/// interface binding; each Permit rechecks current policy. Relevant updates
+/// reobserve assignment through a barrier; unrelated DNS refreshes do not. Errors escape all borrows before quarantine.
+fn service_client(
+    client: &mut Client,
+    control: &mut Session,
+    engine: &mut Engine,
+    scratch: &mut [u8; 4096],
+) -> Result<(), Error> {
+    let interface = client.interface.as_mut().ok_or(Error::State)?;
+    let status = interface.progress().map_err(|source| Error::Client {
+        operation: "progress_client",
+        source,
+    })?;
+    if status != Status::Ready {
+        return Ok(());
+    }
+    if let Admission::Ready(certificate) = &client.admission {
+        let view = control.projection();
+        if !certificate
+            .binding()
+            .assigned()
+            .all()
+            .iter()
+            .all(|source| view.source_unchanged(source, client.revision))
+        {
+            // Reobserve the native assignment when this client's policy or the
+            // shared network changes, including address reassignment. Another
+            // client's DNS refresh does not invalidate this barrier.
+            client.admission = Admission::Waiting;
+        }
+    }
+    if matches!(client.admission, Admission::Waiting) {
+        if let Some(pending) = control.prepare(interface)? {
+            log::debug!(
+                "operation=client.barrier peer={peer} serial={serial} revision={revision}",
+                peer = client.peer,
+                serial = pending.serial(),
+                revision = control.projection().generation()
+            );
+            client.admission = Admission::Barrier(pending);
+        }
+    }
+    let Admission::Ready(certificate) = &client.admission else {
+        return Ok(());
+    };
+    for _ in 0..8 {
+        let Some(permit) = control.permit(interface, certificate)? else {
+            break;
+        };
+        let Some(received) = permit.receive(scratch)? else {
+            break;
+        };
+        engine.client(
+            received.binding(),
+            received.projection(),
+            received.bytes(),
+            endpoint::now_ns(),
+        );
+    }
+    // permit may have retained new control bytes; observe before polling
+    // again so a tightening followed by relaxation still revokes flows.
+    if !engine.observe(control.projection(), endpoint::now_ns()) {
+        return Err(Error::State);
+    }
+    let owner = Owner::from_binding(certificate.binding());
+    for _ in 0..8 {
+        let Some(output) = engine.next_client(owner) else {
+            break;
+        };
+        let Some(permit) = control.permit(interface, certificate)? else {
+            engine.retry(output);
+            break;
+        };
+        if output.authorized(
+            permit.projection(),
+            Some(permit.binding()),
+            endpoint::now_ns(),
+        ) && !permit.send(output.bytes())?
+        {
+            engine.retry(output);
+            break;
+        }
+    }
+    if !engine.observe(control.projection(), endpoint::now_ns()) {
+        return Err(Error::State);
+    }
+    Ok(())
+}
+
 /// Observe exact native permits and a final drained control view. These facts
 /// are diagnostics only; the packet path independently holds its consuming permit.
 fn network_status(
     control: &mut Session,
     clients: &mut [Client],
-    engine: &Engine,
+    engine: &mut Engine,
 ) -> Result<airlock_qubes_network::status::Snapshot, Error> {
     use airlock_qubes_network::status::{Snapshot, classify};
     let revision = control.projection().generation();
     let mut admitted = 0;
     for client in clients.iter_mut() {
         if let Admission::Ready(certificate) = &client.admission {
-            admitted += usize::from(
-                control
-                    .permit(&mut client.interface, certificate)?
-                    .is_some(),
-            );
+            let interface = client.interface.as_mut().ok_or(Error::State)?;
+            let result = control
+                .permit(interface, certificate)
+                .map(|permit| permit.is_some());
+            match result {
+                Ok(ready) => admitted += usize::from(ready),
+                Err(error) => client.contain(error.into(), engine, endpoint::now_ns())?,
+            }
         }
     }
     let Some(observation) = control.observation()? else {
@@ -419,6 +494,7 @@ fn send_upstream(
     control: &mut Session,
     upstream: &mut Netfront,
     clients: &mut [Client],
+    engine: &mut Engine,
     output: &Output,
 ) -> Result<bool, Error> {
     if output.target() != Target::Upstream {
@@ -432,8 +508,14 @@ fn send_upstream(
             if Owner::from_binding(certificate.binding()) != owner {
                 continue;
             }
-            let Some(permit) = control.permit(&mut client.interface, certificate)? else {
-                return Ok(false);
+            let interface = client.interface.as_mut().ok_or(Error::State)?;
+            let permit = match control.permit(interface, certificate) {
+                Ok(Some(permit)) => permit,
+                Ok(None) => return Ok(false),
+                Err(error) => {
+                    client.contain(error.into(), engine, endpoint::now_ns())?;
+                    return Ok(true);
+                }
             };
             if !output.authorized(
                 permit.projection(),
@@ -465,39 +547,44 @@ fn send_upstream(
         })?)
 }
 
-/// Retire completed native closures every turn, before selecting queued output.
-/// Pending clients remain owned; an uncertain native failure terminates the VM.
+/// Reclaim only confirmed native closures. Quarantined slots are never polled,
+/// reopened or reused; a faulty client cannot turn cleanup into a global failure.
 fn retire_closed(clients: &mut Vec<Client>, engine: &mut Engine, now: u64) -> Result<(), Error> {
     let mut index = 0;
     while index < clients.len() {
-        if clients[index]
-            .interface
-            .progress()
-            .map_err(|source| Error::Transport {
-                operation: "retire_client",
-                source,
-            })?
-            == Status::Closed
-        {
-            let client = clients.remove(index);
-            log::debug!(
-                "operation=client.retire peer={peer} handle={handle:?}",
-                peer = client.interface.peer(),
-                handle = client.interface.handle()
-            );
-            if let Some(owner) = client.owner {
-                engine.retire(owner, now);
-            }
-            // progress consumed the successful native close; never replay it.
-        } else {
+        let client = &mut clients[index];
+        if matches!(client.admission, Admission::Quarantined) {
             index += 1;
+            continue;
+        }
+        let interface = client.interface.as_mut().ok_or(Error::State)?;
+        match interface.progress() {
+            Ok(Status::Closed) => {
+                let client = clients.remove(index);
+                log::debug!("operation=client.retire peer={peer}", peer = client.peer);
+                if let Some(owner) = client.owner {
+                    engine.retire(owner, now);
+                }
+            }
+            Ok(_) => index += 1,
+            Err(source) => {
+                client.contain(
+                    Error::Client {
+                        operation: "retire_client",
+                        source,
+                    },
+                    engine,
+                    now,
+                )?;
+                index += 1;
+            }
         }
     }
     Ok(())
 }
 
 /// Reconcile the whole bounded native directory. Removing a client retires its
-/// queues/leases before consuming close; uncertain close is fatal, never retried.
+/// queues/leases before consuming close; uncertain close stays charged, never retried.
 fn discover(
     clients: &mut Vec<Client>,
     engine: &mut Engine,
@@ -515,49 +602,38 @@ fn discover(
             });
         }
     };
-    let mut peers =
+    let peers =
         airlock_qubes_network::backend::peers(&scratch[..length]).ok_or(Error::Discovery)?;
     let mut index = 0;
     while index < clients.len() {
-        let closed = clients[index]
-            .interface
-            .progress()
-            .map_err(|source| Error::Transport {
-                operation: "retire_client",
-                source,
-            })?
-            == Status::Closed;
-        if closed || !peers.contains(&clients[index].interface.peer()) {
-            let client = clients.remove(index);
-            log::debug!(
-                "operation=client.retire peer={peer} handle={handle:?}",
-                peer = client.interface.peer(),
-                handle = client.interface.handle()
-            );
-            if let Some(owner) = client.owner {
-                engine.retire(owner, now);
+        let client = &mut clients[index];
+        if matches!(client.admission, Admission::Quarantined) || peers.contains(&client.peer) {
+            index += 1;
+            continue;
+        }
+        if let Some(owner) = client.owner.take() {
+            engine.retire(owner, now);
+        }
+        let interface = client.interface.take().ok_or(Error::State)?;
+        match interface.close() {
+            Ok(()) => {
+                clients.remove(index);
             }
-            let retired_peer = client.interface.peer();
-            // A Closed native owner has already consumed its handle in progress.
-            if !closed {
-                client
-                    .interface
-                    .close()
-                    .map_err(|source| Error::Transport {
+            Err(source) => {
+                client.contain(
+                    Error::Client {
                         operation: "close_client",
                         source,
-                    })?;
+                    },
+                    engine,
+                    now,
+                )?;
+                index += 1;
             }
-            // A native close can remove this backend node after the directory
-            // read above. Do not immediately reopen it from that stale hint;
-            // a later discovery can observe any replacement incarnation.
-            peers.retain(|peer| *peer != retired_peer);
-        } else {
-            index += 1;
         }
     }
     for peer in peers {
-        if clients.iter().any(|client| client.interface.peer() == peer) {
+        if clients.iter().any(|client| client.peer == peer) {
             continue;
         }
         // libxl may retain an empty peer parent after vif/0 is removed. This
@@ -579,18 +655,31 @@ fn discover(
             }
         }
         if clients.len() >= MAX_CLIENTS {
-            return Err(Error::Discovery);
+            // Retiring/quarantined slots are charged too. Leave additional
+            // interfaces unadmitted without disturbing already healthy owners.
+            break;
         }
         log::debug!("operation=client.discovered peer={peer} interface=0");
-        clients.push(Client {
-            interface: Netback::attach(peer).map_err(|source| Error::Transport {
-                operation: "attach_client",
-                source,
-            })?,
+        let attached = Netback::attach(peer);
+        let mut client = Client {
+            interface: None,
+            peer,
             admission: Admission::Waiting,
             owner: None,
             revision: 0,
-        });
+        };
+        match attached {
+            Ok(interface) => client.interface = Some(interface),
+            Err(source) => client.contain(
+                Error::Client {
+                    operation: "attach_client",
+                    source,
+                },
+                engine,
+                now,
+            )?,
+        }
+        clients.push(client);
     }
     Ok(())
 }
