@@ -5,6 +5,8 @@ mod worker;
 
 mod development;
 
+mod tailscale;
+
 mod app_gui;
 
 mod preferences;

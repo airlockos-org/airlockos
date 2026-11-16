@@ -121,6 +121,7 @@ pub(super) fn module() -> NixValue {
         })
         .key("airlock.vm.personal")
         .import_value(app_gui::module())
+        .import_value(super::tailscale::module())
     })
     .into_expression()
 }

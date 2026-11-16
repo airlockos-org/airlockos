@@ -24,7 +24,6 @@ pub(super) fn module() -> NixValue {
             nix_text!("/home/{user}/.local/state/airlock", user = user.clone()).into();
         let private_ready = NixValue::list(["airlock-qubes-rw-init.service".into()]);
         let workspace_ready = NixValue::list(["airlock-usr-assistant-workspace.service".into()]);
-        let network_ready = NixValue::list(["airlock-agent-tailscale-state.service".into()]);
         let oneshot = nix_record! {
             "Type": "oneshot",
             "RemainAfterExit": true,
@@ -185,33 +184,6 @@ pub(super) fn module() -> NixValue {
             },
             "systemd": nix_record! {
                 "services": nix_record! {
-                    "airlock-agent-tailscale-state": nix_record! {
-                        "wantedBy": NixValue::list(["multi-user.target".into()]),
-                        "requires": private_ready.clone(),
-                        "after": private_ready.clone(),
-                        "before": NixValue::list(["tailscaled.service".into()]),
-                        "serviceConfig": oneshot,
-                        "script": nix_text!(
-                            r#"
-                        {coreutils}/bin/install -d -m 0700 /rw/config/tailscale
-                    "#,
-                            coreutils = package("coreutils"),
-                        ),
-                    },
-                    "tailscaled": nix_record! {
-                        "requires": network_ready.clone(),
-                        "after": network_ready,
-                        "serviceConfig": nix_record! {
-                            "BindPaths": NixValue::list([
-                                "/rw/config/tailscale:/var/lib/tailscale".into()
-                            ]),
-                            "ExecStartPost": NixValue::list([nix_text!(
-                                "{tailscale}/bin/tailscale set --hostname=usr-assistant",
-                                tailscale = package("tailscale"),
-                            )
-                            .into()]),
-                        },
-                    },
                     "airlock-usr-assistant-workspace": nix_record! {
                         "description": "Initialize persistent usr-assistant workspace and guidance",
                         "wantedBy": NixValue::list(["multi-user.target".into()]),
@@ -262,6 +234,7 @@ pub(super) fn module() -> NixValue {
         ModuleBody::new(configuration)
             .key("airlock.vm.development")
             .import_value(super::app_gui::module())
+            .import_value(super::tailscale::module())
             .import_value(worker::module(WorkerRole::Development))
             .import_value(worker::store(WorkerRole::Development))
             .import_value(worker::seed())
