@@ -350,6 +350,12 @@ impl Reassembly {
     }
 }
 
+/// Independent history capacity: raising NAT limits must not grow error detail.
+const HISTORY_RECORDS: usize = 1024;
+
+/// One stable client cannot evict every other client's fragment-error history.
+const HISTORY_PER_CLIENT: usize = 256;
+
 /// Recent fragment emission needed to translate even a non-first ICMP quote.
 /// These records create no flow and cannot revive a retired NAT port.
 pub(crate) struct Emission {
@@ -397,9 +403,9 @@ impl History {
 
     /// Every record has normalized endpoints and one existing port reference.
     pub(crate) closed spec fn valid(&self) -> bool {
-        self.entries@.len() <= crate::MAX_FLOWS
+        self.entries@.len() <= HISTORY_RECORDS
             && (forall|i: int| 0 <= i < self.entries@.len() ==> self.entries@[i].valid())
-            && forall|quota: Ip| (#[trigger] self.quota_count(quota)) <= crate::CLIENT_FLOWS
+            && forall|quota: Ip| (#[trigger] self.quota_count(quota)) <= HISTORY_PER_CLIENT
     }
 
     /// Begin without an accepted fragment quote.
@@ -440,14 +446,14 @@ impl History {
             crate::library::filter_count(self.entries@.as_ref(), |i: int| keep[i], self.entries@, |old: Emission| old.quota == entry.quota);
             assert(count == self.quota_count(entry.quota));
         }
-        if count >= crate::CLIENT_FLOWS {
+        if count >= HISTORY_PER_CLIENT {
             let Some(index) = self.entries.iter().position(|old: &Emission| -> (same: bool) ensures same == (old.quota == entry.quota), { old.quota == entry.quota }) else { return; };
             let ghost before = *self;
             self.entries.remove(index);
             proof { self.removed(before, index as int); }
         }
-        proof { assert(self.quota_count(entry.quota) < crate::CLIENT_FLOWS); }
-        if self.entries.len() == crate::MAX_FLOWS {
+        proof { assert(self.quota_count(entry.quota) < HISTORY_PER_CLIENT); }
+        if self.entries.len() == HISTORY_RECORDS {
             let ghost before = *self;
             self.entries.pop_front();
             proof {
@@ -458,9 +464,9 @@ impl History {
         let ghost before = *self;
         self.entries.push_back(entry);
         proof {
-            assert forall|quota: Ip| (#[trigger] self.quota_count(quota)) <= crate::CLIENT_FLOWS by {
+            assert forall|quota: Ip| (#[trigger] self.quota_count(quota)) <= HISTORY_PER_CLIENT by {
                 before.entries@.lemma_filter_len_push(|old: Emission| old.quota == quota, entry);
-                if quota == entry.quota { assert(before.quota_count(quota) < crate::CLIENT_FLOWS); }
+                if quota == entry.quota { assert(before.quota_count(quota) < HISTORY_PER_CLIENT); }
             }
         }
     }

@@ -8,8 +8,9 @@
 /// Sole application arena, shared allocator implementation with sys-clipboard.
 #[cfg(target_os = "hermit")]
 #[global_allocator]
-static HEAP: airlock_bounded_heap::FixedHeap<{ 8 * 1024 * 1024 }> =
-    airlock_bounded_heap::FixedHeap::new();
+static HEAP: airlock_bounded_heap::FixedHeap<
+    { airlock_firewall_core::parameters::APPLICATION_HEAP_BYTES },
+> = airlock_bounded_heap::FixedHeap::new();
 
 #[cfg(target_os = "hermit")]
 pub mod service;

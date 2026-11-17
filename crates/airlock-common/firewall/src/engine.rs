@@ -301,6 +301,7 @@ impl Engine {
     /// Global and reserved queue/connection bounds, independent of input traffic.
     pub closed spec fn valid(&self) -> bool {
         self.parameters.valid()
+            && self.flows.limits_value() == self.parameters.value()
             && self.links@.len() <= MAX_CLIENTS && self.flows.valid() && self.fragments.valid() && self.history.valid() && self.fragment_counter <= 4_294_967_296 && self.dns.valid()
             && self.neighbors@.len() <= 8 && self.internal@.filter(|packet: Routed| packet.layout.is_some()).len() <= 1
             && self.internal@.len() <= QUEUE_FRAMES && self.control@.len() <= QUEUE_FRAMES
@@ -389,7 +390,7 @@ impl Engine {
     {
         let mut random = crate::library::generator(seed);
         let fragment_salt = random.next_u32();
-        Self { parameters, links: Vec::new(), flows: Table::new(), fragments: Reassembly::new(), history: History::new(),
+        Self { parameters, links: Vec::new(), flows: Table::with_parameters(parameters), fragments: Reassembly::new(), history: History::new(),
             fragment_counter: 0, fragment_salt, dns: Resolver::new(), neighbors: VecDeque::new(),
             internal: VecDeque::new(), control: VecDeque::new(), cursor: 0, time: 0, lost: false,
             revision: 0, random }
@@ -615,13 +616,13 @@ impl Engine {
         let quota = binding.assigned().primary();
         let flow_id = match self.flows.find(owner, packet.tuple) {
             Some(flow_id) => Some(flow_id),
-            None => self.flows.create(NewMapping { owner, quota, policy: policy_tuple, external, mac, revision: view.generation() }, &packet, now, &mut self.random),
+            None => self.flows.create(NewMapping { owner, quota, policy: policy_tuple, external, mac, revision: view.generation() }, &packet, now, &mut self.random).ok(),
         };
         let Some(flow_id) = flow_id else { return; };
         let Some(flow) = self.flows.entries.get(&flow_id) else { return; };
         if flow.policy != policy_tuple || flow.external != external || flow.revision != view.generation() { return; }
         let translated = flow.translated();
-        if !self.flows.accept(flow_id, &packet, true, Some(mac), now) { return; }
+        if self.flows.accept(flow_id, &packet, true, Some(mac), now).is_err() { return; }
         if let Some(fragment) = &mut layout {
             let Some(id) = self.fragment_id() else { return; };
             self.history.record(Emission { id, original: fragment.id, flow_id, quota, source: translated.src,
@@ -683,7 +684,7 @@ impl Engine {
             Tuple { src: flow.original.dst, dst: flow.original.src, sport: flow.original.sport, dport: 0, proto: flow.original.proto }
         } else { Tuple { src: flow.original.dst, dst: flow.original.src,
             sport: flow.original.dport, dport: flow.original.sport, proto: flow.original.proto } };
-        if !self.flows.accept(flow_id, &packet, false, None, now) { return; }
+        if self.flows.accept(flow_id, &packet, false, None, now).is_err() { return; }
         if let Some(fragment) = layout {
             self.history.record(Emission { id: fragment.id, original: fragment.id, flow_id, quota, source: tuple.src,
                 destination: tuple.dst, protocol: fragment.protocol, client: Some(owner),

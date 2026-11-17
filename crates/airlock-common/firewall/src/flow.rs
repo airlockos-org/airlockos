@@ -15,7 +15,7 @@ use crate::{
     wire::{Packet, Tcp, Tuple},
 };
 use airlock_qubes_network::address::Ip;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use rand_core::RngCore;
 
 use vstd::prelude::*;
@@ -103,6 +103,9 @@ pub(crate) struct Flow {
     pub(crate) revision: u64,
     /// Guarded transport transition state.
     pub(crate) state: State,
+    /// Active quota credit, returned on retirement or a maintenance-observed expiry.
+    /// Expired entries may conservatively keep this credit until their bounded turn.
+    pub(crate) charged_active: bool,
 }
 
 impl Flow {
@@ -114,6 +117,7 @@ impl Flow {
             && self.original.src == self.policy.src && self.original.proto == self.policy.proto
             && self.original.sport == self.policy.sport && self.original.dport == self.policy.dport
             && self.deadline <= self.release && self.revision > 0
+            && (self.state is Retired ==> !self.charged_active)
             && (self.original.proto != 6 ==> self.state is Datagram || self.state is Retired)
     }
 
@@ -159,7 +163,7 @@ impl Flow {
     /// Revoke without releasing its reply tuple to a replacement connection.
     pub(crate) fn retire(&mut self, now: u64)
         requires old(self).valid(),
-        ensures final(self).valid(), !final(self).usable(now), final(self).retired(),
+        ensures final(self).valid(), !final(self).usable(now), final(self).retired(), !final(self).charged_active,
             final(self).revision == old(self).revision,
             final(self).external == old(self).external, final(self).mac == old(self).mac,
             final(self).quota == old(self).quota, final(self).translated_port == old(self).translated_port,
@@ -167,7 +171,7 @@ impl Flow {
                 && final(self).policy == old(self).policy && final(self).release_deadline() >= old(self).release_deadline(),
     {
         if !matches!(self.state, State::Retired) {
-            self.state = State::Retired; self.release = self.release.max(now.saturating_add(HOLD));
+            self.state = State::Retired; self.charged_active = false; self.release = self.release.max(now.saturating_add(HOLD));
         }
     }
 
@@ -188,8 +192,8 @@ impl Flow {
     pub(crate) fn accept(&mut self, packet: &Packet<'_>, outbound: bool, now: u64) -> (accepted: bool)
         requires old(self).valid(), packet.valid(), packet.tuple.proto == old(self).original.proto,
         ensures final(self).valid(), accepted == old(self).accepts(*packet, outbound, now),
-            !accepted && old(self).usable(now) ==> *final(self) == *old(self),
-            accepted && !final(self).retired() ==> final(self).deadline > now,
+            !accepted ==> *final(self) == *old(self),
+            accepted && !final(self).retired() ==> final(self).deadline > now && final(self).charged_active,
             accepted && old(self).state is Established && !packet.tcp.rst ==> final(self).state is Established,
             final(self).external == old(self).external, final(self).mac == old(self).mac,
             final(self).quota == old(self).quota, final(self).translated_port == old(self).translated_port,
@@ -241,6 +245,7 @@ impl Flow {
             else { self.state = next; }
         }
         if !matches!(self.state, State::Retired) {
+            self.charged_active = true;
             self.deadline = now.saturating_add(timeout); self.release = self.deadline.saturating_add(HOLD);
         }
         true
@@ -270,109 +275,193 @@ pub(crate) struct NewMapping {
 }
 
 /// Bounded peer leases with independent internal IDs and translated ports.
-/// Both directions use exact tuple indexes. Allocation may inspect the bounded
-/// table; established traffic performs logarithmic lookups, not a table scan.
+/// One source socket, independent of UDP destination identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Socket {
+    /// Exact admitted native lifetime; old incarnations cannot inherit a port.
+    owner: Owner,
+    /// Assigned source address, keeping IPv4 and IPv6 translations distinct.
+    source: Ip,
+    /// Original UDP source port.
+    port: u16,
+    /// Current masquerade address, preventing reuse across upstream changes.
+    external: Ip,
+}
+
+#[cfg(verus_keep_ghost)]
+impl vstd::std_specs::cmp::PartialEqSpecImpl for Socket {
+    open spec fn obeys_eq_spec() -> bool { true }
+
+    open spec fn eq_spec(&self, other: &Self) -> bool { *self == *other }
+}
+
+/// Maintained credits for one stable client, including prior incarnations.
+#[derive(Clone, Copy)]
+struct Usage {
+    /// Active credits; expired flows retain theirs until maintenance observes them.
+    active: usize,
+    /// Stored records, each already owning its eventual retirement storage.
+    records: usize,
+}
+
+/// Admission failure without packet data or a replacement authorization.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdmissionError {
+    /// One client has used its active allowance.
+    ActiveClient,
+    /// The active global allowance is exhausted.
+    ActiveGlobal,
+    /// This client's stored reservations leave no retirement-safe record.
+    RetainedClient,
+    /// The stored global reservation budget is exhausted.
+    RetainedGlobal,
+    /// No unused internal identifier remains.
+    IdentifierExhausted,
+    /// No unused translation port remains for a new socket.
+    PortExhausted,
+    /// An existing peer already owns this exact translated reply identity.
+    TupleCollision,
+    /// A transport packet cannot initiate, renew or advance this flow.
+    Transport,
+    /// Monotonic time is exhausted; no finite new lease can be admitted.
+    Clock,
+    /// A required index/record was unavailable; no replacement is fabricated.
+    State,
+}
+
+impl Flow {
+    /// UDP socket identity whose sharing never changes exact-peer reply lookup.
+    pub(crate) fn socket(&self) -> (socket: Socket)
+        ensures socket.owner == self.owner && socket.source == self.original.src
+            && socket.port == self.original.sport && socket.external == self.external,
+    { Socket { owner: self.owner, source: self.original.src, port: self.original.sport, external: self.external } }
+}
+
+/// Standard indexes keep new admission logarithmic, including near capacity.
+/// Each record owns retention storage before admission, so retiring any or all
+/// active peers needs no additional peer record and cannot steal another client's slot.
 pub(crate) struct Table {
-    /// Internal IDs retain at most MAX_FLOWS active plus retired peer leases.
+    /// Exact private peer record, kept through its complete release deadline.
     pub(crate) entries: BTreeMap<u16, Flow>,
-    /// Exact original tuple and lifetime select an internal peer lease ID.
+    /// Original lifetime/tuple to internal identifier.
     pub(crate) outbound: BTreeMap<(Owner, Tuple), u16>,
-    /// Translated outbound tuple selects exactly one peer for replies/errors.
+    /// Exact translated tuple to internal identifier; a port alone grants nothing.
     pub(crate) replies: BTreeMap<Tuple, u16>,
-    /// Cursor bounds maintenance to at most 64 leases per scheduler turn.
+    /// One entry per shared UDP source socket, independent of destination count.
+    sockets: BTreeMap<Socket, u16>,
+    /// References from all retained peer records, including retired UDP peers.
+    ports: BTreeMap<u16, usize>,
+    /// Available translation ports; std ordered lookup replaces candidate scans.
+    free_ports: BTreeSet<u16>,
+    /// Available internal IDs, independent of shared translated ports.
+    free_ids: BTreeSet<u16>,
+    /// Per-client credits; zero-record entries are removed during reclamation.
+    usage: BTreeMap<Ip, Usage>,
+    /// Sum of active credits; not inferred by rescanning peer records.
+    active: usize,
+    /// Immutable settings chosen before this table admits its first peer.
+    limits: crate::parameters::Limits,
+    /// Cursor bounds maintenance to at most 64 retained records per turn.
     pub(crate) cursor: u16,
 }
 
 impl Table {
-    /// Peer reservations charged to one original source, including retired entries.
+    /// Stored peer records for one stable client, across native incarnations.
     pub(crate) open spec fn source_peers(&self, source: Ip) -> Set<u16> {
         self.entries@.dom().filter(|id: u16| self.entries@[id].quota == source)
     }
 
-    /// Bijections between peer IDs and both directional tuple indexes. Port
-    /// sharing is restricted to one UDP socket, independent of its destination.
-    /// Retired reservations count against the same global and client limits.
-    pub(crate) open spec fn valid(&self) -> bool {
+    /// Charged active records; conservative until the expiry maintenance turn.
+    open spec fn active_peers(&self, source: Ip) -> Set<u16> {
+        self.source_peers(source).filter(|id: u16| self.entries@[id].charged_active)
+    }
+
+    /// Exact tuple identity, bounded storage, and source/socket port isolation.
+    open spec fn mappings_valid(&self) -> bool {
         vstd::std_specs::btree::key_obeys_cmp_spec::<(Owner, Tuple)>()
             && vstd::std_specs::btree::key_obeys_cmp_spec::<Tuple>()
-            && self.entries@.len() <= MAX_FLOWS && self.outbound@.len() == self.entries@.len()
-            && self.replies@.len() == self.entries@.len()
-            && (forall|id: u16| self.entries@.dom().contains(id) ==>
-                self.replies@.dom().contains(self.entries@[id].wire_tuple())
-                && self.replies@[self.entries@[id].wire_tuple()] == id)
-            && (forall|tuple: Tuple| self.replies@.dom().contains(tuple) ==>
-                self.entries@.dom().contains(self.replies@[tuple])
-                && self.entries@[self.replies@[tuple]].wire_tuple() == tuple)
-            && (forall|a: u16, b: u16| self.entries@.dom().contains(a) && self.entries@.dom().contains(b) && a != b ==>
-                (self.entries@[a].translated_port == self.entries@[b].translated_port
-                    <==> self.entries@[a].same_socket(&self.entries@[b])))
-            && (forall|id: u16| self.entries@.dom().contains(id) ==> id >= FIRST
-                && self.entries@[id].valid()
+            && vstd::std_specs::btree::key_obeys_cmp_spec::<Socket>()
+            && vstd::std_specs::btree::key_obeys_cmp_spec::<Ip>()
+            && self.limits.valid() && self.entries@.len() <= self.limits.value().retained_global <= MAX_FLOWS
+            && self.outbound@.len() == self.entries@.len() && self.replies@.len() == self.entries@.len()
+            && (forall|id: u16| self.entries@.dom().contains(id) ==> id >= FIRST && self.entries@[id].valid()
                 && self.outbound@.dom().contains((self.entries@[id].owner, self.entries@[id].original))
-                && self.outbound@[(self.entries@[id].owner, self.entries@[id].original)] == id)
+                && self.outbound@[(self.entries@[id].owner, self.entries@[id].original)] == id
+                && self.replies@.dom().contains(self.entries@[id].wire_tuple())
+                && self.replies@[self.entries@[id].wire_tuple()] == id)
             && (forall|key: (Owner, Tuple)| self.outbound@.dom().contains(key) ==>
                 self.entries@.dom().contains(self.outbound@[key])
                 && self.entries@[self.outbound@[key]].owner == key.0 && self.entries@[self.outbound@[key]].original == key.1)
-            && (forall|source: Ip| (#[trigger] self.source_peers(source)).len() <= CLIENT_FLOWS)
+            && (forall|tuple: Tuple| self.replies@.dom().contains(tuple) ==>
+                self.entries@.dom().contains(self.replies@[tuple]) && self.entries@[self.replies@[tuple]].wire_tuple() == tuple)
+            && (forall|a: u16, b: u16| self.entries@.dom().contains(a) && self.entries@.dom().contains(b) && a != b ==>
+                (self.entries@[a].translated_port == self.entries@[b].translated_port <==> self.entries@[a].same_socket(&self.entries@[b])))
     }
 
-    /// Stored leases, observed without exposing the native map representation.
+    /// Actual index/count correspondence, independent of individual packet claims.
+    open spec fn accounting_valid(&self) -> bool {
+        self.active == self.entries@.dom().filter(|id: u16| self.entries@[id].charged_active).len()
+            && self.active <= self.limits.value().active_global
+            && self.usage@.dom() == self.entries@.values().map(|flow: Flow| flow.quota)
+            && (forall|source: Ip| self.usage@.dom().contains(source) ==>
+                self.usage@[source].records == self.source_peers(source).len()
+                && self.usage@[source].active == self.active_peers(source).len()
+                && self.usage@[source].active <= self.limits.value().active_per_client
+                && self.usage@[source].records <= self.limits.value().retained_per_client <= CLIENT_FLOWS)
+    }
+
+    /// Free pools complement owned records; shared-port references stay exact.
+    open spec fn allocation_valid(&self) -> bool {
+        self.free_ids@ == Set::new(|id: u16| id >= FIRST && !self.entries@.dom().contains(id))
+            && self.free_ports@ == Set::new(|port: u16| port >= FIRST && !self.ports@.dom().contains(port))
+            && self.ports@.dom() == self.entries@.values().map(|flow: Flow| flow.translated_port)
+            && (forall|port: u16| self.ports@.dom().contains(port) ==> self.ports@[port] > 0
+                && self.ports@[port] == self.entries@.dom().filter(|id: u16| self.entries@[id].translated_port == port).len())
+            && (forall|socket: Socket| self.sockets@.dom().contains(socket) ==>
+                exists|id: u16| self.entries@.dom().contains(id) && self.entries@[id].original.proto == 17
+                    && socket == (Socket { owner: self.entries@[id].owner, source: self.entries@[id].original.src,
+                        port: self.entries@[id].original.sport, external: self.entries@[id].external })
+                    && self.sockets@[socket] == self.entries@[id].translated_port)
+            && (forall|id: u16| self.entries@.dom().contains(id) && self.entries@[id].original.proto == 17 ==>
+                self.sockets@.dom().contains(Socket { owner: self.entries@[id].owner, source: self.entries@[id].original.src,
+                    port: self.entries@[id].original.sport, external: self.entries@[id].external })
+                && self.sockets@[Socket { owner: self.entries@[id].owner, source: self.entries@[id].original.src,
+                    port: self.entries@[id].original.sport, external: self.entries@[id].external }] == self.entries@[id].translated_port)
+    }
+
+    /// Both admission and reclamation preserve these production index invariants.
+    pub(crate) open spec fn valid(&self) -> bool {
+        self.mappings_valid() && self.accounting_valid() && self.allocation_valid()
+    }
+
+    /// Stored records used by the routing/related-error contracts.
     pub(crate) open spec fn value(&self) -> Map<u16, Flow> { self.entries@ }
 
-    /// Exact private tuple index corresponding to the retained peer map.
+    /// Original tuple index, without exposing mutable lookup authority.
     pub(crate) open spec fn index_value(&self) -> Map<(Owner, Tuple), u16> { self.outbound@ }
 
-    /// Cursor changes and unsuccessful lookups preserve all reservation records.
-    pub(crate) proof fn same_records(&self, before: Self)
-        requires before.valid(), self.entries@ == before.entries@, self.outbound@ == before.outbound@, self.replies@ == before.replies@,
-        ensures self.valid(),
-    {
-        assert forall|source: Ip| self.source_peers(source).len() <= CLIENT_FLOWS by {
-            assert(before.source_peers(source).len() <= CLIENT_FLOWS);
-            assert(self.source_peers(source) == before.source_peers(source));
-        }
-    }
+    /// Frozen startup limits carried unchanged through every table operation.
+    pub(crate) closed spec fn limits_value(&self) -> crate::parameters::Document { self.limits.value() }
 
-    /// A value-only transition preserving the mapping key cannot change either
-    /// index or any source's reservation count. All transport transitions use it.
-    pub(crate) proof fn mapping_update(&self, before: Self, id: u16)
-        requires before.valid(), before.entries@.dom().contains(id),
-            self.outbound@ == before.outbound@, self.replies@ == before.replies@,
-            self.entries@ == before.entries@.insert(id, self.entries@[id]),
-            self.entries@[id].valid(), self.entries@[id].owner == before.entries@[id].owner,
-            self.entries@[id].original == before.entries@[id].original,
-            self.entries@[id].quota == before.entries@[id].quota,
-            self.entries@[id].external == before.entries@[id].external,
-            self.entries@[id].policy == before.entries@[id].policy,
-            self.entries@[id].translated_port == before.entries@[id].translated_port,
-        ensures self.valid(),
-    {
-        assert(self.entries@[id].wire_tuple() == before.entries@[id].wire_tuple());
-        assert forall|a: u16, b: u16| self.entries@.dom().contains(a) && self.entries@.dom().contains(b) && a != b implies
-            (self.entries@[a].translated_port == self.entries@[b].translated_port
-                <==> self.entries@[a].same_socket(&self.entries@[b])) by {
-            assert(self.entries@[a].same_socket(&self.entries@[b]) == before.entries@[a].same_socket(&before.entries@[b]));
-        }
-        assert forall|source: Ip| self.source_peers(source).len() <= CLIENT_FLOWS by {
-            assert(self.source_peers(source) =~= before.source_peers(source));
-        }
-    }
-
-    /// Start with no outbound-created authority or reserved ports.
+    /// Default table used by callers without machine-specific tuning.
+    #[cfg(test)]
     pub(crate) fn new() -> (table: Self)
         ensures table.valid(), table.value().len() == 0, table.index_value().len() == 0,
+    { Self::with_parameters(crate::parameters::Limits::defaults()) }
+
+    /// Construct independent fixed namespace pools and empty operating ledgers.
+    pub(crate) fn with_parameters(limits: crate::parameters::Limits) -> (table: Self)
+        requires limits.valid(),
+        ensures table.valid(), table.value().len() == 0, table.index_value().len() == 0,
+            table.limits_value() == limits.value(),
     {
         proof { crate::library::derived_key_order(); }
-        let table = Self { entries: BTreeMap::new(), outbound: BTreeMap::new(), replies: BTreeMap::new(), cursor: 0 };
-        proof {
-            assert forall|source: Ip| table.source_peers(source).len() <= CLIENT_FLOWS by {
-                assert(table.source_peers(source) =~= Set::empty());
-            }
-        }
-        table
+        Self { entries: BTreeMap::new(), outbound: BTreeMap::new(), replies: BTreeMap::new(),
+            sockets: BTreeMap::new(), ports: BTreeMap::new(), usage: BTreeMap::new(), active: 0,
+            free_ports: crate::library::port_pool(), free_ids: crate::library::port_pool(), limits, cursor: 0 }
     }
 
-    /// Find a tuple only in the exact native interface incarnation.
+    /// Exact original tuple within one admitted native lifetime.
     pub(crate) fn find(&self, owner: Owner, tuple: Tuple) -> (id: Option<u16>)
         requires self.valid(),
         ensures id.is_some() == self.index_value().dom().contains((owner, tuple)),
@@ -380,204 +469,215 @@ impl Table {
                 && self.value()[id.unwrap()].owner == owner && self.value()[id.unwrap()].original == tuple,
     { self.outbound.get(&(owner, tuple)).copied() }
 
-    /// Look up an exact outbound wire tuple, including its remote endpoint.
-    /// Used for replies and ICMP quotes; a shared port alone grants no access.
+    /// Exact wire tuple: sharing a source port never admits an unrelated peer.
     pub(crate) fn translated_id(&self, tuple: Tuple) -> (id: Option<u16>)
         requires self.valid(),
         ensures id.is_some() == self.replies@.dom().contains(tuple),
-            id.is_some() ==> self.value().dom().contains(id.unwrap())
-                && self.value()[id.unwrap()].wire_tuple() == tuple,
+            id.is_some() ==> self.value().dom().contains(id.unwrap()) && self.value()[id.unwrap()].wire_tuple() == tuple,
     { self.replies.get(&tuple).copied() }
 
-    /// Quotas include previous incarnations with the same assigned source, so a
-    /// client's repeated disconnects cannot consume every retired reservation.
-    /// Source is accounting data only; owner still selects actual flow identity.
-    /// Admit a new mapping only for supported initiating packets and bounded
-    /// available global/per-client capacity. Failed admission changes no state.
-    pub(crate) fn create(&mut self, mapping: NewMapping, packet: &Packet<'_>, now: u64, random: &mut impl RngCore) -> (id: Option<u16>)
+    /// Check both active work and pre-reserved retirement capacity without a scan.
+    /// Stored records stay charged across address families and native reconnects.
+    fn capacity(&self, source: Ip, new_record: bool) -> (failure: Option<AdmissionError>)
+        requires self.valid(),
+        ensures failure.is_none() == (self.active < self.limits.value().active_global
+            && (!self.usage@.dom().contains(source) || self.usage@[source].active < self.limits.value().active_per_client)
+            && (new_record ==> self.entries@.len() < self.limits.value().retained_global
+                && (!self.usage@.dom().contains(source) || self.usage@[source].records < self.limits.value().retained_per_client))),
+            match failure {
+                Some(AdmissionError::ActiveClient) => self.usage@.dom().contains(source)
+                    && self.usage@[source].active >= self.limits.value().active_per_client,
+                Some(AdmissionError::ActiveGlobal) => self.active >= self.limits.value().active_global,
+                Some(AdmissionError::RetainedClient) => new_record && self.usage@.dom().contains(source)
+                    && self.usage@[source].records >= self.limits.value().retained_per_client,
+                Some(AdmissionError::RetainedGlobal) => new_record && self.entries@.len() >= self.limits.value().retained_global,
+                None => true,
+                _ => false,
+            },
+    {
+        let limits = self.limits.document();
+        let usage = self.usage.get(&source).copied().unwrap_or(Usage { active: 0, records: 0 });
+        if usage.active >= limits.active_per_client { return Some(AdmissionError::ActiveClient); }
+        if self.active >= limits.active_global { return Some(AdmissionError::ActiveGlobal); }
+        if new_record && usage.records >= limits.retained_per_client { return Some(AdmissionError::RetainedClient); }
+        if new_record && self.entries.len() >= limits.retained_global { return Some(AdmissionError::RetainedGlobal); }
+        None
+    }
+
+    /// Create only a supported initiating peer, after reserving both credits.
+    /// Every rejection leaves records, indices, pools and credits unchanged.
+    pub(crate) fn create(&mut self, mapping: NewMapping, packet: &Packet<'_>, now: u64, random: &mut impl RngCore) -> (result: Result<u16, AdmissionError>)
         requires old(self).valid(), mapping.owner.valid(), mapping.quota.valid(), mapping.external.valid(), packet.valid(),
             mapping.external.family() == packet.tuple.src.family(), mapping.policy.valid(), mapping.revision > 0,
             packet.tuple.src == mapping.policy.src && packet.tuple.sport == mapping.policy.sport
                 && packet.tuple.dport == mapping.policy.dport && packet.tuple.proto == mapping.policy.proto,
             !old(self).index_value().dom().contains((mapping.owner, packet.tuple)),
-        ensures final(self).valid(),
-            id.is_some() ==> !old(self).value().dom().contains(id.unwrap())
-                && final(self).value().dom().contains(id.unwrap())
-                && final(self).value()[id.unwrap()].owner == mapping.owner
-                && final(self).value()[id.unwrap()].original == packet.tuple
-                && final(self).value()[id.unwrap()].policy == mapping.policy
-                && final(self).value()[id.unwrap()].usable(now),
-            id.is_none() ==> *final(self) == *old(self),
+        ensures final(self).limits == old(self).limits, final(self).limits_value() == old(self).limits_value(),
+            final(self).valid(), result.is_err() ==> *final(self) == *old(self),
+            result.is_ok() ==> !old(self).value().dom().contains(result.unwrap())
+                && final(self).value().dom().contains(result.unwrap())
+                && final(self).value()[result.unwrap()].owner == mapping.owner
+                && final(self).value()[result.unwrap()].original == packet.tuple
+                && final(self).value()[result.unwrap()].policy == mapping.policy
+                && final(self).value()[result.unwrap()].usable(now),
+            match result {
+                Err(AdmissionError::ActiveClient) => old(self).usage@.dom().contains(mapping.quota)
+                    && old(self).usage@[mapping.quota].active >= old(self).limits.value().active_per_client,
+                Err(AdmissionError::ActiveGlobal) => old(self).active >= old(self).limits.value().active_global,
+                Err(AdmissionError::RetainedClient) => old(self).usage@.dom().contains(mapping.quota)
+                    && old(self).usage@[mapping.quota].records >= old(self).limits.value().retained_per_client,
+                Err(AdmissionError::RetainedGlobal) => old(self).entries@.len() >= old(self).limits.value().retained_global,
+                Err(AdmissionError::IdentifierExhausted) => old(self).free_ids@.is_empty(),
+                Err(AdmissionError::PortExhausted) => old(self).free_ports@.is_empty(),
+                Err(AdmissionError::Clock) => now == u64::MAX,
+                Err(AdmissionError::Transport) => (packet.tuple.proto == 6 && !initiating(packet.tcp))
+                    || (packet.tuple.icmp() && packet.icmp != packet.tuple.request()),
+                Err(AdmissionError::State) => false,
+                _ => true,
+            },
     {
-        let owner = mapping.owner;
-        let policy = mapping.policy;
-        let quota = mapping.quota;
-        let external = mapping.external;
-        let mac = mapping.mac;
-        let revision = mapping.revision;
-        let predicate = |flow: &Flow| -> (matches: bool)
-            ensures matches == (flow.quota == quota),
-        { flow.quota == quota };
-        let count = crate::library::count_values(&self.entries, predicate);
-        proof {
-            assert(crate::library::selected_keys(self.entries@, predicate) =~= self.source_peers(quota));
-            assert(count == self.source_peers(quota).len());
-        }
-        if now == u64::MAX || self.entries.len() >= MAX_FLOWS
-            || count >= CLIENT_FLOWS
-            || (packet.tuple.proto == 6 && !initial(packet.tcp))
-            || (packet.tuple.icmp() && packet.icmp != packet.tuple.request()) { return None; }
-        let start = (random.next_u32() % 16384) as u16;
-        let entries = &self.entries;
-        let id = (0..=MAX_FLOWS).find_map(|offset: usize| -> (candidate: Option<u16>)
-            ensures candidate.is_some() ==> candidate.unwrap() >= FIRST && !entries@.dom().contains(candidate.unwrap()),
-        {
-            let id = FIRST + (usize::from(start).wrapping_add(offset) % 16384) as u16;
-            if entries.contains_key(&id) { None } else { Some(id) }
-        })?;
-        let socket = |flow: &Flow| -> (same: bool)
-            ensures same == (flow.original.proto == 17 && packet.tuple.proto == 17
-                && flow.owner == owner && flow.original.src == packet.tuple.src
-                && flow.original.sport == packet.tuple.sport && flow.external == external),
-        {
-            flow.original.proto == 17 && packet.tuple.proto == 17 && flow.owner == owner
-                && flow.original.src == packet.tuple.src && flow.original.sport == packet.tuple.sport
-                && flow.external == external
+        if now == u64::MAX { return Err(AdmissionError::Clock); }
+        if (packet.tuple.proto == 6 && !initial(packet.tcp))
+            || (packet.tuple.icmp() && packet.icmp != packet.tuple.request()) { return Err(AdmissionError::Transport); }
+        if let Some(failure) = self.capacity(mapping.quota, true) { return Err(failure); }
+        let start = FIRST + (random.next_u32() % 16384) as u16;
+        let Some(id) = crate::library::pool_candidate(&self.free_ids, start) else { return Err(AdmissionError::IdentifierExhausted); };
+        let socket = Socket { owner: mapping.owner, source: packet.tuple.src, port: packet.tuple.sport, external: mapping.external };
+        let shared = if packet.tuple.proto == 17 { self.sockets.get(&socket).copied() } else { None };
+        let port = match shared {
+            Some(port) => port,
+            None => match crate::library::pool_candidate(&self.free_ports, start) {
+                Some(port) => port,
+                None => return Err(AdmissionError::PortExhausted),
+            },
         };
-        let shared = crate::library::find_key(&self.entries, socket);
-        let translated_port = if let Some(id) = shared {
-            self.entries.get(&id)?.translated_port
-        } else {
-            (0..=MAX_FLOWS).find_map(|offset: usize| -> (candidate: Option<u16>)
-                ensures candidate.is_some() ==> candidate.unwrap() >= FIRST
-                    && (forall|id: u16| entries@.dom().contains(id) ==> entries@[id].translated_port != candidate.unwrap()),
-            {
-                let candidate = FIRST + (usize::from(start).wrapping_add(offset) % 16384) as u16;
-                let occupied = crate::library::find_key(entries, |flow: &Flow| -> (same: bool)
-                    ensures same == (flow.translated_port == candidate),
-                { flow.translated_port == candidate });
-                if occupied.is_some() { None } else { Some(candidate) }
-            })?
-        };
-        let translated = Tuple { src: external, sport: translated_port, ..policy };
-        // Different provider-DNS aliases may redirect to one wire tuple. They
-        // cannot share reply identity; keep the first authorization unambiguous.
-        if self.replies.contains_key(&translated) { return None; }
+        let translated = Tuple { src: mapping.external, sport: port, ..mapping.policy };
+        if self.replies.contains_key(&translated) { return Err(AdmissionError::TupleCollision); }
+        let references = self.ports.get(&port).copied().unwrap_or(0);
+        let usage = self.usage.get(&mapping.quota).copied().unwrap_or(Usage { active: 0, records: 0 });
         let deadline = now.saturating_add(if packet.tuple.proto == 17 { UDP_IDLE } else { 30 * SECOND });
-        let ghost before = *self;
-        let flow = Flow { owner, original: packet.tuple, quota, policy, external, translated_port, mac,
-            deadline, release: deadline.saturating_add(HOLD), revision,
+        let flow = Flow { owner: mapping.owner, original: packet.tuple, quota: mapping.quota,
+            policy: mapping.policy, external: mapping.external, translated_port: port, mac: mapping.mac,
+            deadline, release: deadline.saturating_add(HOLD), revision: mapping.revision, charged_active: true,
             state: if packet.tuple.proto == 6 { State::Syn { client: packet.tcp.seq } } else { State::Datagram } };
-        proof {
-            assert forall|id: u16| self.entries@.dom().contains(id) implies
-                (flow.translated_port == self.entries@[id].translated_port <==> flow.same_socket(&self.entries@[id])) by {
-                if let Some(shared_id) = shared {
-                    assert(self.entries@[shared_id].same_socket(&flow));
-                    if id != shared_id {
-                        assert(self.entries@[id].translated_port == self.entries@[shared_id].translated_port
-                            <==> self.entries@[id].same_socket(&self.entries@[shared_id]));
-                    }
-                }
-            }
-        }
-        self.outbound.insert((owner, packet.tuple), id); self.replies.insert(translated, id); self.entries.insert(id, flow);
-        proof {
-            assert(self.entries@[id].valid());
-            assert(self.entries@.len() <= MAX_FLOWS);
-            assert(self.outbound@.len() == self.entries@.len());
-            assert forall|a: u16, b: u16| self.entries@.dom().contains(a) && self.entries@.dom().contains(b) && a != b implies
-                (self.entries@[a].translated_port == self.entries@[b].translated_port
-                    <==> self.entries@[a].same_socket(&self.entries@[b])) by {
-                if a != id && b != id {
-                    assert(before.entries@[a].translated_port == before.entries@[b].translated_port
-                        <==> before.entries@[a].same_socket(&before.entries@[b]));
-                }
-            }
-            assert forall|p: u16| self.entries@.dom().contains(p) implies p >= FIRST
-                && self.entries@[p].valid()
-                && self.outbound@.dom().contains((self.entries@[p].owner, self.entries@[p].original))
-                && self.outbound@[(self.entries@[p].owner, self.entries@[p].original)] == p by { }
-            assert forall|key: (Owner, Tuple)| self.outbound@.dom().contains(key) implies
-                self.entries@.dom().contains(self.outbound@[key])
-                && self.entries@[self.outbound@[key]].owner == key.0 && self.entries@[self.outbound@[key]].original == key.1 by { }
-            assert forall|source: Ip| self.source_peers(source).len() <= CLIENT_FLOWS by {
-                if source == quota {
-                    assert(self.source_peers(source) =~= before.source_peers(source).insert(id));
-                } else { assert(self.source_peers(source) =~= before.source_peers(source)); }
-            }
-        }
-        Some(id)
+        self.free_ids.remove(&id);
+        self.free_ports.remove(&port);
+        self.ports.insert(port, references + 1);
+        if packet.tuple.proto == 17 { self.sockets.insert(socket, port); }
+        self.usage.insert(mapping.quota, Usage { active: usage.active + 1, records: usage.records + 1 });
+        self.active += 1;
+        self.outbound.insert((mapping.owner, packet.tuple), id);
+        self.replies.insert(translated, id);
+        self.entries.insert(id, flow);
+        Ok(id)
     }
 
-    /// Apply a checked transport transition without exposing a mutable map value.
-    pub(crate) fn accept(&mut self, id: u16, packet: &Packet<'_>, outbound: bool, mac: Option<[u8; 6]>, now: u64) -> (accepted: bool)
+    /// Apply an already checked flow transition's change in active credits.
+    /// The caller keeps the same quota/record and permits activation only after
+    /// capacity validation. This helper neither changes records nor allocates.
+    fn active_transition(&mut self, source: Ip, was_active: bool, is_active: bool)
+        requires self.usage@.dom().contains(source),
+            was_active && !is_active ==> self.active > 0 && self.usage@[source].active > 0,
+            !was_active && is_active ==> self.active < MAX_FLOWS && self.usage@[source].active < CLIENT_FLOWS,
+        ensures final(self).active == old(self).active + (if is_active { 1int } else { 0int }) - (if was_active { 1int } else { 0int }),
+            final(self).usage@.dom() == old(self).usage@.dom(),
+            final(self).usage@[source].active == old(self).usage@[source].active + (if is_active { 1int } else { 0int }) - (if was_active { 1int } else { 0int }),
+            final(self).usage@[source].records == old(self).usage@[source].records,
+            forall|other: Ip| old(self).usage@.dom().contains(other) && other != source ==> final(self).usage@[other] == old(self).usage@[other],
+            final(self).entries@ == old(self).entries@ && final(self).outbound@ == old(self).outbound@
+                && final(self).replies@ == old(self).replies@ && final(self).ports@ == old(self).ports@
+                && final(self).sockets@ == old(self).sockets@ && final(self).free_ids@ == old(self).free_ids@
+                && final(self).free_ports@ == old(self).free_ports@ && final(self).limits == old(self).limits,
+    {
+        if was_active == is_active { return; }
+        let Some(usage) = self.usage.get_mut(&source) else { return; };
+        if is_active { usage.active += 1; self.active += 1; }
+        else { usage.active -= 1; self.active -= 1; }
+    }
+
+    /// Existing UDP may regain an active credit after idle expiry, but only on
+    /// a policy-checked outbound packet. Explicit retirement is never revived.
+    pub(crate) fn accept(&mut self, id: u16, packet: &Packet<'_>, outbound: bool, mac: Option<[u8; 6]>, now: u64) -> (result: Result<(), AdmissionError>)
         requires old(self).valid(), packet.valid(), old(self).entries@.dom().contains(id),
             packet.tuple.proto == old(self).entries@[id].original.proto,
-        ensures final(self).valid(), final(self).entries@.dom() == old(self).entries@.dom(),
+        ensures final(self).limits == old(self).limits, final(self).limits_value() == old(self).limits_value(),
+            final(self).valid(), final(self).entries@.dom() == old(self).entries@.dom(),
             final(self).outbound@ == old(self).outbound@,
-            accepted == old(self).entries@[id].accepts(*packet, outbound, now),
+            result.is_err() ==> *final(self) == *old(self),
+            result.is_ok() ==> old(self).entries@[id].accepts(*packet, outbound, now),
     {
-        let ghost before = *self;
-        let Some(flow) = self.entries.get_mut(&id) else { return false; };
-        let accepted = flow.accept(packet, outbound, now);
-        if let (true, Some(mac)) = (accepted, mac) { flow.mac = mac; }
-        proof { self.mapping_update(before, id); }
-        accepted
+        let Some(flow) = self.entries.get(&id) else { return Err(AdmissionError::State); };
+        let source = flow.quota;
+        let was_active = flow.charged_active;
+        if !was_active {
+            if !outbound || matches!(flow.state, State::Retired) || packet.tuple.proto != 17 { return Err(AdmissionError::Transport); }
+            if let Some(failure) = self.capacity(source, false) { return Err(failure); }
+        }
+        let Some(flow) = self.entries.get_mut(&id) else { return Err(AdmissionError::State); };
+        if !flow.accept(packet, outbound, now) { return Err(AdmissionError::Transport); }
+        if let Some(mac) = mac { flow.mac = mac; }
+        let is_active = flow.charged_active;
+        self.active_transition(source, was_active, is_active);
+        Ok(())
     }
 
-    /// Recheck retained mappings against the current source, redirect and ordered
-    /// policy before another packet can use their observation revision.
+    /// Recheck all retained peers on policy replacement. Expired/revoked records
+    /// keep their indices/ports while losing active credits; no new peer record is needed.
     pub(crate) fn observe(&mut self, view: &airlock_qubes_network::projection::View, now: u64)
         requires old(self).valid(), view.valid(),
-        ensures final(self).valid(), final(self).entries@.dom() == old(self).entries@.dom(),
+        ensures final(self).limits == old(self).limits, final(self).limits_value() == old(self).limits_value(),
+            final(self).valid(), final(self).entries@.dom() == old(self).entries@.dom(),
     {
-        let ports = crate::library::port_window(&self.entries, 0, MAX_FLOWS);
-        for id in ports
+        let keys = crate::library::port_window(&self.entries, 0, MAX_FLOWS);
+        for id in keys
             invariant self.valid(), view.valid(), self.entries@.dom() == old(self).entries@.dom(),
         {
-            let ghost before = *self;
             if let Some(flow) = self.entries.get_mut(&id) {
+                let source = flow.quota;
+                let was_active = flow.charged_active;
                 let address_ok = match view.config() {
                     Some(config) => crate::policy::external(config, flow.original.src.version()) == Some(flow.external)
                         && config.contains(&flow.original.src),
                     None => false,
                 };
-                let redirect_ok = crate::policy::redirect(view, flow.original) == Some(flow.policy);
-                if !address_ok || !redirect_ok || !crate::policy::allows(view, flow.policy, if flow.policy.icmp() { flow.policy.request() } else { 0 }, now) {
+                if !address_ok || crate::policy::redirect(view, flow.original) != Some(flow.policy)
+                    || !crate::policy::allows(view, flow.policy, if flow.policy.icmp() { flow.policy.request() } else { 0 }, now) {
                     flow.retire(now);
                 } else { flow.revision = view.generation(); }
-            }
-            proof {
-                if before.entries@.dom().contains(id) { self.mapping_update(before, id); }
-                else { self.same_records(before); }
+                let is_active = flow.charged_active;
+                self.active_transition(source, was_active, is_active);
             }
         }
     }
 
-    /// Retire all state on an interface lifetime's withdrawal.
+    /// Withdraw one exact native lifetime, preserving other clients' active work.
     pub(crate) fn retire(&mut self, owner: Owner, now: u64)
         requires old(self).valid(),
-        ensures final(self).valid(), final(self).value().dom() == old(self).value().dom(),
-            forall|id: u16| final(self).value().dom().contains(id)
-                && final(self).value()[id].owner == owner ==> !final(self).value()[id].usable(now),
+        ensures final(self).limits == old(self).limits, final(self).limits_value() == old(self).limits_value(),
+            final(self).valid(), final(self).value().dom() == old(self).value().dom(),
+            forall|id: u16| final(self).value().dom().contains(id) && final(self).value()[id].owner == owner
+                ==> !final(self).value()[id].usable(now),
     {
         let keys = crate::library::port_window(&self.entries, 0, MAX_FLOWS);
         let mut index = 0;
         while index < keys.len()
-            invariant self.valid(), self.outbound@ == old(self).outbound@, self.entries@.dom() == old(self).entries@.dom(),
+            invariant self.valid(), self.entries@.dom() == old(self).entries@.dom(),
                 keys@.len() <= MAX_FLOWS, index <= keys@.len(),
                 forall|i: int| 0 <= i < keys@.len() ==> self.entries@.dom().contains(keys@[i]),
                 forall|id: u16| old(self).entries@.dom().contains(id) ==> keys@.contains(id),
-                forall|i: int| 0 <= i < index && self.entries@[keys@[i]].owner == owner ==> !self.entries@[keys@[i]].usable(now),
+                forall|i: int| 0 <= i < index && self.entries@[keys@[i]].owner == owner
+                    ==> !self.entries@[keys@[i]].usable(now),
             decreases keys.len() - index,
         {
             let id = keys[index];
-            let ghost before = *self;
-            match self.entries.get_mut(&id) {
-                Some(flow) if flow.owner == owner => flow.retire(now),
-                _ => (),
+            if let Some(flow) = self.entries.get_mut(&id) {
+                if flow.owner == owner {
+                    let source = flow.quota;
+                    let was_active = flow.charged_active;
+                    flow.retire(now);
+                    self.active_transition(source, was_active, false);
+                }
             }
-            proof { self.mapping_update(before, id); }
             index += 1;
         }
         proof {
@@ -588,52 +688,66 @@ impl Table {
         }
     }
 
-    /// Release only an expired peer reservation, removing both tuple indexes.
-    fn release(&mut self, id: u16, _now: u64)
-        requires old(self).valid(), old(self).entries@.dom().contains(id), old(self).entries@[id].release <= _now,
-        ensures final(self).valid(), final(self).entries@ == old(self).entries@.remove(id),
+    /// Release only after the complete hold-down. Shared UDP ports return to the
+    /// free pool only with their last retained peer, never when one peer expires.
+    fn release(&mut self, id: u16, now: u64)
+        requires old(self).valid(), old(self).entries@.dom().contains(id), old(self).entries@[id].release <= now,
+        ensures final(self).limits == old(self).limits, final(self).limits_value() == old(self).limits_value(),
+            final(self).valid(), final(self).entries@ == old(self).entries@.remove(id),
     {
-        let ghost before = *self;
         let Some(flow) = self.entries.get(&id) else { return; };
-        let key = (flow.owner, flow.original);
+        let source = flow.quota;
+        let owner = flow.owner;
+        let original = flow.original;
         let translated = flow.translated();
-        self.entries.remove(&id); self.outbound.remove(&key); self.replies.remove(&translated);
-        proof {
-            assert forall|source: Ip| self.source_peers(source).len() <= CLIENT_FLOWS by {
-                assert(self.source_peers(source).subset_of(before.source_peers(source)));
-                vstd::set_lib::lemma_len_subset(self.source_peers(source), before.source_peers(source));
-            }
-        }
+        let port = flow.translated_port;
+        let socket = flow.socket();
+        let was_active = flow.charged_active;
+        let Some(references) = self.ports.get(&port).copied() else { return; };
+        let Some(usage) = self.usage.get(&source).copied() else { return; };
+        self.active_transition(source, was_active, false);
+        self.entries.remove(&id);
+        self.outbound.remove(&(owner, original));
+        self.replies.remove(&translated);
+        self.free_ids.insert(id);
+        if references == 1 {
+            self.ports.remove(&port);
+            self.free_ports.insert(port);
+            if original.proto == 17 { self.sockets.remove(&socket); }
+        } else { self.ports.insert(port, references - 1); }
+        if usage.records == 1 { self.usage.remove(&source); }
+        else { self.usage.insert(source, Usage { active: usage.active - if was_active { 1 } else { 0 }, records: usage.records - 1 }); }
     }
 
-    /// Visit at most 64 entries; stale ports remain unavailable until reclaimed.
+    /// At most 64 records per turn. Inactive credit reclamation and eventual
+    /// port release progress independently; neither path steals another's state.
     pub(crate) fn maintain(&mut self, now: u64)
         requires old(self).valid(),
-        ensures final(self).valid(), final(self).value().dom().subset_of(old(self).value().dom()),
+        ensures final(self).limits == old(self).limits, final(self).limits_value() == old(self).limits_value(),
+            final(self).valid(), final(self).value().dom().subset_of(old(self).value().dom()),
             forall|id: u16| old(self).value().dom().contains(id) && !final(self).value().dom().contains(id)
                 ==> old(self).value()[id].release <= now,
     {
-        let ghost before_cursor = *self;
-        let keys: alloc::vec::Vec<u16> = crate::library::port_window(&self.entries, self.cursor, 64);
+        let keys = crate::library::port_window(&self.entries, self.cursor, 64);
         if keys.len() < 64 { self.cursor = 0; }
         else { self.cursor = keys.last().copied().unwrap_or(0).saturating_add(1); }
-        proof { self.same_records(before_cursor); }
         for id in keys
             invariant self.valid(), self.entries@.dom().subset_of(old(self).entries@.dom()),
-                forall|p: u16| self.entries@.dom().contains(p) ==> self.entries@[p].release >= old(self).entries@[p].release,
-                forall|p: u16| old(self).entries@.dom().contains(p) && !self.entries@.dom().contains(p)
-                    ==> old(self).entries@[p].release <= now,
+                forall|id: u16| old(self).entries@.dom().contains(id) && !self.entries@.dom().contains(id)
+                    ==> old(self).entries@[id].release <= now,
         {
-            let ghost before = *self;
-            let release = if let Some(flow) = self.entries.get_mut(&id) {
-                if !flow.live(now) && flow.original.proto != 17 { flow.retire(now); }
-                now >= flow.release
-            } else { false };
-            proof {
-                if before.entries@.dom().contains(id) { self.mapping_update(before, id); }
-                else { self.same_records(before); }
+            if let Some(flow) = self.entries.get_mut(&id) {
+                let source = flow.quota;
+                let was_active = flow.charged_active;
+                if !flow.live(now) {
+                    flow.charged_active = false;
+                    if flow.original.proto != 17 { flow.retire(now); }
+                }
+                let is_active = flow.charged_active;
+                let release = now >= flow.release;
+                self.active_transition(source, was_active, is_active);
+                if release { self.release(id, now); }
             }
-            if release { self.release(id, now); }
         }
     }
 }

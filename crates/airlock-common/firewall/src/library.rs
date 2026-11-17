@@ -2,7 +2,7 @@
 //! and ChaCha; these boundaries neither select network policy nor grant owners.
 
 use alloc::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     vec::Vec,
 };
 use rand_chacha::ChaCha20Rng;
@@ -122,6 +122,8 @@ pub(crate) fn retain_deque<T, F: Fn(&T) -> bool>(values: &mut VecDeque<T>, keep:
 pub(crate) proof fn derived_key_order()
     ensures vstd::std_specs::btree::key_obeys_cmp_spec::<(crate::engine::Owner, crate::wire::Tuple)>(),
         vstd::std_specs::btree::key_obeys_cmp_spec::<crate::wire::Tuple>(),
+        vstd::std_specs::btree::key_obeys_cmp_spec::<crate::flow::Socket>(),
+        vstd::std_specs::btree::key_obeys_cmp_spec::<airlock_qubes_network::address::Ip>(),
 { }
 
 /// Native Option construction preserves the caller's value exactly.
@@ -137,29 +139,23 @@ pub assume_specification<I: Iterator, P: FnMut(&I::Item) -> bool>[ <core::iter::
     ensures IteratorSpec::will_return_none(&iter), count == IteratorSpec::remaining(&iter).len(),
 ;
 
-/// Mathematical subset inspected and selected by the standard map's filter.
-pub(crate) uninterp spec fn selected_keys<V, F>(map: Map<u16, V>, predicate: F) -> Set<u16>;
-
-/// Count values selected by a pure caller-supplied predicate using the standard
-/// map iterator. Trust scope is std's key/value correspondence and count; every
-/// predicate decision remains checked in the caller's verified closure.
+/// Populate the standard ordered set with the fixed private dynamic namespace.
+/// Trust scope is Rust's inclusive range/collect correspondence, not allocation,
+/// NAT sharing, admission, expiry or resource accounting decisions.
 #[verifier::external_body]
-pub(crate) fn count_values<V, F: Fn(&V) -> bool>(map: &BTreeMap<u16, V>, keep: F) -> (count: usize)
-    requires forall|port: u16| map@.dom().contains(port) ==> call_requires(keep, (&map@[port],)),
-    ensures selected_keys(map@, keep).subset_of(map@.dom()), count == selected_keys(map@, keep).len(),
-        count <= map@.len(),
-        forall|port: u16| map@.dom().contains(port) ==> call_ensures(keep, (&map@[port],), selected_keys(map@, keep).contains(port)),
-{ map.values().filter(|value| keep(value)).count() }
+pub(crate) fn port_pool() -> (pool: BTreeSet<u16>)
+    ensures pool@ == Set::new(|port: u16| port >= crate::flow::FIRST),
+        pool@.len() == 16384,
+{ (crate::flow::FIRST..=u16::MAX).collect() }
 
-/// Select the first matching value using std's ordered iterator. Only iterator
-/// correspondence is trusted; the caller's predicate is verified separately.
+/// Borrow a free namespace candidate using std's ordered range and first item.
+/// This does not consume it: the verified caller commits ownership only after
+/// every admission check succeeds. Wrapping chooses the first available value.
 #[verifier::external_body]
-pub(crate) fn find_key<V, F: Fn(&V) -> bool>(map: &BTreeMap<u16, V>, matches: F) -> (key: Option<u16>)
-    requires forall|id: u16| map@.dom().contains(id) ==> call_requires(matches, (&map@[id],)),
-    ensures key.is_some() ==> map@.dom().contains(key.unwrap())
-            && call_ensures(matches, (&map@[key.unwrap()],), true),
-        key.is_none() ==> forall|id: u16| map@.dom().contains(id) ==> call_ensures(matches, (&map@[id],), false),
-{ map.iter().find_map(|(&id, value)| matches(value).then_some(id)) }
+pub(crate) fn pool_candidate(pool: &BTreeSet<u16>, start: u16) -> (candidate: Option<u16>)
+    ensures candidate.is_some() == !pool@.is_empty(),
+        candidate.is_some() ==> pool@.contains(candidate.unwrap()),
+{ pool.range(start..).next().or_else(|| pool.first()).copied() }
 
 /// Select the standard map's first bounded ascending port window. The caller
 /// supplies its work budget; expiry and quota decisions are not made here.

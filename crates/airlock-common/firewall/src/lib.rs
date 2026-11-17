@@ -18,7 +18,7 @@
 //! Reassembly admits 64 disjoint parts per slot, one slot per client and two
 //! upstream slots, with fixed 15-second lifetimes. Output preserves the largest
 //! original fragment size so it cannot undo path-MTU learning. Recent fragment
-//! error history shares flow-sized quotas; eviction drops old error detail.
+//! error history has independent fixed quotas; eviction drops old error detail.
 //!
 //! smoltcp supplies wire access/checksums and the single policy-DNS TCP endpoint;
 //! etherparse supplies extension views and owned reassembly; domain supplies DNS
@@ -42,15 +42,16 @@ mod policy;
 mod wire;
 
 pub use engine::{Engine, Output, Owner, Target};
+pub use flow::AdmissionError;
 pub use wire::FRAME_BYTES;
 
 vstd::prelude::verus! {
 
 /// Maximum simultaneously retained NAT leases, including closing hold-downs.
-pub const MAX_FLOWS: usize = 1024;
+pub const MAX_FLOWS: usize = crate::parameters::MAX_RECORDS;
 
-/// One client can consume at most one quarter of the NAT table.
-pub const CLIENT_FLOWS: usize = 256;
+/// Compiled per-client reservation ceiling; operating limits may be smaller.
+pub const CLIENT_FLOWS: usize = MAX_FLOWS / MAX_CLIENTS;
 
 /// Maximum attached client interfaces, matching the native driver limit.
 pub const MAX_CLIENTS: usize = 4;

@@ -3,7 +3,7 @@
 
 use super::Owner;
 use crate::{
-    CLIENT_FLOWS, SECOND,
+    SECOND,
     flow::{NewMapping, Table},
     wire::{Packet, Tuple},
 };
@@ -113,11 +113,15 @@ fn udp_idle_renewal_and_revocation_have_different_authority() {
     assert!(table.entries[&id].live(299 * SECOND));
     assert!(!table.entries[&id].live(300 * SECOND));
     table.maintain(301 * SECOND);
-    assert!(!table.accept(id, &packet, false, None, 301 * SECOND));
-    assert!(table.accept(id, &packet, true, None, 301 * SECOND));
+    assert!(
+        table
+            .accept(id, &packet, false, None, 301 * SECOND)
+            .is_err()
+    );
+    assert!(table.accept(id, &packet, true, None, 301 * SECOND).is_ok());
     assert!(table.entries[&id].live(600 * SECOND));
     table.retire(owner(1), 302 * SECOND);
-    assert!(!table.accept(id, &packet, true, None, 303 * SECOND));
+    assert!(table.accept(id, &packet, true, None, 303 * SECOND).is_err());
 }
 
 /// Reclaiming one peer must preserve the socket port owned by another peer.
@@ -153,7 +157,10 @@ fn shared_port_survives_peer_reclamation() {
 #[test]
 fn udp_peers_still_consume_individual_quota() {
     let mut table = Table::new();
-    for remote_port in 1..=CLIENT_FLOWS as u16 {
+    let limit = crate::parameters::Limits::defaults()
+        .document()
+        .active_per_client;
+    for remote_port in 1..=limit as u16 {
         let bytes = udp(false, 1, 41641, remote_port);
         create(&mut table, owner(1), &Packet::parse(&bytes).unwrap(), 0);
     }
@@ -170,7 +177,7 @@ fn udp_peers_still_consume_individual_quota() {
     assert!(
         table
             .create(mapping, &packet, 0, &mut ChaCha20Rng::from_seed([42; 32]))
-            .is_none()
+            .is_err()
     );
-    assert_eq!(table.entries.len(), CLIENT_FLOWS);
+    assert_eq!(table.entries.len(), limit);
 }
