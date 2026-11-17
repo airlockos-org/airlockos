@@ -38,7 +38,10 @@ mod engine;
 mod flow;
 mod fragment;
 mod library;
-pub mod parameters;
+
+/// Shared validated startup contract used by authoring, dom0 and the native guest.
+pub use airlock_firewall_parameters as parameters;
+
 mod policy;
 mod wire;
 
@@ -55,7 +58,7 @@ pub const MAX_FLOWS: usize = crate::parameters::MAX_RECORDS;
 pub const CLIENT_FLOWS: usize = MAX_FLOWS / MAX_CLIENTS;
 
 /// Maximum attached client interfaces, matching the native driver limit.
-pub const MAX_CLIENTS: usize = 4;
+pub const MAX_CLIENTS: usize = crate::parameters::MAX_CLIENTS;
 
 /// Maximum queued frames per destination; full queues drop the new frame.
 pub const QUEUE_FRAMES: usize = 16;

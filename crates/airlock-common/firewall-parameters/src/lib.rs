@@ -7,9 +7,17 @@
 //! Our verified validation owns the relationships and compiled ceilings. Neither
 //! JSON settings nor resource availability can authorize a packet or interface.
 
+#![no_std]
+#![warn(missing_docs)]
+
+extern crate alloc;
+
 use vstd::prelude::*;
 
 verus! {
+
+/// Maximum attached native client interfaces, shared by validation and forwarding.
+pub const MAX_CLIENTS: usize = 4;
 
 /// Maximum parameter document size, within QubesDB's 3071-byte value limit.
 pub const MAX_DOCUMENT_BYTES: usize = 1024;
@@ -53,10 +61,10 @@ impl Document {
     /// expiry never needs another peer record or evicts another client's reservation.
     pub open spec fn supported(&self) -> bool {
         self.version == 1
-            && 0 < self.active_per_client <= MAX_RECORDS / crate::MAX_CLIENTS
-            && 0 < self.retained_per_client <= MAX_RECORDS / crate::MAX_CLIENTS
-            && self.active_per_client * crate::MAX_CLIENTS <= self.active_global
-            && self.retained_per_client * crate::MAX_CLIENTS <= self.retained_global
+            && 0 < self.active_per_client <= MAX_RECORDS / MAX_CLIENTS
+            && 0 < self.retained_per_client <= MAX_RECORDS / MAX_CLIENTS
+            && self.active_per_client * MAX_CLIENTS <= self.active_global
+            && self.retained_per_client * MAX_CLIENTS <= self.retained_global
             && self.active_global <= MAX_RECORDS
             && self.retained_global <= MAX_RECORDS
             && self.active_global < self.retained_global
@@ -86,13 +94,13 @@ impl Limits {
             limits.is_some() ==> limits.unwrap().valid() && limits.unwrap().value() == document,
     {
         if document.version != 1
-            || document.active_per_client == 0 || document.active_per_client > MAX_RECORDS / crate::MAX_CLIENTS
-            || document.retained_per_client == 0 || document.retained_per_client > MAX_RECORDS / crate::MAX_CLIENTS
+            || document.active_per_client == 0 || document.active_per_client > MAX_RECORDS / MAX_CLIENTS
+            || document.retained_per_client == 0 || document.retained_per_client > MAX_RECORDS / MAX_CLIENTS
             || document.active_global > MAX_RECORDS || document.retained_global > MAX_RECORDS
         { return None; }
 
-        if document.active_per_client * crate::MAX_CLIENTS > document.active_global
-            || document.retained_per_client * crate::MAX_CLIENTS > document.retained_global
+        if document.active_per_client * MAX_CLIENTS > document.active_global
+            || document.retained_per_client * MAX_CLIENTS > document.retained_global
             || document.active_global >= document.retained_global
             || document.active_per_client >= document.retained_per_client
             || document.report_interval_seconds < 1 || document.report_interval_seconds > 300
@@ -151,4 +159,41 @@ pub fn decode(document: Option<&[u8]>) -> Result<Limits, DecodeError> {
 
     let claim: Document = serde_json::from_slice(bytes).map_err(|_| DecodeError::Json)?;
     Limits::validate(claim).ok_or(DecodeError::Unsupported)
+}
+
+/// Reviewed topology feature carrying the canonical complete parameter document.
+pub const FEATURE: &str = "airlock-hermit-firewall-params";
+
+/// Bound on a settings-only boot observation beside the lifecycle heartbeat.
+pub const MAX_BOOT_REPORT_BYTES: usize = 2048;
+
+/// Full settings selected by one executing firewall boot, without resource counters.
+#[cfg(not(verus_keep_ghost))]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BootReport {
+    /// Current protected boot challenge, excluding retained reports from older boots.
+    pub boot: alloc::string::String,
+    /// Complete effective configuration selected before this engine was constructed.
+    pub settings: Document,
+}
+
+#[cfg(not(verus_keep_ghost))]
+impl Default for Document {
+    /// Start authoring from the supported fallback values; setters validate edits.
+    fn default() -> Self {
+        *Limits::defaults().document()
+    }
+}
+
+/// Validate and canonically encode a reviewed claim within the native record bound.
+/// Serde owns encoding; callers cannot serialize unchecked claims through this API.
+#[cfg(not(verus_keep_ghost))]
+pub fn encode(document: Document) -> Result<alloc::string::String, DecodeError> {
+    let limits = Limits::validate(document).ok_or(DecodeError::Unsupported)?;
+    let json = serde_json::to_string(limits.document()).map_err(|_| DecodeError::Json)?;
+    if !document_size_allowed(json.len()) {
+        return Err(DecodeError::Size);
+    }
+    Ok(json)
 }

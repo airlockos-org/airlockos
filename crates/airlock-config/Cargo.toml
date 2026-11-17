@@ -15,6 +15,7 @@ name = "airlock-config"
 path = "src/main.rs"
 
 [dependencies]
+airlock-firewall-parameters = { path = "../airlock-common/firewall-parameters" }
 anyhow = "1.0"
 airlock-diagnostics = { path = "../airlock-common/diagnostics" }
 airlock-build = { path = "../airlock-common/build" }

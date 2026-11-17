@@ -18,6 +18,8 @@ pub struct NetworkContract {
     pub provider: airlock_nix_core::identity::GuestName,
     /// Exact bounded downstream VM names in the reviewed topology.
     pub clients: Vec<airlock_nix_core::identity::GuestName>,
+    /// Explicit reviewed startup settings; absence preserves legacy defaults.
+    pub parameters: Option<airlock_firewall_parameters::Document>,
 }
 
 /// Resolve network capabilities from protected source, never from guest QubesDB values.
@@ -61,6 +63,14 @@ pub fn network_contract(
     Ok(NetworkContract {
         provider: provider.clone().try_into()?,
         clients,
+        parameters: if domain
+            .features
+            .contains_key(airlock_firewall_parameters::FEATURE)
+        {
+            domain.firewall_parameters()?
+        } else {
+            None
+        },
     })
 }
 
@@ -134,6 +144,9 @@ struct Execution {
     /// Captured upstream relationship; clipboard records always leave it absent.
     #[serde(default)]
     network: Option<NetworkAttachment>,
+    /// Settings captured from protected source before spawn, never guest QubesDB.
+    #[serde(default)]
+    parameters: Option<airlock_firewall_parameters::Document>,
 }
 
 /// Fixed protected runtime record, addressed only with a validated VM name.
@@ -188,6 +201,11 @@ fn preparing_context(
         (artifact.authority == AuthorityMode::Normal) == authority.is_some(),
         "Hermit authority does not match artifact"
     );
+    let parameters = if artifact.application.networking() {
+        network_contract(name, artifact, generation)?.parameters
+    } else {
+        None
+    };
     let name = name.parse()?;
     let metadata = match fs::symlink_metadata(console(&name)) {
         Ok(metadata) => {
@@ -215,9 +233,35 @@ fn preparing_context(
             offset: metadata.as_ref().map_or(0, fs::Metadata::len),
             authority,
             network,
+            parameters,
         },
     )?;
     Ok(nonce)
+}
+
+/// Return the frozen reviewed startup selection only during the prepared boot.
+/// A source rewrite between preparation and QubesDB creation aborts startup.
+/// This does not trust a mutable VM feature or a guest's QubesDB claim.
+pub fn parameters_for_boot(
+    name: &str,
+    artifact: &Descriptor,
+    generation: &str,
+) -> Result<Option<airlock_firewall_parameters::Document>> {
+    let path = record(&name.parse()?);
+    crate::state::trusted(&path)?;
+    let execution: Execution = crate::state::read(&path)?;
+    ensure!(
+        execution.boot_id == crate::state::boot_id()?.to_string()
+            && execution.xid.is_none()
+            && execution.artifact == *artifact
+            && execution.generation == generation,
+        "parameter publication does not match the prepared firewall boot"
+    );
+    ensure!(
+        network_contract(name, artifact, generation)?.parameters == execution.parameters,
+        "firewall parameters changed during startup"
+    );
+    Ok(execution.parameters)
 }
 
 /// Associate the prepared observation with the Xen domain that Qubes actually started.
@@ -328,8 +372,6 @@ pub fn network_boot_matches(
 /// Require execution evidence from this boot and this Xen domain, independently of process state.
 /// The isolated readiness marker means the service is executing with IPC disabled.
 pub fn ready(name: &str, artifact: &Descriptor, xid: u32) -> Result<()> {
-    use std::io::{Seek, SeekFrom};
-
     let name = name.parse()?;
     let path = record(&name);
     crate::state::trusted(&path)?;
@@ -340,26 +382,7 @@ pub fn ready(name: &str, artifact: &Descriptor, xid: u32) -> Result<()> {
             && execution.artifact == *artifact,
         "Hermit execution identity differs from selected generation"
     );
-    let path = console(&name);
-    crate::state::trusted(&path)?;
-    let mut file = fs::File::open(path)?;
-    let metadata = file.metadata()?;
-    ensure!(
-        metadata.is_file()
-            && metadata.len() >= execution.offset
-            && execution.inode.is_none_or(|inode| inode == metadata.ino()),
-        "Hermit console rotated during startup"
-    );
-    let start = if artifact.application.networking() {
-        execution
-            .offset
-            .max(metadata.len().saturating_sub(64 * 1024))
-    } else {
-        execution.offset
-    };
-    file.seek(SeekFrom::Start(start))?;
-    let mut output = String::new();
-    file.take(256 * 1024).read_to_string(&mut output)?;
+    let (output, metadata) = console_output(&name, &execution)?;
     if artifact.application.networking() {
         use airlock_qubes_network::status::{Report, State, classify};
         // Allow one unchanged heartbeat plus scheduling/console slack. A live
@@ -393,6 +416,12 @@ pub fn ready(name: &str, artifact: &Descriptor, xid: u32) -> Result<()> {
                     == State::Ready,
             "firewall configuration, policies or native devices are not ready"
         );
+        if let Some(expected) = execution.parameters {
+            ensure!(
+                observed_parameters(&output, &execution)? == Some(expected),
+                "firewall effective parameters differ from the reviewed boot selection"
+            );
+        }
         return Ok(());
     }
     let mode = match artifact.authority {
@@ -409,6 +438,90 @@ pub fn ready(name: &str, artifact: &Descriptor, xid: u32) -> Result<()> {
         "Hermit application has not reported current-boot readiness"
     );
     Ok(())
+}
+
+/// Read a bounded console suffix within the protected boot's original inode.
+fn console_output(
+    name: &airlock_nix_core::identity::GuestName,
+    execution: &Execution,
+) -> Result<(String, fs::Metadata)> {
+    use std::io::{Seek, SeekFrom};
+
+    let path = console(name);
+    crate::state::trusted(&path)?;
+    let mut file = fs::File::open(path)?;
+    let metadata = file.metadata()?;
+    ensure!(
+        metadata.is_file()
+            && metadata.len() >= execution.offset
+            && execution.inode.is_none_or(|inode| inode == metadata.ino()),
+        "Hermit console rotated during startup"
+    );
+    let start = if execution.artifact.application.networking() {
+        execution
+            .offset
+            .max(metadata.len().saturating_sub(64 * 1024))
+    } else {
+        execution.offset
+    };
+    file.seek(SeekFrom::Start(start))?;
+    let mut output = String::new();
+    file.take(256 * 1024).read_to_string(&mut output)?;
+    Ok((output, metadata))
+}
+
+/// Decode the latest settings-only observation for this exact boot. The small
+/// record precedes each lifecycle heartbeat, independently of resource intervals.
+fn observed_parameters(
+    output: &str,
+    execution: &Execution,
+) -> Result<Option<airlock_firewall_parameters::Document>> {
+    let Some(json) = output
+        .lines()
+        .rev()
+        .map(console_line)
+        .find_map(|line| line.strip_prefix("AIRLOCK_FIREWALL_PARAMETERS "))
+    else {
+        return Ok(None);
+    };
+    ensure!(
+        json.len() <= airlock_firewall_parameters::MAX_BOOT_REPORT_BYTES,
+        "oversized firewall parameter observation"
+    );
+    let report: airlock_firewall_parameters::BootReport = serde_json::from_str(json)?;
+    if report.boot != execution.nonce {
+        return Ok(None);
+    }
+    ensure!(
+        airlock_firewall_parameters::Limits::validate(report.settings).is_some(),
+        "invalid effective firewall parameters"
+    );
+    Ok(Some(report.settings))
+}
+
+/// Observe effective settings only for a current running Xen identity and ready
+/// boot. Missing evidence remains unknown; it never becomes an assumed default.
+pub fn parameter_observation(
+    name: &str,
+    xid: Option<u32>,
+) -> Result<Option<airlock_firewall_parameters::Document>> {
+    let Some(xid) = xid.filter(|xid| *xid > 0) else {
+        return Ok(None);
+    };
+    let path = record(&name.parse()?);
+    match fs::symlink_metadata(&path) {
+        Ok(_) => crate::state::trusted(&path)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    }
+    let execution: Execution = crate::state::read(&path)?;
+    ensure!(
+        execution.boot_id == crate::state::boot_id()?.to_string() && execution.xid == Some(xid),
+        "stale firewall parameter boot record"
+    );
+    ready(name, &execution.artifact, xid)?;
+    let (output, _) = console_output(&name.parse()?, &execution)?;
+    observed_parameters(&output, &execution)
 }
 
 /// Remove Xen's optional console timestamp, without accepting arbitrary log prefixes.

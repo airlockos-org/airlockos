@@ -30,6 +30,8 @@ pub struct Coordinator {
     runner: Runner,
 }
 
+mod firewall_parameters;
+
 mod activation;
 
 mod staging;
@@ -192,6 +194,10 @@ impl Coordinator {
             result["baseline"] = baseline;
         }
 
+        match self.firewall_parameters_status() {
+            Ok(parameters) => result["firewall_parameters"] = parameters,
+            Err(error) => result["firewall_parameters_error"] = json!(error.to_string()),
+        }
         Ok(result)
     }
 

@@ -308,6 +308,14 @@ pub fn run(challenge: Challenge, seed: [u8; 32]) -> Result<(), Error> {
         // Follow resource output with fresh lifecycle status so even a one-second
         // resource interval cannot push the latest status out of dom0's 64 KiB tail.
         if previous_status != Some(status) || now >= status_at || resources_due {
+            let parameters = airlock_firewall_core::parameters::BootReport {
+                boot: boot.clone(),
+                settings: *engine.parameters(),
+            };
+            publish_bounded::<{ airlock_firewall_core::parameters::MAX_BOOT_REPORT_BYTES }>(
+                "AIRLOCK_FIREWALL_PARAMETERS",
+                &parameters,
+            );
             let report = airlock_qubes_network::status::Report {
                 boot: boot.clone(),
                 snapshot: status,
@@ -349,20 +357,27 @@ fn publish_resources(engine: &Engine, boot: &str, now: u64) {
         heap_peak_requested_bytes: peak_requested,
         heap_arena_bytes: airlock_firewall_core::parameters::APPLICATION_HEAP_BYTES,
     };
-    let mut storage = [0; MAX_RESOURCE_REPORT_BYTES];
+    publish_bounded::<MAX_RESOURCE_REPORT_BYTES>("AIRLOCK_FIREWALL_RESOURCES", &report);
+}
+
+/// Serialize either bounded observation with serde and std's fixed slice writer.
+/// Partial output is never printed. Prefixes and limits come from these two fixed
+/// callers; no input can select a console format or enlarge the scratch buffer.
+fn publish_bounded<const N: usize>(prefix: &str, report: &impl serde::Serialize) {
+    let mut storage = [0; N];
     let mut writer = std::io::Cursor::new(storage.as_mut_slice());
-    if serde_json::to_writer(&mut writer, &report).is_err() {
-        log::warn!("operation=resources.publish error=serialization_or_size");
+    if serde_json::to_writer(&mut writer, report).is_err() {
+        log::warn!("operation=firewall-report.publish prefix={prefix} error=serialization_or_size");
         return;
     }
     let length = writer.position() as usize;
     let Some(bytes) = storage.get(..length) else {
-        log::warn!("operation=resources.publish error=writer_length");
+        log::warn!("operation=firewall-report.publish prefix={prefix} error=writer_length");
         return;
     };
     match core::str::from_utf8(bytes) {
-        Ok(json) => println!("AIRLOCK_FIREWALL_RESOURCES {json}"),
-        Err(_) => log::warn!("operation=resources.publish error=encoding"),
+        Ok(json) => println!("{prefix} {json}"),
+        Err(_) => log::warn!("operation=firewall-report.publish prefix={prefix} error=encoding"),
     }
 }
 

@@ -303,6 +303,35 @@ pub struct Topology {
     pub extra: BTreeMap<String, Value>,
 }
 
+impl Domain {
+    /// Decode complete settings for a native firewall; older declarations without
+    /// a setting use the shared fallback. Other backends cannot carry this feature.
+    pub fn firewall_parameters(&self) -> Result<Option<airlock_firewall_parameters::Document>> {
+        let supplied = self.features.get(airlock_firewall_parameters::FEATURE);
+        if !self
+            .backend
+            .hermit()
+            .is_some_and(|artifact| artifact.application.networking())
+        {
+            ensure!(
+                supplied.is_none(),
+                "firewall parameters require a native firewall"
+            );
+            return Ok(None);
+        }
+        let bytes = supplied
+            .map(|value| {
+                value
+                    .as_str()
+                    .context("firewall parameters must be a JSON string")
+            })
+            .transpose()?;
+        let limits = airlock_firewall_parameters::decode(bytes.map(str::as_bytes))
+            .map_err(|error| anyhow::anyhow!("invalid firewall parameters: {error:?}"))?;
+        Ok(Some(*limits.document()))
+    }
+}
+
 impl Topology {
     /// Reject unsupported topology versions, excessive guest counts and invalid kernel names.
     pub fn validate(&self) -> Result<()> {
@@ -313,6 +342,8 @@ impl Topology {
         ensure!(self.domains.len() <= 4096, "topology has too many domains");
 
         for (name, d) in &self.domains {
+            d.firewall_parameters()
+                .with_context(|| format!("{name}: invalid firewall configuration"))?;
             if let Some(artifact) = d.backend.hermit() {
                 artifact.validate(false)?;
                 if let Some(scratch) = d.backend.hermit_scratch() {

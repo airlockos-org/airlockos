@@ -32,13 +32,24 @@ dependencies = [
 name = "airlock-firewall-core"
 version = "0.1.0"
 dependencies = [
+ "airlock-firewall-parameters",
  "airlock-qubes-network",
  "domain",
  "etherparse",
  "internet-checksum",
  "rand_chacha",
  "rand_core",
+ "serde",
  "smoltcp",
+ "vstd",
+]
+
+[[package]]
+name = "airlock-firewall-parameters"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
  "vstd",
 ]
 
@@ -81,6 +92,7 @@ dependencies = [
  "getrandom",
  "hermit",
  "log",
+ "serde",
  "serde_json",
  "xen-transport",
 ]

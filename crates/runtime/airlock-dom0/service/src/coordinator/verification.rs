@@ -171,6 +171,16 @@ impl Coordinator {
                                 .text("qvm-prefs", &[name.as_str(), "xid"])?
                                 .parse()?;
                             crate::hermit::ready(name.as_str(), artifact, xid)?;
+                            if domain
+                                .features
+                                .contains_key(airlock_firewall_parameters::FEATURE)
+                            {
+                                ensure!(
+                                    crate::hermit::parameter_observation(name.as_str(), Some(xid))?
+                                        == domain.firewall_parameters()?,
+                                    "firewall effective parameters differ from the selected release"
+                                );
+                            }
                             let after: u32 = self
                                 .runner
                                 .text("qvm-prefs", &[name.as_str(), "xid"])?

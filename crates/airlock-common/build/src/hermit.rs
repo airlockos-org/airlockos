@@ -37,6 +37,7 @@ pub const APPLICATIONS: [Source; 2] = [
             "airlock-common/qubesdb",
             "airlock-common/qubes-network",
             "airlock-common/firewall",
+            "airlock-common/firewall-parameters",
             "runtime/airlock-hermit-control",
             "runtime/airlock-sys-firewall",
         ],

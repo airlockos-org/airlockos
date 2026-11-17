@@ -242,6 +242,42 @@ pub fn plan(
         result.pci_handoff = Some(serde_json::json!({"from":a,"to":b}));
     }
 
+    let mut parameters = BTreeMap::new();
+    for (name, domain) in &new.domains {
+        let after = if domain
+            .features
+            .contains_key(airlock_firewall_parameters::FEATURE)
+        {
+            domain.firewall_parameters()?
+        } else {
+            None
+        };
+        let before = old
+            .domains
+            .get(name)
+            .filter(|domain| {
+                domain
+                    .features
+                    .contains_key(airlock_firewall_parameters::FEATURE)
+            })
+            .map(Domain::firewall_parameters)
+            .transpose()?
+            .flatten();
+        if after != before {
+            parameters.insert(name.to_string(), serde_json::json!({
+                "before": before, "after": after, "activation": "next-vm-start",
+                "restart_required": running.contains(name),
+                "executable_unchanged": old.domains.get(name).map(|domain| &domain.backend) == Some(&domain.backend),
+            }));
+        }
+    }
+    if !parameters.is_empty() {
+        result.extra.insert(
+            "firewall_parameters".into(),
+            serde_json::to_value(parameters)?,
+        );
+    }
+
     Ok(result)
 }
 

@@ -33,6 +33,11 @@ vstd::prelude::verus! {
 /// Its value correlates a boot; it never carries rules or grants authority.
 #[expect(clippy::redundant_static_lifetimes, reason = "Pinned Verus requires an explicit lifetime on reference constants")]
 pub const READY_PATH: &'static str = "/airlock-network-control-ready";
+
+/// Complete native firewall startup settings published by the protected host
+/// before Qubes unpauses the guest. The application owns parameter validation.
+#[expect(clippy::redundant_static_lifetimes, reason = "Pinned Verus requires an explicit lifetime on reference constants")]
+pub const FIREWALL_PARAMETERS_PATH: &'static str = "/airlock-firewall-params";
 }
 
 mod library;

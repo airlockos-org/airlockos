@@ -3,6 +3,7 @@ exclude = ["tooling/airlock-store-packer"]
 members = [
     "airlock-common/bounded-heap",
     "airlock-common/firewall",
+    "airlock-common/firewall-parameters",
     "runtime/airlock-sys-firewall",
     "airlock-common/boot",
     "airlock-common/clipboard",

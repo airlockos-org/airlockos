@@ -34,7 +34,9 @@ version = "0.1.0"
 dependencies = [
  "airlock-build",
  "airlock-diagnostics",
+ "airlock-firewall-parameters",
  "airlock-machine-core",
+ "airlock-machine-planning",
  "airlock-nix-core",
  "airlock-sys-gui-service",
  "anyhow",
@@ -69,10 +71,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "airlock-firewall-parameters"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "vstd",
+]
+
+[[package]]
 name = "airlock-machine-core"
 version = "0.1.0"
 dependencies = [
  "airlock-deployment-core",
+ "airlock-firewall-parameters",
  "airlock-machine-planning",
  "airlock-nix-core",
  "anyhow",

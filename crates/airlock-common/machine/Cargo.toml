@@ -11,6 +11,7 @@ description = "Shared Airlock machine records, dependency semantics and pure pla
 path = "src/lib.rs"
 
 [dependencies]
+airlock-firewall-parameters = { path = "../firewall-parameters" }
 airlock-deployment-core = { path = "../deployment" }
 airlock-machine-planning = { path = "../machine-planning" }
 airlock-nix-core = { path = "../nix" }

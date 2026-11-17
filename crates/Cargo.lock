@@ -111,6 +111,7 @@ version = "0.1.0"
 dependencies = [
  "airlock-build",
  "airlock-diagnostics",
+ "airlock-firewall-parameters",
  "airlock-machine-core",
  "airlock-machine-planning",
  "airlock-nix-core",
@@ -190,6 +191,7 @@ name = "airlock-dom0-service"
 version = "0.1.0"
 dependencies = [
  "airlock-deployment-core",
+ "airlock-firewall-parameters",
  "airlock-machine-core",
  "airlock-machine-planning",
  "airlock-nix-core",
@@ -217,6 +219,7 @@ dependencies = [
 name = "airlock-firewall-core"
 version = "0.1.0"
 dependencies = [
+ "airlock-firewall-parameters",
  "airlock-qubes-network",
  "domain",
  "etherparse",
@@ -224,8 +227,16 @@ dependencies = [
  "rand_chacha",
  "rand_core",
  "serde",
- "serde_json",
  "smoltcp",
+ "vstd",
+]
+
+[[package]]
+name = "airlock-firewall-parameters"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
  "vstd",
 ]
 
@@ -267,6 +278,7 @@ name = "airlock-machine-core"
 version = "0.1.0"
 dependencies = [
  "airlock-deployment-core",
+ "airlock-firewall-parameters",
  "airlock-machine-planning",
  "airlock-nix-core",
  "anyhow",
@@ -332,6 +344,7 @@ name = "airlock-qubes-python"
 version = "0.1.0"
 dependencies = [
  "airlock-dom0-service",
+ "airlock-firewall-parameters",
  "airlock-machine-planning",
  "airlock-nix-core",
  "airlock-qubes",
@@ -416,6 +429,7 @@ dependencies = [
  "getrandom 0.3.4",
  "hermit",
  "log",
+ "serde",
  "serde_json",
  "xen-transport",
 ]

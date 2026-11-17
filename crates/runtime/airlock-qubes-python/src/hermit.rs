@@ -344,6 +344,39 @@ fn invoke(
                 .unbind());
         }
         "initramfs_path" => return Ok(py.None()),
+        "on_qdb_create" => {
+            let image = artifact(&vm)?;
+            if image.application.networking() {
+                let name = vm.getattr("name")?.extract::<String>()?;
+                let generation = vm
+                    .getattr("features")?
+                    .get_item("airlock-hermit-generation")?
+                    .extract::<String>()?;
+                let parameters = py
+                    .detach(|| {
+                        airlock_dom0_service::hermit::parameters_for_boot(
+                            &name,
+                            &image,
+                            &generation,
+                        )
+                    })
+                    .map_err(|error| crate::exception(py, "QubesException", error))?;
+                if let Some(parameters) = parameters {
+                    let encoded =
+                        airlock_firewall_parameters::encode(parameters).map_err(|error| {
+                            crate::exception(
+                                py,
+                                "QubesException",
+                                format!("invalid firewall startup settings: {error:?}"),
+                            )
+                        })?;
+                    vm.getattr("untrusted_qdb")?.call_method1(
+                        "write",
+                        (airlock_qubes_network::FIREWALL_PARAMETERS_PATH, encoded),
+                    )?;
+                }
+            }
+        }
         "on_pre_start" => {
             recovery::guard(&vm, true)?;
             // A failed preflight must not reuse a previous boot's cleanup authority.
@@ -559,6 +592,9 @@ pub(super) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     for (name, events) in [
         ("on_pre_start", vec!["domain-pre-start"]),
         ("on_pre_spawn", vec!["domain-pre-spawn"]),
+        // Qubes 4.3.44 calls create_qdb_entries before resuming the paused guest.
+        // See qubes/vm/qubesvm.py start() in the pinned qubes-core-admin source.
+        ("on_qdb_create", vec!["domain-qdb-create"]),
         ("on_started", vec!["domain-start"]),
         (
             "on_lifecycle_guard",

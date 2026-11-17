@@ -18,6 +18,9 @@ mod type_constraints;
 
 pub use error::AuthoringError;
 
+/// Editable native firewall resource settings, validated before topology generation.
+pub use airlock_firewall_parameters::Document as FirewallParameters;
+
 /// Reviewed native application profile shared with artifact admission.
 pub use airlock_nix_core::hermit_artifact::Application as HermitApplication;
 
@@ -81,6 +84,7 @@ impl<R, B> VmHandle<R, B> {
                 "airlock-managed",
                 "airlock-clipboard-authority",
                 "airlock-clipboard-service",
+                airlock_firewall_parameters::FEATURE,
                 "gui",
                 "servicevm",
             ]
@@ -147,6 +151,29 @@ impl<R> VmHandle<R, Nixos> {
         let mut settings = self.reference.definition.settings.get();
         settings.root_image = size;
         self.reference.definition.settings.set(settings);
+    }
+}
+
+impl VmHandle<Firewall, Hermit> {
+    /// Select complete startup resource settings for the next normal VM start.
+    /// Invalid settings fail authoring. A running firewall keeps its previous
+    /// selection until the reviewed machine plan stops and starts that VM.
+    pub fn set_firewall_parameters(
+        &self,
+        parameters: FirewallParameters,
+    ) -> Result<(), AuthoringError> {
+        let encoded = airlock_firewall_parameters::encode(parameters).map_err(|_| {
+            AuthoringError::InvalidResources {
+                vm: self.name().to_string(),
+                reason: "unsupported native firewall resource parameters",
+            }
+        })?;
+        self.reference
+            .definition
+            .features
+            .borrow_mut()
+            .insert(airlock_firewall_parameters::FEATURE.into(), encoded);
+        Ok(())
     }
 }
 
@@ -742,12 +769,14 @@ impl Vm {
         name: &str,
         uplink: &VmHandle<R, B>,
     ) -> Result<VmHandle<Firewall, Hermit>, AuthoringError> {
-        Ok(Self::hermit_definition(
+        let vm = Self::hermit_definition(
             Self::firewall(name, uplink)?,
             MiB(256),
             HermitApplication::Firewall,
             None,
-        ))
+        );
+        vm.set_firewall_parameters(FirewallParameters::default())?;
+        Ok(vm)
     }
 
     /// Creates shared configuration without claiming membership in any machine.
@@ -1089,6 +1118,7 @@ impl MachineSnapshot {
                         service_providers: [
                             "airlock-clipboard-authority",
                             "airlock-clipboard-service",
+                            airlock_firewall_parameters::FEATURE,
                         ]
                         .iter()
                         .filter_map(|key| {

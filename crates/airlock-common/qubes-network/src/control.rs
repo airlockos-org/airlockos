@@ -259,7 +259,13 @@ impl Control {
                 // Select only at the complete-dump barrier. Absence before this
                 // point is not a request for defaults. Subsequent live writes
                 // remain ordinary cache data and cannot resize this boot.
-                let selected = match self.cache.read(b"/airlock-firewall-params") {
+                let parameter_key = crate::FIREWALL_PARAMETERS_PATH.as_bytes();
+                proof {
+                    reveal_strlit("/airlock-firewall-params");
+                    assert(vstd::string::is_ascii(crate::FIREWALL_PARAMETERS_PATH));
+                    vstd::string::is_ascii_spec_bytes(crate::FIREWALL_PARAMETERS_PATH);
+                }
+                let selected = match self.cache.read(parameter_key) {
                     Some(bytes) => Some(slice_to_vec(bytes)),
                     None => None,
                 };

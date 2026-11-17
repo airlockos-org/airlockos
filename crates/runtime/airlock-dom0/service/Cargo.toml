@@ -23,6 +23,7 @@ default = ["qubes"]
 qubes = ["dep:airlock-qubes"]
 
 [dependencies]
+airlock-firewall-parameters = { path = "../../../airlock-common/firewall-parameters" }
 airlock-qubes-network = { path = "../../../airlock-common/qubes-network" }
 airlock-deployment-core = { path = "../../../airlock-common/deployment" }
 airlock-machine-planning = { path = "../../../airlock-common/machine-planning", features = ["wire"] }

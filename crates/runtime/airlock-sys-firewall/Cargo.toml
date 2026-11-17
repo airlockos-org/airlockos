@@ -8,6 +8,7 @@ license = "MIT"
 description = "Hermit routed firewall service"
 
 [dependencies]
+serde = { version = "1", default-features = false, features = ["alloc"] }
 airlock-boot-core = { path = "../../airlock-common/boot" }
 airlock-bounded-heap = { path = "../../airlock-common/bounded-heap", features = ["allocator"] }
 airlock-firewall-core = { path = "../../airlock-common/firewall" }
