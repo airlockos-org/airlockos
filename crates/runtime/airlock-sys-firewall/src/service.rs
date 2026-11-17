@@ -18,6 +18,9 @@ use xen_transport::hermit::{
 /// must allow daemon scheduling independently of the maintenance wake interval.
 const CONTROL_TIMEOUT_NS: u64 = 500_000_000;
 
+/// Keep each optional resource record well inside dom0's 64 KiB console tail.
+const MAX_RESOURCE_REPORT_BYTES: usize = 16 * 1024;
+
 /// Shared failures stop forwarding; downstream failures quarantine only their
 /// owner. Uncertain native resources remain charged until VM teardown. No
 /// failure path fabricates a replacement connection or retries ambiguous closes.
@@ -167,6 +170,7 @@ pub fn run(challenge: Challenge, seed: [u8; 32]) -> Result<(), Error> {
     let mut discovery_at = 0;
     let mut announced = false;
     let mut status_at = 0;
+    let mut resources_at = 0;
     let mut previous_status = None;
     loop {
         // Capture the event generation before work to avoid a lost wakeup.
@@ -294,9 +298,16 @@ pub fn run(challenge: Challenge, seed: [u8; 32]) -> Result<(), Error> {
             return Err(Error::State);
         }
         let now = endpoint::now_ns();
-        // Publish transitions immediately; idle service progress has a quieter
-        // heartbeat. The host uses the same interval to bound status freshness.
-        if previous_status != Some(status) || now >= status_at {
+        let resources_due = now >= resources_at;
+        if resources_due {
+            let interval = u64::from(engine.parameters().report_interval_seconds) * 1_000_000_000;
+            resources_at = now.saturating_add(interval);
+            publish_resources(&engine, &boot, now);
+        }
+        // Publish transitions immediately and retain the normal heartbeat.
+        // Follow resource output with fresh lifecycle status so even a one-second
+        // resource interval cannot push the latest status out of dom0's 64 KiB tail.
+        if previous_status != Some(status) || now >= status_at || resources_due {
             let report = airlock_qubes_network::status::Report {
                 boot: boot.clone(),
                 snapshot: status,
@@ -317,6 +328,41 @@ pub fn run(challenge: Challenge, seed: [u8; 32]) -> Result<(), Error> {
                 });
             }
         }
+    }
+}
+
+/// Publish one scheduled observation without changing control/readiness state.
+/// A serialization/size failure skips this optional report and stays rate-limited
+/// by the caller; it never converts resource pressure into a fatal service error.
+fn publish_resources(engine: &Engine, boot: &str, now: u64) {
+    let resources = engine.resource_snapshot();
+    let (requested, peak_requested) = crate::HEAP.usage();
+    let report = airlock_firewall_core::diagnostics::Report {
+        schema: "airlock.firewall.resources.v1",
+        boot,
+        at_ns: now,
+        settings: engine.parameters(),
+        compiled_record_ceiling: airlock_firewall_core::parameters::MAX_RECORDS,
+        compiled_client_record_ceiling: airlock_firewall_core::CLIENT_FLOWS,
+        resources,
+        heap_requested_bytes: requested,
+        heap_peak_requested_bytes: peak_requested,
+        heap_arena_bytes: airlock_firewall_core::parameters::APPLICATION_HEAP_BYTES,
+    };
+    let mut storage = [0; MAX_RESOURCE_REPORT_BYTES];
+    let mut writer = std::io::Cursor::new(storage.as_mut_slice());
+    if serde_json::to_writer(&mut writer, &report).is_err() {
+        log::warn!("operation=resources.publish error=serialization_or_size");
+        return;
+    }
+    let length = writer.position() as usize;
+    let Some(bytes) = storage.get(..length) else {
+        log::warn!("operation=resources.publish error=writer_length");
+        return;
+    };
+    match core::str::from_utf8(bytes) {
+        Ok(json) => println!("AIRLOCK_FIREWALL_RESOURCES {json}"),
+        Err(_) => log::warn!("operation=resources.publish error=encoding"),
     }
 }
 

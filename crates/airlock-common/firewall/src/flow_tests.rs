@@ -2,6 +2,7 @@
 //! library-encoded packets. No native VM or network service is required.
 
 use super::Owner;
+use crate::diagnostics::Meters;
 use crate::{
     SECOND,
     flow::{NewMapping, Table},
@@ -58,7 +59,13 @@ fn create(table: &mut Table, owner: Owner, packet: &Packet<'_>, now: u64) -> u16
         revision: 1,
     };
     table
-        .create(mapping, packet, now, &mut ChaCha20Rng::from_seed([42; 32]))
+        .create(
+            mapping,
+            packet,
+            now,
+            &mut ChaCha20Rng::from_seed([42; 32]),
+            &mut Meters::new(),
+        )
         .unwrap()
 }
 
@@ -112,16 +119,24 @@ fn udp_idle_renewal_and_revocation_have_different_authority() {
     let id = create(&mut table, owner(1), &packet, 0);
     assert!(table.entries[&id].live(299 * SECOND));
     assert!(!table.entries[&id].live(300 * SECOND));
-    table.maintain(301 * SECOND);
+    table.maintain(301 * SECOND, &mut Meters::new());
     assert!(
         table
-            .accept(id, &packet, false, None, 301 * SECOND)
+            .accept(id, &packet, false, None, 301 * SECOND, &mut Meters::new())
             .is_err()
     );
-    assert!(table.accept(id, &packet, true, None, 301 * SECOND).is_ok());
+    assert!(
+        table
+            .accept(id, &packet, true, None, 301 * SECOND, &mut Meters::new())
+            .is_ok()
+    );
     assert!(table.entries[&id].live(600 * SECOND));
-    table.retire(owner(1), 302 * SECOND);
-    assert!(table.accept(id, &packet, true, None, 303 * SECOND).is_err());
+    table.retire(owner(1), 302 * SECOND, &mut Meters::new());
+    assert!(
+        table
+            .accept(id, &packet, true, None, 303 * SECOND, &mut Meters::new())
+            .is_err()
+    );
 }
 
 /// Reclaiming one peer must preserve the socket port owned by another peer.
@@ -140,7 +155,7 @@ fn shared_port_survives_peer_reclamation() {
     );
     let port = table.entries[&a].translated_port;
     let old_wire = table.entries[&a].translated();
-    table.maintain(421 * SECOND);
+    table.maintain(421 * SECOND, &mut Meters::new());
     assert!(!table.entries.contains_key(&a));
     assert!(table.translated_id(old_wire).is_none());
     assert_eq!(table.entries[&b].translated_port, port);
@@ -176,7 +191,13 @@ fn udp_peers_still_consume_individual_quota() {
     };
     assert!(
         table
-            .create(mapping, &packet, 0, &mut ChaCha20Rng::from_seed([42; 32]))
+            .create(
+                mapping,
+                &packet,
+                0,
+                &mut ChaCha20Rng::from_seed([42; 32]),
+                &mut Meters::new()
+            )
             .is_err()
     );
     assert_eq!(table.entries.len(), limit);

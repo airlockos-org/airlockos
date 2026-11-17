@@ -16,7 +16,8 @@ airlock-qubes-network = { path = "../../airlock-common/qubes-network" }
 env_logger = { version = "0.11.11", default-features = false }
 log = "0.4"
 getrandom = "=0.3.4"
-serde_json = { version = "1", default-features = false, features = ["alloc"] }
+# Std's Cursor bounds optional console serialization without growing a String.
+serde_json = { version = "1", default-features = false, features = ["std"] }
 
 [target.'cfg(target_os = "hermit")'.dependencies]
 hermit = { git = "https://github.com/hermit-os/hermit-rs", rev = "e9dc6784ad1a2dc6d18c6819ee51198cab9fb78a", default-features = false, features = ["pvh", "fsgsbase", "kernel-stack"] }

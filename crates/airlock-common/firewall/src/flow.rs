@@ -9,6 +9,7 @@
 //! Hermit application. This module adds only the required outbound mapping and
 //! transport lifecycle; BTreeMap, ChaCha and checksum updates remain library code.
 
+use crate::diagnostics::{Meters, Occupancy, Peaks, Ports, Reclamation};
 use crate::{
     CLIENT_FLOWS, MAX_FLOWS, SECOND,
     engine::Owner,
@@ -361,6 +362,10 @@ pub(crate) struct Table {
     active: usize,
     /// Immutable settings chosen before this table admits its first peer.
     limits: crate::parameters::Limits,
+    /// Boot-wide high-water flow occupancy, retained through reclamation.
+    pub(crate) peaks: Peaks,
+    /// Saturating counters describe actual scheduler and release progress.
+    pub(crate) reclamation: Reclamation,
     /// Cursor bounds maintenance to at most 64 retained records per turn.
     pub(crate) cursor: u16,
 }
@@ -443,6 +448,54 @@ impl Table {
     /// Frozen startup limits carried unchanged through every table operation.
     pub(crate) closed spec fn limits_value(&self) -> crate::parameters::Document { self.limits.value() }
 
+    /// Constant-time global or stable-client credit and stored-record usage.
+    pub(crate) fn occupancy(&self, source: Option<Ip>) -> (usage: Occupancy)
+        requires self.valid(),
+        ensures usage.active_credits <= usage.stored_records <= MAX_FLOWS,
+            usage.inactive_records == usage.stored_records - usage.active_credits,
+            source.is_none() ==> usage.active_credits == self.active && usage.stored_records == self.entries@.len(),
+            source.is_some() ==> usage.stored_records == self.source_peers(source.unwrap()).len()
+                && usage.active_credits == self.active_peers(source.unwrap()).len(),
+    {
+        let (active, stored) = match source {
+            None => (self.active, self.entries.len()),
+            Some(source) => match self.usage.get(&source) {
+                Some(usage) => (usage.active, usage.records),
+                None => (0, 0),
+            },
+        };
+        Occupancy { active_credits: active, stored_records: stored, inactive_records: stored - active }
+    }
+
+    /// Scheduled report-only port counts; packet paths never call this scan.
+    /// At most MAX_FLOWS records are inspected for one of CLIENT_HISTORY sources.
+    pub(crate) fn port_usage(&self, source: Option<Ip>) -> (usage: Ports)
+        requires self.valid(),
+        ensures usage.translation_ports <= self.entries@.len() && usage.udp_sockets <= self.entries@.len(),
+            source.is_none() ==> usage.translation_ports == self.ports@.len() && usage.udp_sockets == self.sockets@.len(),
+            source.is_some() ==> usage.translation_ports == self.source_peers(source.unwrap()).map(|id: u16| self.entries@[id].translated_port).len()
+                && usage.udp_sockets == self.source_peers(source.unwrap()).filter(|id: u16| self.entries@[id].original.proto == 17).map(|id: u16|
+                    Socket { owner: self.entries@[id].owner, source: self.entries@[id].original.src,
+                        port: self.entries@[id].original.sport, external: self.entries@[id].external }).len(),
+    {
+        let Some(source) = source else { return Ports { translation_ports: self.ports.len(), udp_sockets: self.sockets.len() }; };
+        if !self.usage.contains_key(&source) { return Ports { translation_ports: 0, udp_sockets: 0 }; }
+        let keys = crate::library::port_window(&self.entries, 0, MAX_FLOWS);
+        let mut ports = BTreeSet::new();
+        let mut sockets = BTreeSet::new();
+        for id in keys
+            invariant self.valid(), ports@.len() <= self.entries@.len(), sockets@.len() <= self.entries@.len(),
+        {
+            if let Some(flow) = self.entries.get(&id) {
+                if flow.quota == source {
+                    ports.insert(flow.translated_port);
+                    if flow.original.proto == 17 { sockets.insert(flow.socket()); }
+                }
+            }
+        }
+        Ports { translation_ports: ports.len(), udp_sockets: sockets.len() }
+    }
+
     /// Default table used by callers without machine-specific tuning.
     #[cfg(test)]
     pub(crate) fn new() -> (table: Self)
@@ -458,7 +511,8 @@ impl Table {
         proof { crate::library::derived_key_order(); }
         Self { entries: BTreeMap::new(), outbound: BTreeMap::new(), replies: BTreeMap::new(),
             sockets: BTreeMap::new(), ports: BTreeMap::new(), usage: BTreeMap::new(), active: 0,
-            free_ports: crate::library::port_pool(), free_ids: crate::library::port_pool(), limits, cursor: 0 }
+            free_ports: crate::library::port_pool(), free_ids: crate::library::port_pool(), limits, cursor: 0,
+            peaks: Peaks::empty(), reclamation: Reclamation::empty() }
     }
 
     /// Exact original tuple within one admitted native lifetime.
@@ -506,13 +560,13 @@ impl Table {
 
     /// Create only a supported initiating peer, after reserving both credits.
     /// Every rejection leaves records, indices, pools and credits unchanged.
-    pub(crate) fn create(&mut self, mapping: NewMapping, packet: &Packet<'_>, now: u64, random: &mut impl RngCore) -> (result: Result<u16, AdmissionError>)
-        requires old(self).valid(), mapping.owner.valid(), mapping.quota.valid(), mapping.external.valid(), packet.valid(),
+    pub(crate) fn create(&mut self, mapping: NewMapping, packet: &Packet<'_>, now: u64, random: &mut impl RngCore, meters: &mut Meters) -> (result: Result<u16, AdmissionError>)
+        requires old(meters).valid(), old(self).valid(), mapping.owner.valid(), mapping.quota.valid(), mapping.external.valid(), packet.valid(),
             mapping.external.family() == packet.tuple.src.family(), mapping.policy.valid(), mapping.revision > 0,
             packet.tuple.src == mapping.policy.src && packet.tuple.sport == mapping.policy.sport
                 && packet.tuple.dport == mapping.policy.dport && packet.tuple.proto == mapping.policy.proto,
             !old(self).index_value().dom().contains((mapping.owner, packet.tuple)),
-        ensures final(self).limits == old(self).limits, final(self).limits_value() == old(self).limits_value(),
+        ensures final(meters).valid(), final(self).limits == old(self).limits, final(self).limits_value() == old(self).limits_value(),
             final(self).valid(), result.is_err() ==> *final(self) == *old(self),
             result.is_ok() ==> !old(self).value().dom().contains(result.unwrap())
                 && final(self).value().dom().contains(result.unwrap())
@@ -569,17 +623,22 @@ impl Table {
         self.outbound.insert((mapping.owner, packet.tuple), id);
         self.replies.insert(translated, id);
         self.entries.insert(id, flow);
+        self.peaks.observe(self.active, self.entries.len());
+        meters.observe(mapping.quota, now, Occupancy { active_credits: usage.active + 1,
+            stored_records: usage.records + 1, inactive_records: usage.records - usage.active });
         Ok(id)
     }
 
     /// Apply an already checked flow transition's change in active credits.
     /// The caller keeps the same quota/record and permits activation only after
     /// capacity validation. This helper neither changes records nor allocates.
-    fn active_transition(&mut self, source: Ip, was_active: bool, is_active: bool)
-        requires self.usage@.dom().contains(source),
+    fn active_transition(&mut self, source: Ip, was_active: bool, is_active: bool, now: u64, meters: &mut Meters)
+        requires old(meters).valid(), self.usage@.dom().contains(source),
+            self.active <= self.entries@.len(), self.usage@[source].active <= self.usage@[source].records,
+            !was_active && is_active ==> self.active < self.entries@.len() && self.usage@[source].active < self.usage@[source].records,
             was_active && !is_active ==> self.active > 0 && self.usage@[source].active > 0,
             !was_active && is_active ==> self.active < MAX_FLOWS && self.usage@[source].active < CLIENT_FLOWS,
-        ensures final(self).active == old(self).active + (if is_active { 1int } else { 0int }) - (if was_active { 1int } else { 0int }),
+        ensures final(meters).valid(), final(self).active == old(self).active + (if is_active { 1int } else { 0int }) - (if was_active { 1int } else { 0int }),
             final(self).usage@.dom() == old(self).usage@.dom(),
             final(self).usage@[source].active == old(self).usage@[source].active + (if is_active { 1int } else { 0int }) - (if was_active { 1int } else { 0int }),
             final(self).usage@[source].records == old(self).usage@[source].records,
@@ -592,15 +651,19 @@ impl Table {
         if was_active == is_active { return; }
         let Some(usage) = self.usage.get_mut(&source) else { return; };
         if is_active { usage.active += 1; self.active += 1; }
-        else { usage.active -= 1; self.active -= 1; }
+        else { usage.active -= 1; self.active -= 1; self.reclamation.active_returns = self.reclamation.active_returns.saturating_add(1); }
+        let active = usage.active;
+        let stored = usage.records;
+        self.peaks.observe(self.active, self.entries.len());
+        meters.observe(source, now, Occupancy { active_credits: active, stored_records: stored, inactive_records: stored - active });
     }
 
     /// Existing UDP may regain an active credit after idle expiry, but only on
     /// a policy-checked outbound packet. Explicit retirement is never revived.
-    pub(crate) fn accept(&mut self, id: u16, packet: &Packet<'_>, outbound: bool, mac: Option<[u8; 6]>, now: u64) -> (result: Result<(), AdmissionError>)
-        requires old(self).valid(), packet.valid(), old(self).entries@.dom().contains(id),
+    pub(crate) fn accept(&mut self, id: u16, packet: &Packet<'_>, outbound: bool, mac: Option<[u8; 6]>, now: u64, meters: &mut Meters) -> (result: Result<(), AdmissionError>)
+        requires old(meters).valid(), old(self).valid(), packet.valid(), old(self).entries@.dom().contains(id),
             packet.tuple.proto == old(self).entries@[id].original.proto,
-        ensures final(self).limits == old(self).limits, final(self).limits_value() == old(self).limits_value(),
+        ensures final(meters).valid(), final(self).limits == old(self).limits, final(self).limits_value() == old(self).limits_value(),
             final(self).valid(), final(self).entries@.dom() == old(self).entries@.dom(),
             final(self).outbound@ == old(self).outbound@,
             result.is_err() ==> *final(self) == *old(self),
@@ -617,15 +680,15 @@ impl Table {
         if !flow.accept(packet, outbound, now) { return Err(AdmissionError::Transport); }
         if let Some(mac) = mac { flow.mac = mac; }
         let is_active = flow.charged_active;
-        self.active_transition(source, was_active, is_active);
+        self.active_transition(source, was_active, is_active, now, meters);
         Ok(())
     }
 
     /// Recheck all retained peers on policy replacement. Expired/revoked records
     /// keep their indices/ports while losing active credits; no new peer record is needed.
-    pub(crate) fn observe(&mut self, view: &airlock_qubes_network::projection::View, now: u64)
-        requires old(self).valid(), view.valid(),
-        ensures final(self).limits == old(self).limits, final(self).limits_value() == old(self).limits_value(),
+    pub(crate) fn observe(&mut self, view: &airlock_qubes_network::projection::View, now: u64, meters: &mut Meters)
+        requires old(meters).valid(), old(self).valid(), view.valid(),
+        ensures final(meters).valid(), final(self).limits == old(self).limits, final(self).limits_value() == old(self).limits_value(),
             final(self).valid(), final(self).entries@.dom() == old(self).entries@.dom(),
     {
         let keys = crate::library::port_window(&self.entries, 0, MAX_FLOWS);
@@ -645,15 +708,15 @@ impl Table {
                     flow.retire(now);
                 } else { flow.revision = view.generation(); }
                 let is_active = flow.charged_active;
-                self.active_transition(source, was_active, is_active);
+                self.active_transition(source, was_active, is_active, now, meters);
             }
         }
     }
 
     /// Withdraw one exact native lifetime, preserving other clients' active work.
-    pub(crate) fn retire(&mut self, owner: Owner, now: u64)
-        requires old(self).valid(),
-        ensures final(self).limits == old(self).limits, final(self).limits_value() == old(self).limits_value(),
+    pub(crate) fn retire(&mut self, owner: Owner, now: u64, meters: &mut Meters)
+        requires old(meters).valid(), old(self).valid(),
+        ensures final(meters).valid(), final(self).limits == old(self).limits, final(self).limits_value() == old(self).limits_value(),
             final(self).valid(), final(self).value().dom() == old(self).value().dom(),
             forall|id: u16| final(self).value().dom().contains(id) && final(self).value()[id].owner == owner
                 ==> !final(self).value()[id].usable(now),
@@ -675,7 +738,7 @@ impl Table {
                     let source = flow.quota;
                     let was_active = flow.charged_active;
                     flow.retire(now);
-                    self.active_transition(source, was_active, false);
+                    self.active_transition(source, was_active, false, now, meters);
                 }
             }
             index += 1;
@@ -690,9 +753,9 @@ impl Table {
 
     /// Release only after the complete hold-down. Shared UDP ports return to the
     /// free pool only with their last retained peer, never when one peer expires.
-    fn release(&mut self, id: u16, now: u64)
-        requires old(self).valid(), old(self).entries@.dom().contains(id), old(self).entries@[id].release <= now,
-        ensures final(self).limits == old(self).limits, final(self).limits_value() == old(self).limits_value(),
+    fn release(&mut self, id: u16, now: u64, meters: &mut Meters)
+        requires old(meters).valid(), old(self).valid(), old(self).entries@.dom().contains(id), old(self).entries@[id].release <= now,
+        ensures final(meters).valid(), final(self).limits == old(self).limits, final(self).limits_value() == old(self).limits_value(),
             final(self).valid(), final(self).entries@ == old(self).entries@.remove(id),
     {
         let Some(flow) = self.entries.get(&id) else { return; };
@@ -705,7 +768,8 @@ impl Table {
         let was_active = flow.charged_active;
         let Some(references) = self.ports.get(&port).copied() else { return; };
         let Some(usage) = self.usage.get(&source).copied() else { return; };
-        self.active_transition(source, was_active, false);
+        if let Some(flow) = self.entries.get_mut(&id) { flow.charged_active = false; }
+        self.active_transition(source, was_active, false, now, meters);
         self.entries.remove(&id);
         self.outbound.remove(&(owner, original));
         self.replies.remove(&translated);
@@ -713,22 +777,27 @@ impl Table {
         if references == 1 {
             self.ports.remove(&port);
             self.free_ports.insert(port);
+            self.reclamation.ports_released = self.reclamation.ports_released.saturating_add(1);
             if original.proto == 17 { self.sockets.remove(&socket); }
         } else { self.ports.insert(port, references - 1); }
+        self.reclamation.records_released = self.reclamation.records_released.saturating_add(1);
+        self.reclamation.last_release_ns = Some(now);
         if usage.records == 1 { self.usage.remove(&source); }
         else { self.usage.insert(source, Usage { active: usage.active - if was_active { 1 } else { 0 }, records: usage.records - 1 }); }
     }
 
     /// At most 64 records per turn. Inactive credit reclamation and eventual
     /// port release progress independently; neither path steals another's state.
-    pub(crate) fn maintain(&mut self, now: u64)
-        requires old(self).valid(),
-        ensures final(self).limits == old(self).limits, final(self).limits_value() == old(self).limits_value(),
+    pub(crate) fn maintain(&mut self, now: u64, meters: &mut Meters)
+        requires old(meters).valid(), old(self).valid(),
+        ensures final(meters).valid(), final(self).limits == old(self).limits, final(self).limits_value() == old(self).limits_value(),
             final(self).valid(), final(self).value().dom().subset_of(old(self).value().dom()),
             forall|id: u16| old(self).value().dom().contains(id) && !final(self).value().dom().contains(id)
                 ==> old(self).value()[id].release <= now,
     {
         let keys = crate::library::port_window(&self.entries, self.cursor, 64);
+        self.reclamation.turns = self.reclamation.turns.saturating_add(1);
+        self.reclamation.examined = self.reclamation.examined.saturating_add(keys.len() as u64);
         if keys.len() < 64 { self.cursor = 0; }
         else { self.cursor = keys.last().copied().unwrap_or(0).saturating_add(1); }
         for id in keys
@@ -745,8 +814,8 @@ impl Table {
                 }
                 let is_active = flow.charged_active;
                 let release = now >= flow.release;
-                self.active_transition(source, was_active, is_active);
-                if release { self.release(id, now); }
+                self.active_transition(source, was_active, is_active, now, meters);
+                if release { self.release(id, now, meters); }
             }
         }
     }

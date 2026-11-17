@@ -3,6 +3,7 @@
 
 use crate::{
     MAX_CLIENTS, MTU, QUEUE_FRAMES, SECOND,
+    diagnostics::{CLIENT_HISTORY, ClientSample, Meters, Queue, Snapshot},
     dns::Resolver,
     flow::{NewMapping, Table},
     fragment::{self, Emission, History, Layout, Reassembly},
@@ -202,6 +203,8 @@ impl Routed {
 
 /// Per-client queues prevent a single client from taking all output buffers.
 struct Link {
+    /// Stable primary assigned address for diagnostics, shared across both families.
+    quota: Ip,
     /// Actual validated native incarnation associated with both queues.
     owner: Owner,
     /// Complete native assignment retained for source-scoped queue invalidation.
@@ -222,7 +225,7 @@ struct Link {
 impl Link {
     /// Both directions retain the same exact original-owner reservation.
     closed spec fn valid(&self) -> bool {
-        self.owner.valid() && 0 < self.assigned@.len() <= 2
+        self.owner.valid() && self.quota.valid() && self.assigned@.contains(self.quota) && 0 < self.assigned@.len() <= 2
             && (forall|i: int| 0 <= i < self.assigned@.len() ==> self.assigned@[i].valid())
             && (self.fragmented.is_some() ==> self.fragmented.unwrap().packet.valid()
             && self.fragmented.unwrap().packet.layout.is_some() && self.fragmented.unwrap().packet.owner == Some(self.owner))
@@ -265,6 +268,8 @@ struct Neighbor {
 pub struct Engine {
     /// One validated startup selection; live control updates cannot resize it.
     parameters: crate::parameters::Limits,
+    /// Observation counters and bounded history; never consulted for admission.
+    meters: Meters,
     /// Exact native-owner queues, no more than four at once.
     links: Vec<Link>,
     /// Outbound-created NAT mappings with bounded per-client reservations.
@@ -300,7 +305,7 @@ pub struct Engine {
 impl Engine {
     /// Global and reserved queue/connection bounds, independent of input traffic.
     pub closed spec fn valid(&self) -> bool {
-        self.parameters.valid()
+        self.parameters.valid() && self.meters.valid()
             && self.flows.limits_value() == self.parameters.value()
             && self.links@.len() <= MAX_CLIENTS && self.flows.valid() && self.fragments.valid() && self.history.valid() && self.fragment_counter <= 4_294_967_296 && self.dns.valid()
             && self.neighbors@.len() <= 8 && self.internal@.filter(|packet: Routed| packet.layout.is_some()).len() <= 1
@@ -390,7 +395,7 @@ impl Engine {
     {
         let mut random = crate::library::generator(seed);
         let fragment_salt = random.next_u32();
-        Self { parameters, links: Vec::new(), flows: Table::with_parameters(parameters), fragments: Reassembly::new(), history: History::new(),
+        Self { parameters, meters: Meters::new(), links: Vec::new(), flows: Table::with_parameters(parameters), fragments: Reassembly::new(), history: History::new(),
             fragment_counter: 0, fragment_salt, dns: Resolver::new(), neighbors: VecDeque::new(),
             internal: VecDeque::new(), control: VecDeque::new(), cursor: 0, time: 0, lost: false,
             revision: 0, random }
@@ -403,6 +408,76 @@ impl Engine {
     pub fn parameters(&self) -> (parameters: &crate::parameters::Document)
         requires self.valid(), ensures *parameters == self.parameters_value(), parameters.supported(),
     { self.parameters.document() }
+
+    /// Read resource observations without changing counters, quotas or readiness.
+    /// Each of at most CLIENT_HISTORY port summaries inspects at most MAX_FLOWS
+    /// records; only the runtime's configured reporting timer calls this method.
+    pub fn resource_snapshot(&self) -> (snapshot: Snapshot)
+        requires self.valid(),
+        ensures snapshot.current.stored_records == self.connection_count(),
+            snapshot.peaks == self.flows.peaks, snapshot.reclamation == self.flows.reclamation,
+            snapshot.rejections == self.meters.rejections && snapshot.queue_drops == self.meters.queue_drops,
+            snapshot.client_history_evictions == self.meters.history_evictions,
+            snapshot.native_retries == self.meters.native_retries,
+    {
+        let current = self.flows.occupancy(None);
+        let limits = self.parameters.document();
+        let mut clients = [None; CLIENT_HISTORY];
+        let mut index = 0;
+        while index < CLIENT_HISTORY
+            invariant self.valid(), index <= CLIENT_HISTORY,
+            decreases CLIENT_HISTORY - index,
+        {
+            if let Some(client) = self.meters.clients[index] {
+                let occupancy = self.flows.occupancy(Some(client.source));
+                clients[index] = Some(ClientSample { source: client.source, since_ns: client.since_ns,
+                    current: occupancy, peaks: client.peaks, ports: self.flows.port_usage(Some(client.source)),
+                    limit_reached: occupancy.active_credits >= limits.active_per_client || occupancy.stored_records >= limits.retained_per_client,
+                    rejections: client.rejections, queue_drops: client.queue_drops, native_retries: client.native_retries });
+            }
+            index += 1;
+        }
+        Snapshot { current, peaks: self.flows.peaks, ports: self.flows.port_usage(None),
+            global_limit_reached: current.active_credits >= limits.active_global || current.stored_records >= limits.retained_global,
+            rejections: self.meters.rejections, queue_drops: self.meters.queue_drops,
+            native_retries: self.meters.native_retries, reclamation: self.flows.reclamation, clients, client_history_evictions: self.meters.history_evictions }
+    }
+
+    /// Update one source's high-water marks after an actual table transition.
+    fn observe_usage(&mut self, source: Ip)
+        requires old(self).valid(), source.valid(),
+        ensures final(self).valid(), final(self).flows == old(self).flows, final(self).links == old(self).links,
+    { self.meters.observe(source, self.time, self.flows.occupancy(Some(source))); }
+
+    /// Attribute the core's exact admission outcome, including first-flow failure.
+    fn admission_failed(&mut self, source: Ip, failure: crate::AdmissionError)
+        requires old(self).valid(), source.valid(),
+        ensures final(self).valid(), final(self).flows == old(self).flows, final(self).links == old(self).links,
+    {
+        self.meters.rejection(source, self.time, failure);
+        self.observe_usage(source);
+    }
+
+    /// Attribute queue exhaustion through the original owner, never packet IPs.
+    fn queue_drop(&mut self, owner: Option<Owner>, queue: Queue)
+        requires old(self).valid(),
+        ensures final(self).valid(), final(self).flows == old(self).flows, final(self).links == old(self).links,
+    {
+        let source = self.diagnostic_source(owner);
+        self.meters.queue_drop(source, self.time, queue);
+        if let Some(source) = source { self.observe_usage(source); }
+    }
+
+    /// Resolve only an original native owner's assigned primary accounting key.
+    fn diagnostic_source(&self, owner: Option<Owner>) -> (source: Option<Ip>)
+        requires self.valid(),
+        ensures source.is_some() ==> source.unwrap().valid(),
+    {
+        match owner {
+            Some(owner) => match self.link_index(owner) { Some(index) => Some(self.links[index].quota), None => None },
+            None => None,
+        }
+    }
 
     /// Allocate a boot-unique fragment ID before source NAT merges clients into
     /// one upstream address. Exhaustion stops fragmented output rather than reuse.
@@ -457,10 +532,11 @@ impl Engine {
             if self.links[index].assigned.as_slice() != binding.assigned().all() {
                 // A fresh native barrier may observe reassigned addresses on
                 // the same handle. Never deliver the former owner's flows to it.
-                self.flows.retire(owner, self.time);
+                self.flows.retire(owner, self.time, &mut self.meters);
                 self.fragments.expire(Some(owner), self.time);
                 self.links[index].incoming.clear(); self.links[index].outgoing.clear(); self.links[index].fragmented = None;
                 self.links[index].assigned = slice_to_vec(binding.assigned().all());
+                self.links[index].quota = binding.assigned().primary();
                 crate::library::retain_deque(&mut self.control, |output: &Output| -> (keep: bool)
                     ensures keep == (output.owner != Some(owner)),
                 { output.owner != Some(owner) });
@@ -469,7 +545,7 @@ impl Engine {
         }
         if self.links.len() == MAX_CLIENTS { return false; }
         let ghost index = self.links@.len();
-        self.links.push(Link { owner, assigned: slice_to_vec(binding.assigned().all()), incoming: VecDeque::new(), outgoing: VecDeque::new(), fragmented: None, fragment_turn: false, response_at: 0 });
+        self.links.push(Link { quota: binding.assigned().primary(), owner, assigned: slice_to_vec(binding.assigned().all()), incoming: VecDeque::new(), outgoing: VecDeque::new(), fragmented: None, fragment_turn: false, response_at: 0 });
         proof { assert(self.links@[index as int].owner.labels() == binding.labels()); }
         true
     }
@@ -487,7 +563,7 @@ impl Engine {
         crate::library::retain_deque(&mut self.neighbors, |entry: &Neighbor| -> (keep: bool)
             ensures keep == (entry.owner != Some(owner)),
         { entry.owner != Some(owner) });
-        self.flows.retire(owner, now);
+        self.flows.retire(owner, now, &mut self.meters);
         self.fragments.expire(Some(owner), now);
     }
 
@@ -507,7 +583,7 @@ impl Engine {
         self.time = now;
         if matches!(view.state(), airlock_qubes_network::projection::Phase::Lost) { self.lost = true; return false; }
         if self.revision != view.generation() {
-            self.flows.observe(view, now);
+            self.flows.observe(view, now, &mut self.meters);
             let shared = !view.network_unchanged(self.revision);
             if shared {
                 self.internal.clear(); self.control.clear(); self.neighbors.clear(); self.fragments.clear(); self.history.clear();
@@ -545,7 +621,7 @@ impl Engine {
             && answers.unwrap().revision_value() == view.revision() && answers.unwrap().unexpired(now),
     {
         if !self.observe(view, now) { return None; }
-        self.flows.maintain(now);
+        self.flows.maintain(now, &mut self.meters);
         self.fragments.expire(None, now);
         let (packet, answer) = self.dns.tick(view, now, &mut self.random);
         if let Some(bytes) = packet { self.route(None, view.generation(), bytes, now); }
@@ -615,14 +691,17 @@ impl Engine {
         let Some(external) = policy::external(config, packet.tuple.src.version()) else { return; };
         let quota = binding.assigned().primary();
         let flow_id = match self.flows.find(owner, packet.tuple) {
-            Some(flow_id) => Some(flow_id),
-            None => self.flows.create(NewMapping { owner, quota, policy: policy_tuple, external, mac, revision: view.generation() }, &packet, now, &mut self.random).ok(),
+            Some(flow_id) => flow_id,
+            None => match self.flows.create(NewMapping { owner, quota, policy: policy_tuple, external, mac, revision: view.generation() }, &packet, now, &mut self.random, &mut self.meters) {
+                Ok(flow_id) => { self.observe_usage(quota); flow_id },
+                Err(failure) => { self.admission_failed(quota, failure); return; },
+            },
         };
-        let Some(flow_id) = flow_id else { return; };
         let Some(flow) = self.flows.entries.get(&flow_id) else { return; };
         if flow.policy != policy_tuple || flow.external != external || flow.revision != view.generation() { return; }
         let translated = flow.translated();
-        if self.flows.accept(flow_id, &packet, true, Some(mac), now).is_err() { return; }
+        if let Err(failure) = self.flows.accept(flow_id, &packet, true, Some(mac), now, &mut self.meters) { self.admission_failed(quota, failure); return; }
+        self.observe_usage(quota);
         if let Some(fragment) = &mut layout {
             let Some(id) = self.fragment_id() else { return; };
             self.history.record(Emission { id, original: fragment.id, flow_id, quota, source: translated.src,
@@ -684,7 +763,8 @@ impl Engine {
             Tuple { src: flow.original.dst, dst: flow.original.src, sport: flow.original.sport, dport: 0, proto: flow.original.proto }
         } else { Tuple { src: flow.original.dst, dst: flow.original.src,
             sport: flow.original.dport, dport: flow.original.sport, proto: flow.original.proto } };
-        if self.flows.accept(flow_id, &packet, false, None, now).is_err() { return; }
+        if let Err(failure) = self.flows.accept(flow_id, &packet, false, None, now, &mut self.meters) { self.admission_failed(quota, failure); return; }
+        self.observe_usage(quota);
         if let Some(fragment) = layout {
             self.history.record(Emission { id: fragment.id, original: fragment.id, flow_id, quota, source: tuple.src,
                 destination: tuple.dst, protocol: fragment.protocol, client: Some(owner),
@@ -807,12 +887,16 @@ impl Engine {
         ensures final(self).valid(),
     {
         if self.lost { return; }
+        let source = self.diagnostic_source(output.owner);
+        self.meters.retry(source, self.time);
+        if let Some(source) = source { self.observe_usage(source); }
         let queue = match output.target {
             Target::Client(owner) => match self.link_index(owner) { Some(index) => Some(&mut self.links[index].incoming), None => None },
             Target::Upstream => Some(&mut self.control),
         };
         let Some(queue) = queue else { return; };
         if queue.len() < QUEUE_FRAMES { queue.push_back(output); }
+        else { self.queue_drop(output.owner, Queue::Retry); }
     }
 
     /// Ordinary internal/client traffic retains the existing MTU-sized path.
@@ -845,6 +929,11 @@ impl Engine {
                 if layout.is_some() { queue@.lemma_all_neg_filter_empty(|packet: Routed| packet.layout.is_some()); }
             }
             queue.push_back(Routed { owner, revision, bytes, layout, cursor: 0, destination, deadline: now.saturating_add(2 * SECOND) });
+        } else {
+            let kind = if queue.len() >= QUEUE_FRAMES {
+                if owner.is_some() { Queue::Upstream } else { Queue::Internal }
+            } else { Queue::Fragment };
+            self.queue_drop(owner, kind);
         }
     }
 
@@ -859,7 +948,7 @@ impl Engine {
             || layout.previous >= layout.prefix || layout.prefix >= bytes.len()
                 || layout.chunk > MTU - layout.prefix - 8 || layout.chunk % 8 != 0 { return; }
         let Some(index) = self.link_index(owner) else { return; };
-        if self.links[index].fragmented.is_some() { return; }
+        if self.links[index].fragmented.is_some() { self.queue_drop(Some(owner), Queue::Fragment); return; }
         let Some(header) = codec::datagram(&bytes) else { return; };
         self.links[index].fragmented = Some(Delivery { mac, packet: Routed { owner: Some(owner), revision,
             destination: header.tuple.dst, bytes, layout: Some(layout), cursor: 0, deadline: now.saturating_add(2 * SECOND) } });
@@ -883,6 +972,7 @@ impl Engine {
         let Some(index) = self.link_index(owner) else { return; };
         let link = &mut self.links[index];
         if link.incoming.len() < QUEUE_FRAMES { link.incoming.push_back(Output { target: Target::Client(owner), owner: Some(owner), revision, bytes, deadline: now.saturating_add(2 * SECOND) }); }
+        else { self.queue_drop(Some(owner), Queue::Downstream); }
     }
 
     /// Admit at most ten local router replies per second per original client.
@@ -956,7 +1046,8 @@ impl Engine {
                     entry.mac = Some(fields.source_mac); entry.expires = now.saturating_add(30 * SECOND);
                 }
             }
-        } else if fields.operation == 1 && self.control.len() < QUEUE_FRAMES {
+        } else if fields.operation == 1 {
+            if self.control.len() >= QUEUE_FRAMES { self.queue_drop(None, Queue::Internal); return; }
             let Some(bytes) = arp(2, *config.mac().bytes(), local, fields.source_mac, fields.source) else { return; };
             let Some(bytes) = wire::frame(*config.mac().bytes(), fields.source_mac, 0x0806, &bytes) else { return; };
             self.control.push_back(Output { target: Target::Upstream, owner: None, revision: view.generation(), bytes, deadline: now.saturating_add(SECOND) });
@@ -1015,8 +1106,8 @@ impl Engine {
             }
         } else if message.kind == 135 && message.target == local
             && (message.destination == local || wire::solicited_for(message.destination, local))
-            && (frame.destination == *config.mac().bytes() || wire::solicited_mac(frame.destination, local))
-            && self.control.len() < QUEUE_FRAMES {
+            && (frame.destination == *config.mac().bytes() || wire::solicited_mac(frame.destination, local)) {
+            if self.control.len() >= QUEUE_FRAMES { self.queue_drop(None, Queue::Internal); return true; }
             let Some(bytes) = wire::advertise(*config.mac().bytes(), frame.source, local, message.source, false) else { return true; };
             self.control.push_back(Output { target: Target::Upstream, owner: None, revision: view.generation(), bytes, deadline: now.saturating_add(SECOND) });
         }

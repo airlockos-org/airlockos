@@ -32,6 +32,7 @@
 
 extern crate alloc;
 
+pub mod diagnostics;
 mod dns;
 mod engine;
 mod flow;
