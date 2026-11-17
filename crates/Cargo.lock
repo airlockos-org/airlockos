@@ -223,6 +223,8 @@ dependencies = [
  "internet-checksum",
  "rand_chacha",
  "rand_core",
+ "serde",
+ "serde_json",
  "smoltcp",
  "vstd",
 ]

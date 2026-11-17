@@ -50,6 +50,11 @@ pub enum Error {
     Discovery,
     /// The core rejected a clock/control transition or ownership reservation.
     State,
+    /// A present startup tuning document was malformed or outside compiled bounds.
+    Parameters(
+        /// Fixed failure category, without echoing the received document.
+        airlock_firewall_core::parameters::DecodeError,
+    ),
 }
 
 impl From<airlock_hermit_control::xen::Error> for Error {
@@ -156,8 +161,9 @@ pub fn run(challenge: Challenge, seed: [u8; 32]) -> Result<(), Error> {
         operation: "watch_clients",
         source,
     })?;
+    let parameters = startup_parameters(&mut control)?;
     let mut clients: Vec<Client> = Vec::new();
-    let mut engine = Engine::new(seed);
+    let mut engine = Engine::with_parameters(seed, parameters);
     let mut discovery_at = 0;
     let mut announced = false;
     let mut status_at = 0;
@@ -309,6 +315,38 @@ pub fn run(challenge: Challenge, seed: [u8; 32]) -> Result<(), Error> {
                     operation: "wait_for_event",
                     source,
                 });
+            }
+        }
+    }
+}
+
+/// Select once after the complete initial QubesDB dump and boot notice ACK.
+/// No client admission or packet processing occurs during this bounded wait.
+/// Subsequent control updates cannot replace the selected initial document.
+fn startup_parameters(
+    control: &mut Session,
+) -> Result<airlock_firewall_core::parameters::Limits, Error> {
+    let deadline = endpoint::now_ns().saturating_add(10_000_000_000);
+    loop {
+        let observed = endpoint::generation();
+        let now = endpoint::now_ns();
+        if now >= deadline {
+            return Err(Error::Control(airlock_hermit_control::xen::Error::Protocol));
+        }
+
+        let event = control.poll()?;
+        if let Some(document) = control.firewall_parameters() {
+            return airlock_firewall_core::parameters::decode(document).map_err(Error::Parameters);
+        }
+        if matches!(event, Event::Idle) {
+            match endpoint::wait(observed, deadline.min(now.saturating_add(1_000_000))) {
+                Ok(()) | Err(xen_transport::Error::Timeout) => (),
+                Err(source) => {
+                    return Err(Error::Transport {
+                        operation: "wait_parameters",
+                        source,
+                    });
+                }
             }
         }
     }

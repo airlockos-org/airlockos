@@ -212,6 +212,13 @@ impl Session {
         self.control.projection()
     }
 
+    /// Borrow the frozen initial tuning document only after startup completes.
+    /// Outer absence means not ready; inner absence selects application defaults.
+    /// This read supplies no interface or forwarding authority.
+    pub fn firewall_parameters(&self) -> Option<Option<&[u8]>> {
+        self.control.firewall_parameters()
+    }
+
     /// Begin admission after the actual connected interface's toolstack
     /// assignment was observed. The pump must be at a request boundary.
     /// Native driver domains use Netback::attach so ordinary libxl teardown

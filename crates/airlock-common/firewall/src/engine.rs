@@ -263,6 +263,8 @@ struct Neighbor {
 
 /// Complete bounded firewall state, without VM resources or ambient clocks.
 pub struct Engine {
+    /// One validated startup selection; live control updates cannot resize it.
+    parameters: crate::parameters::Limits,
     /// Exact native-owner queues, no more than four at once.
     links: Vec<Link>,
     /// Outbound-created NAT mappings with bounded per-client reservations.
@@ -298,7 +300,8 @@ pub struct Engine {
 impl Engine {
     /// Global and reserved queue/connection bounds, independent of input traffic.
     pub closed spec fn valid(&self) -> bool {
-        self.links@.len() <= MAX_CLIENTS && self.flows.valid() && self.fragments.valid() && self.history.valid() && self.fragment_counter <= 4_294_967_296 && self.dns.valid()
+        self.parameters.valid()
+            && self.links@.len() <= MAX_CLIENTS && self.flows.valid() && self.fragments.valid() && self.history.valid() && self.fragment_counter <= 4_294_967_296 && self.dns.valid()
             && self.neighbors@.len() <= 8 && self.internal@.filter(|packet: Routed| packet.layout.is_some()).len() <= 1
             && self.internal@.len() <= QUEUE_FRAMES && self.control@.len() <= QUEUE_FRAMES
             && (forall|i: int| 0 <= i < self.links@.len() ==> self.links@[i].valid())
@@ -373,13 +376,32 @@ impl Engine {
         ensures engine.valid(), !engine.stopped(), engine.interface_count() == 0,
             engine.connection_count() == 0, engine.clock() == 0,
     {
+        Self::with_parameters(seed, crate::parameters::Limits::defaults())
+    }
+
+    /// Start a fresh engine with one complete validated parameter selection.
+    /// Parameters carry resource limits only, never interface or policy authority.
+    pub fn with_parameters(seed: [u8; 32], parameters: crate::parameters::Limits) -> (engine: Self)
+        requires parameters.valid(),
+        ensures engine.valid(), !engine.stopped(), engine.interface_count() == 0,
+            engine.connection_count() == 0, engine.clock() == 0,
+            engine.parameters_value() == parameters.value(),
+    {
         let mut random = crate::library::generator(seed);
         let fragment_salt = random.next_u32();
-        Self { links: Vec::new(), flows: Table::new(), fragments: Reassembly::new(), history: History::new(),
+        Self { parameters, links: Vec::new(), flows: Table::new(), fragments: Reassembly::new(), history: History::new(),
             fragment_counter: 0, fragment_salt, dns: Resolver::new(), neighbors: VecDeque::new(),
             internal: VecDeque::new(), control: VecDeque::new(), cursor: 0, time: 0, lost: false,
             revision: 0, random }
     }
+
+    /// Exact immutable startup document, independent of current network policy.
+    pub closed spec fn parameters_value(&self) -> crate::parameters::Document { self.parameters.value() }
+
+    /// Borrow effective resource settings for bounded diagnostic reporting.
+    pub fn parameters(&self) -> (parameters: &crate::parameters::Document)
+        requires self.valid(), ensures *parameters == self.parameters_value(), parameters.supported(),
+    { self.parameters.document() }
 
     /// Allocate a boot-unique fragment ID before source NAT merges clients into
     /// one upstream address. Exhaustion stops fragmented output rather than reuse.

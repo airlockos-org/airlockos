@@ -77,6 +77,9 @@ pub struct Control {
     view: View,
     /// Current-boot host policy-refresh handoff or terminal loss.
     startup: Startup,
+    /// Initial dump selection: outer None means incomplete, inner None means absent.
+    /// This copy is immutable after the dump barrier, even if the live key changes.
+    initial_parameters: Option<Option<Vec<u8>>>,
 }
 
 /// An absent counter starts at one; a present canonical counter must not wrap.
@@ -119,6 +122,8 @@ impl Control {
     /// Independent invariants remain available during a composed transition.
     pub closed spec fn parts_valid(&self) -> bool {
         self.native.valid() && self.cache.valid() && self.view.valid()
+            && (self.initial_parameters is Some && self.initial_parameters.unwrap() is Some
+                ==> self.initial_parameters.unwrap().unwrap()@.len() <= airlock_qubesdb::wire::MAX_VALUE)
             && match self.startup {
                 Startup::Waiting(challenge) => challenge_bytes(challenge.value()),
                 Startup::Announcing(serial) => serial > 0,
@@ -130,12 +135,12 @@ impl Control {
     pub closed spec fn valid(&self) -> bool {
         self.parts_valid() && match self.startup {
             Startup::Waiting(_) => self.native.phase() == Phase::Synchronizing
-                && self.view.phase() == crate::projection::Phase::Synchronizing,
+                && self.view.phase() == crate::projection::Phase::Synchronizing && self.initial_parameters is None,
             Startup::Announcing(serial) => self.native.phase() == Phase::Ready
                 && self.native.request().is_some() && self.native.request().unwrap().0 == serial
-                && self.view.phase() == crate::projection::Phase::Synchronized,
+                && self.view.phase() == crate::projection::Phase::Synchronized && self.initial_parameters is Some,
             Startup::Ready => self.native.phase() == Phase::Ready
-                && self.view.phase() == crate::projection::Phase::Synchronized,
+                && self.view.phase() == crate::projection::Phase::Synchronized && self.initial_parameters is Some,
             Startup::Lost => self.native.phase() == Phase::Failed
                 && self.view.phase() == crate::projection::Phase::Lost,
         }
@@ -171,14 +176,15 @@ impl Control {
             control.view().phase() == crate::projection::Phase::Synchronizing,
     {
         Self { native: Client::synchronizing_at(now), cache: Cache::empty(),
-            view: View::synchronizing(), startup: Startup::Waiting(challenge) }
+            view: View::synchronizing(), startup: Startup::Waiting(challenge), initial_parameters: None }
     }
 
     /// Terminate native control and revoke all network publication gates first.
     /// Retained bytes remain bounded diagnostics and cannot be replayed.
     pub fn disconnect(&mut self)
         requires old(self).parts_valid(),
-        ensures final(self).valid(), final(self).startup() is Lost,
+        ensures (old(self).initial_parameters is Some ==> final(self).initial_parameters == old(self).initial_parameters),
+            final(self).valid(), final(self).startup() is Lost,
             final(self).view().phase() == crate::projection::Phase::Lost,
     {
         self.native.disconnect();
@@ -190,7 +196,8 @@ impl Control {
     /// Any failure revokes the network projection before returning to the owner.
     pub fn tick(&mut self, now: u64) -> (live: bool)
         requires old(self).valid(),
-        ensures final(self).valid(), !live ==> final(self).startup() is Lost,
+        ensures (old(self).initial_parameters is Some ==> final(self).initial_parameters == old(self).initial_parameters),
+            final(self).valid(), !live ==> final(self).startup() is Lost,
             live ==> final(self).view().phase() == old(self).view().phase()
                 && final(self).view().revision() >= old(self).view().revision() && final(self).startup() == old(self).startup(),
     {
@@ -202,7 +209,8 @@ impl Control {
     /// every network gate rather than overwriting unconsumed control data.
     pub fn deliver(&mut self, bytes: &[u8]) -> (accepted: bool)
         requires old(self).valid(),
-        ensures final(self).valid(), !accepted ==> final(self).startup() is Lost,
+        ensures (old(self).initial_parameters is Some ==> final(self).initial_parameters == old(self).initial_parameters),
+            final(self).valid(), !accepted ==> final(self).startup() is Lost,
     {
         if !self.native.deliver(bytes) { self.disconnect(); return false; }
         true
@@ -218,7 +226,8 @@ impl Control {
     /// response or permission to commit a boot notice/handled counter locally.
     pub fn published(&mut self, count: usize) -> (accepted: bool)
         requires old(self).valid(),
-        ensures final(self).valid(), !accepted ==> final(self).startup() is Lost,
+        ensures (old(self).initial_parameters is Some ==> final(self).initial_parameters == old(self).initial_parameters),
+            final(self).valid(), !accepted ==> final(self).startup() is Lost,
     {
         if !self.native.published(count) { self.disconnect(); return false; }
         true
@@ -229,7 +238,8 @@ impl Control {
     /// the projection alone decides when a complete policy can become usable.
     pub fn step(&mut self) -> (step: Step)
         requires old(self).valid(),
-        ensures final(self).valid(), step is Failed ==> final(self).startup() is Lost,
+        ensures (old(self).initial_parameters is Some ==> final(self).initial_parameters == old(self).initial_parameters),
+            final(self).valid(), step is Failed ==> final(self).startup() is Lost,
             old(self).startup() is Lost ==> step is Failed,
             step is Synchronized ==> final(self).startup() is Ready,
             old(self).completing_dump() ==> final(self).startup() is Announcing,
@@ -246,6 +256,14 @@ impl Control {
             }
             DatabaseStep::Synchronized => {
                 if !self.view.synchronized(&self.cache) { self.disconnect(); return Step::Failed; }
+                // Select only at the complete-dump barrier. Absence before this
+                // point is not a request for defaults. Subsequent live writes
+                // remain ordinary cache data and cannot resize this boot.
+                let selected = match self.cache.read(b"/airlock-firewall-params") {
+                    Some(bytes) => Some(slice_to_vec(bytes)),
+                    None => None,
+                };
+                self.initial_parameters = Some(selected);
                 // An initial dump may retain an old root during an unfinished
                 // rewrite. Ask the existing host writer for fresh completions.
                 let challenge = match &self.startup {
@@ -309,7 +327,8 @@ impl Control {
     /// is forbidden by the upstream daemon and is never used as a barrier.
     pub fn barrier(&mut self, root: &[u8]) -> (serial: Option<u32>)
         requires old(self).valid(), root@.len() < 64,
-        ensures final(self).valid(), serial.is_some() == old(self).can_barrier(root@),
+        ensures (old(self).initial_parameters is Some ==> final(self).initial_parameters == old(self).initial_parameters),
+            final(self).valid(), serial.is_some() == old(self).can_barrier(root@),
             serial.is_some() ==> serial.unwrap() > 0 && final(self).view() == old(self).view(),
     {
         if !matches!(self.startup, Startup::Ready) || !self.native.between_records() || !self.native.available() { return None; }
@@ -349,7 +368,8 @@ impl Control {
     /// bypassing the source's original ordered native completion observation.
     pub fn resolve(&mut self, answers: crate::resolution::Resolved, now: u64) -> (accepted: bool)
         requires old(self).valid(), answers.valid(),
-        ensures final(self).valid(),
+        ensures (old(self).initial_parameters is Some ==> final(self).initial_parameters == old(self).initial_parameters),
+            final(self).valid(),
             accepted ==> final(self).view().resolved_for(answers.source_value(), answers)
                 && final(self).view().revision() == old(self).view().revision() + 1,
             !accepted ==> final(self).view() == old(self).view() || final(self).startup() is Lost,
@@ -380,6 +400,26 @@ impl Control {
     pub fn projection(&self) -> (view: &View)
         requires self.valid(), ensures *view == self.view(), view.valid(),
     { &self.view }
+
+    /// Frozen initial tuning document after the complete dump and boot notice ACK.
+    /// Outer None means startup is incomplete/lost; Some(None) means genuine
+    /// absence in the initial dump. Live key updates cannot change these bytes.
+    pub fn firewall_parameters(&self) -> (parameters: Option<Option<&[u8]>>)
+        requires self.valid(),
+        ensures parameters.is_some() == (self.startup() is Ready),
+            parameters.is_some() ==> match (parameters.unwrap(), self.initial_parameters.unwrap()) {
+                (Some(bytes), Some(selected)) => bytes@ == selected@,
+                (None, None) => true,
+                _ => false,
+            },
+    {
+        if !matches!(self.startup, Startup::Ready) { return None; }
+        match &self.initial_parameters {
+            Some(Some(bytes)) => Some(Some(bytes.as_slice())),
+            Some(None) => Some(None),
+            None => None,
+        }
+    }
 }
 
 }
