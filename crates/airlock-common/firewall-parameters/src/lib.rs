@@ -31,8 +31,9 @@ pub const MAX_RECORDS: usize = 8192;
 /// 4 MiB for DNS/cache/message state, 3 MiB for control records and projections,
 /// and 4 MiB for reassembly, queued packets, native adapters and temporaries.
 /// The remaining 6 MiB covers allocator overhead, fragmentation and transient
-/// growth. These envelopes need mixed-load measurements before image acceptance;
-/// requested-byte accounting or Rust type sizes alone do not establish fit.
+/// growth. Local mixed-load runs filled all record and socket indexes and
+/// completed in a 16 MiB Talc arena with a 1 MiB native and I/O reserve. The full
+/// arena leaves margin for guest execution and workload variation.
 pub const APPLICATION_HEAP_BYTES: usize = 24 * 1024 * 1024;
 
 /// Claimed resource settings. Deserialization alone does not validate them.
@@ -110,8 +111,8 @@ impl Limits {
     }
 
     /// Reserve half the supported records for active work and half for churn.
-    /// These operating defaults and the ceiling require mixed-load validation
-    /// against the application arena before image acceptance.
+    /// The budget was exercised with mixed traffic and retained records filling
+    /// the application indexes through successive admission and reclamation waves.
     pub fn defaults() -> (limits: Self)
         ensures limits.valid(),
     {

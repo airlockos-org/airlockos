@@ -81,6 +81,7 @@ pub(crate) open spec fn tcp_admissible(state: State, tcp: Tcp, outbound: bool) -
 
 /// One peer authorization, including the pre-DNAT tuple for client replies.
 /// UDP peers from one socket share a translated port, never reply authority.
+#[derive(Clone, Copy)]
 pub(crate) struct Flow {
     /// Actual native lifetime copied from the admitted binding.
     pub(crate) owner: Owner,
@@ -173,6 +174,25 @@ impl Flow {
     {
         if !matches!(self.state, State::Retired) {
             self.state = State::Retired; self.charged_active = false; self.release = self.release.max(now.saturating_add(HOLD));
+        }
+    }
+
+    /// Return the active credit on expiry without shortening the reservation.
+    fn expire(&mut self, now: u64)
+        requires old(self).valid(),
+        ensures final(self).valid(),
+            final(self).charged_active ==> old(self).charged_active,
+            final(self).release >= old(self).release,
+            final(self).quota == old(self).quota,
+            final(self).owner == old(self).owner && final(self).original == old(self).original,
+            final(self).external == old(self).external && final(self).translated_port == old(self).translated_port,
+            final(self).wire_tuple() == old(self).wire_tuple(),
+    {
+        if !self.live(now) {
+            self.charged_active = false;
+            if self.original.proto != 17 {
+                self.retire(now);
+            }
         }
     }
 
@@ -331,10 +351,14 @@ pub enum AdmissionError {
 }
 
 impl Flow {
+    /// Exact index key for a peer's source socket.
+    pub(crate) open spec fn socket_key(&self) -> Socket {
+        Socket { owner: self.owner, source: self.original.src, port: self.original.sport, external: self.external }
+    }
+
     /// UDP socket identity whose sharing never changes exact-peer reply lookup.
     pub(crate) fn socket(&self) -> (socket: Socket)
-        ensures socket.owner == self.owner && socket.source == self.original.src
-            && socket.port == self.original.sport && socket.external == self.external,
+        ensures socket == self.socket_key(),
     { Socket { owner: self.owner, source: self.original.src, port: self.original.sport, external: self.external } }
 }
 
@@ -424,6 +448,22 @@ impl Table {
                 && self.usage@[source].records <= self.limits.value().retained_per_client <= crate::CLIENT_FLOWS)
     }
 
+    /// Records reserving the translated port, including hold-down records.
+    pub(crate) open spec fn port_peers(&self, port: u16) -> Set<u16> {
+        self.value().dom().filter(|id: u16| self.value()[id].translated_port == port)
+    }
+
+    /// Exact forward and reverse correspondence for one UDP socket binding.
+    pub(crate) open spec fn socket_index_valid(&self) -> bool {
+        (forall|socket: Socket| self.sockets@.dom().contains(socket) ==>
+            exists|id: u16| self.value().dom().contains(id) && self.value()[id].original.proto == 17
+                && self.value()[id].socket_key() == socket
+                && self.value()[id].translated_port == self.sockets@[socket])
+        && (forall|id: u16| self.value().dom().contains(id) && self.value()[id].original.proto == 17 ==>
+            self.sockets@.dom().contains(self.value()[id].socket_key())
+                && self.sockets@[self.value()[id].socket_key()] == self.value()[id].translated_port)
+    }
+
     /// Free pools complement owned records; shared-port references stay exact.
     pub(crate) open spec fn allocation_valid(&self) -> bool {
         (forall|id: u16| #[trigger] self.free_ids@.contains(id)
@@ -434,26 +474,24 @@ impl Table {
                 self.ports@.dom().contains(self.entries@[id].translated_port))
             && (forall|port: u16| self.ports@.dom().contains(port) ==> self.ports@[port] > 0
                 && self.ports@[port] <= self.entries@.len()
-                && self.ports@[port] == self.entries@.dom().filter(|id: u16| self.entries@[id].translated_port == port).len())
-            && (forall|socket: Socket| self.sockets@.dom().contains(socket) ==>
-                exists|id: u16| self.entries@.dom().contains(id) && self.entries@[id].original.proto == 17
-                    && socket == (Socket { owner: self.entries@[id].owner, source: self.entries@[id].original.src,
-                        port: self.entries@[id].original.sport, external: self.entries@[id].external })
-                    && self.sockets@[socket] == self.entries@[id].translated_port)
-            && (forall|id: u16| self.entries@.dom().contains(id) && self.entries@[id].original.proto == 17 ==>
-                self.sockets@.dom().contains(Socket { owner: self.entries@[id].owner, source: self.entries@[id].original.src,
-                    port: self.entries@[id].original.sport, external: self.entries@[id].external })
-                && self.sockets@[Socket { owner: self.entries@[id].owner, source: self.entries@[id].original.src,
-                    port: self.entries@[id].original.sport, external: self.entries@[id].external }] == self.entries@[id].translated_port)
+                && self.ports@[port] == self.port_peers(port).len())
+            && self.socket_index_valid()
     }
 
     /// Both admission and reclamation preserve these production index invariants.
-    pub(crate) open spec fn valid(&self) -> bool {
+    pub(crate) closed spec fn valid(&self) -> bool {
         self.mappings_valid() && self.accounting_valid() && self.allocation_valid()
     }
 
     /// Stored records used by the routing/related-error contracts.
     pub(crate) open spec fn value(&self) -> Map<u16, Flow> { self.entries@ }
+
+    /// Look up a stored flow through the table invariant.
+    pub(crate) fn get(&self, id: u16) -> (flow: Option<&Flow>)
+        requires self.valid(),
+        ensures flow.is_some() == self.value().dom().contains(id),
+            flow.is_some() ==> id >= FIRST && *flow.unwrap() == self.value()[id] && flow.unwrap().valid(),
+    { self.entries.get(&id) }
 
     /// Original tuple index, without exposing mutable lookup authority.
     pub(crate) open spec fn index_value(&self) -> Map<(Owner, Tuple), u16> { self.outbound@ }
@@ -486,31 +524,121 @@ impl Table {
         Occupancy { active_credits: active, stored_records: stored, inactive_records: stored - active }
     }
 
+    /// Distinct ports held by the selected records.
+    pub(crate) open spec fn ports_of(&self, ids: Set<u16>) -> Set<u16> {
+        ids.map(|id: u16| self.value()[id].translated_port)
+    }
+
+    /// Distinct UDP sockets held by the selected records.
+    pub(crate) open spec fn sockets_of(&self, ids: Set<u16>) -> Set<Socket> {
+        ids.filter(|id: u16| self.value()[id].original.proto == 17)
+            .map(|id: u16| self.value()[id].socket_key())
+    }
+
+    /// The image of any record subset holds no more ports or sockets than records.
+    proof fn port_counts_bounded(&self, ids: Set<u16>)
+        ensures self.ports_of(ids).len() <= ids.len(), self.sockets_of(ids).len() <= ids.len(),
+    {
+        vstd::set_lib::lemma_map_size_bound(ids, self.ports_of(ids), |id: u16| self.value()[id].translated_port);
+        let udp = ids.filter(|id: u16| self.value()[id].original.proto == 17);
+        ids.lemma_len_filter(|id: u16| self.value()[id].original.proto == 17);
+        vstd::set_lib::lemma_map_size_bound(udp, self.sockets_of(ids), |id: u16| self.value()[id].socket_key());
+    }
+
     /// Scheduled report-only port counts; packet paths never call this scan.
     /// At most MAX_FLOWS records are inspected for one of CLIENT_HISTORY sources.
     pub(crate) fn port_usage(&self, source: Option<Ip>) -> (usage: Ports)
         requires self.valid(),
         ensures usage.translation_ports <= self.entries@.len() && usage.udp_sockets <= self.entries@.len(),
             source.is_none() ==> usage.translation_ports == self.ports@.len() && usage.udp_sockets == self.sockets@.len(),
-            source.is_some() ==> usage.translation_ports == self.source_peers(source.unwrap()).map(|id: u16| self.entries@[id].translated_port).len()
-                && usage.udp_sockets == self.source_peers(source.unwrap()).filter(|id: u16| self.entries@[id].original.proto == 17).map(|id: u16|
-                    Socket { owner: self.entries@[id].owner, source: self.entries@[id].original.src,
-                        port: self.entries@[id].original.sport, external: self.entries@[id].external }).len(),
+            source.is_some() ==> usage.translation_ports == self.ports_of(self.source_peers(source.unwrap())).len()
+                && usage.udp_sockets == self.sockets_of(self.source_peers(source.unwrap())).len(),
     {
-        let Some(source) = source else { return Ports { translation_ports: self.ports.len(), udp_sockets: self.sockets.len() }; };
-        if !self.usage.contains_key(&source) { return Ports { translation_ports: 0, udp_sockets: 0 }; }
+        broadcast use Set::lemma_map_contains;
+        let Some(source) = source else {
+            proof {
+                let ids = self.value().dom();
+                assert(self.ports@.dom() =~= self.ports_of(ids)) by {
+                    assert forall|port: u16| self.ports@.dom().contains(port) implies self.ports_of(ids).contains(port) by {
+                        assert(self.ports@[port] > 0 && self.port_peers(port).len() == self.ports@[port]);
+                        assert(!self.port_peers(port).is_empty());
+                        let id = self.port_peers(port).choose();
+                        assert(ids.contains(id) && self.value()[id].translated_port == port);
+                    }
+                }
+                assert(self.sockets@.dom() =~= self.sockets_of(ids)) by {
+                    assert forall|socket: Socket| self.sockets@.dom().contains(socket) implies self.sockets_of(ids).contains(socket) by {
+                        let id = choose|id: u16| ids.contains(id) && self.value()[id].original.proto == 17
+                            && self.value()[id].socket_key() == socket && self.value()[id].translated_port == self.sockets@[socket];
+                        assert(ids.filter(|id: u16| self.value()[id].original.proto == 17).contains(id));
+                    }
+                }
+                self.port_counts_bounded(ids);
+            }
+            return Ports { translation_ports: self.ports.len(), udp_sockets: self.sockets.len() };
+        };
+        if !self.usage.contains_key(&source) {
+            proof {
+                assert(self.source_peers(source) =~= Set::empty());
+                self.port_counts_bounded(self.source_peers(source));
+            }
+            return Ports { translation_ports: 0, udp_sockets: 0 };
+        }
         let keys = crate::library::port_window(&self.entries, 0, MAX_FLOWS);
         let mut ports = BTreeSet::new();
         let mut sockets = BTreeSet::new();
-        for id in keys
-            invariant self.valid(), ports@.len() <= self.entries@.len(), sockets@.len() <= self.entries@.len(),
+        let mut index = 0;
+        let ghost mut selected = Set::<u16>::empty();
+        proof {
+            assert(self.ports_of(selected) =~= Set::empty());
+            assert(self.sockets_of(selected) =~= Set::empty());
+        }
+        while index < keys.len()
+            invariant
+                self.valid(), index <= keys@.len(), keys@.to_set() == self.value().dom(),
+                forall|i: int| 0 <= i < keys@.len() ==> self.value().dom().contains(keys@[i]),
+                selected == keys@.take(index as int).to_set().filter(|id: u16| self.value()[id].quota == source),
+                ports@ == self.ports_of(selected), sockets@ == self.sockets_of(selected),
+            decreases keys@.len() - index,
         {
-            if let Some(flow) = self.entries.get(&id) {
-                if flow.quota == source {
+            let id = keys[index];
+            let ghost prior = selected;
+            let ghost prior_ports = ports@;
+            let ghost prior_sockets = sockets@;
+            match self.entries.get(&id) {
+                Some(flow) if flow.quota == source => {
                     ports.insert(flow.translated_port);
                     if flow.original.proto == 17 { sockets.insert(flow.socket()); }
+                    proof { selected = selected.insert(id); }
                 }
+                _ => {}
             }
+            proof {
+                assert(keys@.take(index as int + 1) =~= keys@.take(index as int).push(id));
+                assert(selected =~= keys@.take(index as int + 1).to_set().filter(|key: u16| self.value()[key].quota == source));
+                if self.value()[id].quota == source {
+                    assert(selected =~= prior.insert(id));
+                    prior.lemma_set_map_insert_commute(id, |key: u16| self.value()[key].translated_port);
+                    assert(ports@ =~= prior_ports.insert(self.value()[id].translated_port));
+                    let udp = prior.filter(|key: u16| self.value()[key].original.proto == 17);
+                    let next_udp = selected.filter(|key: u16| self.value()[key].original.proto == 17);
+                    if self.value()[id].original.proto == 17 {
+                        assert(next_udp =~= udp.insert(id));
+                        udp.lemma_set_map_insert_commute(id, |key: u16| self.value()[key].socket_key());
+                        assert(sockets@ =~= prior_sockets.insert(self.value()[id].socket_key()));
+                    } else {
+                        assert(next_udp =~= udp);
+                    }
+                }
+                assert(ports@ =~= self.ports_of(selected));
+                assert(sockets@ =~= self.sockets_of(selected));
+            }
+            index += 1;
+        }
+        proof {
+            assert(keys@.take(index as int) =~= keys@);
+            vstd::set_lib::lemma_len_subset(selected, self.value().dom());
+            self.port_counts_bounded(selected);
         }
         Ports { translation_ports: ports.len(), udp_sockets: sockets.len() }
     }
@@ -561,7 +689,8 @@ impl Table {
     /// Stored records stay charged across address families and native reconnects.
     fn capacity(&self, source: Ip, new_record: bool) -> (failure: Option<AdmissionError>)
         requires self.valid(),
-        ensures failure.is_none() == (self.active < self.limits.value().active_global
+        ensures self.limits.value().supported(),
+            failure.is_none() == (self.active < self.limits.value().active_global
             && (!self.usage@.dom().contains(source) || self.usage@[source].active < self.limits.value().active_per_client)
             && (new_record ==> self.entries@.len() < self.limits.value().retained_global
                 && (!self.usage@.dom().contains(source) || self.usage@[source].records < self.limits.value().retained_per_client))),
@@ -587,6 +716,7 @@ impl Table {
 
     /// Create only a supported initiating peer, after reserving both credits.
     /// Every rejection leaves records, indices, pools and credits unchanged.
+    #[verifier::spinoff_prover]
     pub(crate) fn create(&mut self, mapping: NewMapping, packet: &Packet<'_>, now: u64, random: &mut impl RngCore, meters: &mut Meters) -> (result: Result<u16, AdmissionError>)
         requires old(meters).valid(), old(self).valid(), mapping.owner.valid(), mapping.quota.valid(), mapping.external.valid(), packet.valid(),
             mapping.external.family() == packet.tuple.src.family(), mapping.policy.valid(), mapping.revision > 0,
@@ -651,61 +781,147 @@ impl Table {
         self.outbound.insert((mapping.owner, packet.tuple), id);
         self.replies.insert(translated, id);
         self.entries.insert(id, flow);
-        proof {
-            assert(self.all_active() =~= before.all_active().insert(id));
-            assert forall|source: Ip| self.source_peers(source) ==
-                (if source == flow.quota { before.source_peers(source).insert(id) } else { before.source_peers(source) }) by {
-                assert(self.source_peers(source) =~=
-                    if source == flow.quota { before.source_peers(source).insert(id) } else { before.source_peers(source) });
-            }
-            assert forall|source: Ip| self.active_peers(source) ==
-                (if source == flow.quota { before.active_peers(source).insert(id) } else { before.active_peers(source) }) by {
-                assert(self.active_peers(source) =~=
-                    if source == flow.quota { before.active_peers(source).insert(id) } else { before.active_peers(source) });
-            }
-            assert forall|other: u16| before.value().dom().contains(other) implies
-                (self.value()[other].translated_port == port <==> self.value()[other].same_socket(&flow)) by {
-                if let Some(existing_port) = shared {
-                    let member = choose|member: u16| before.value().dom().contains(member)
-                        && before.value()[member].original.proto == 17
-                        && socket == (Socket { owner: before.value()[member].owner, source: before.value()[member].original.src,
-                            port: before.value()[member].original.sport, external: before.value()[member].external })
-                        && before.value()[member].translated_port == existing_port;
-                    assert(before.value()[member].same_socket(&flow));
-                    if other != member {
-                        assert((before.value()[other].translated_port == existing_port)
-                            == before.value()[other].same_socket(&before.value()[member]));
-                    }
-                }
-            }
-            assert(self.value().dom().filter(|key: u16| self.value()[key].translated_port == port)
-                =~= before.value().dom().filter(|key: u16| before.value()[key].translated_port == port).insert(id));
-            assert(self.mappings_valid());
-            assert forall|client: Ip| self.usage@.dom().contains(client) implies
-                self.usage@[client].records == self.source_peers(client).len()
-                    && self.usage@[client].active == self.active_peers(client).len() by {
-                if client == mapping.quota && !before.usage@.dom().contains(client) {
-                    assert(before.source_peers(client) =~= Set::empty());
-                    assert(before.active_peers(client) =~= Set::empty());
-                }
-            }
-            vstd::set_lib::lemma_len_subset(self.all_active(), self.value().dom());
-            assert forall|client: Ip| self.usage@.dom().contains(client) implies
-                self.usage@[client].active <= self.usage@[client].records
-                    && self.usage@[client].active <= self.limits.value().active_per_client
-                    && self.usage@[client].records <= self.limits.value().retained_per_client by {
-                vstd::set_lib::lemma_len_subset(self.active_peers(client), self.source_peers(client));
-                if client != mapping.quota {
-                    assert(before.usage@.dom().contains(client));
-                }
-            }
-            assert(self.accounting_valid());
-            assert(self.allocation_valid());
-        }
+        proof { self.inserted_peer(before, flow, id, shared); }
         self.peaks.observe(self.active, self.entries.len());
         meters.observe(mapping.quota, now, Occupancy { active_credits: usage.active + 1,
             stored_records: usage.records + 1, inactive_records: usage.records - usage.active });
         Ok(id)
+    }
+
+    /// Check the exact index insertions together with the newly charged credits.
+    #[verifier::spinoff_prover]
+    proof fn inserted_peer(&self, before: Self, flow: Flow, id: u16, shared: Option<u16>)
+        requires before.valid(), before.limits.value().supported(), self.limits == before.limits,
+            flow.valid(), flow.charged_active, id >= FIRST, !before.value().dom().contains(id),
+            !before.outbound@.dom().contains((flow.owner, flow.original)),
+            !before.replies@.dom().contains(flow.wire_tuple()),
+            shared == if flow.original.proto == 17 && before.sockets@.dom().contains(flow.socket_key())
+                { Some(before.sockets@[flow.socket_key()]) } else { None },
+            match shared {
+                Some(port) => flow.translated_port == port,
+                None => !before.ports@.dom().contains(flow.translated_port),
+            },
+            self.entries@ == before.entries@.insert(id, flow),
+            self.outbound@ == before.outbound@.insert((flow.owner, flow.original), id),
+            self.replies@ == before.replies@.insert(flow.wire_tuple(), id),
+            self.free_ids@ == before.free_ids@.remove(id),
+            self.free_ports@ == before.free_ports@.remove(flow.translated_port),
+            self.ports@ == before.ports@.insert(flow.translated_port,
+                (if before.ports@.dom().contains(flow.translated_port) { before.ports@[flow.translated_port] + 1 } else { 1 }) as usize),
+            self.sockets@ == if flow.original.proto == 17 {
+                before.sockets@.insert(flow.socket_key(), flow.translated_port)
+            } else { before.sockets@ },
+            before.active < before.limits.value().active_global,
+            before.entries@.len() < before.limits.value().retained_global,
+            self.active == before.active + 1,
+            !before.usage@.dom().contains(flow.quota) ||
+                (before.usage@[flow.quota].active < before.limits.value().active_per_client
+                    && before.usage@[flow.quota].records < before.limits.value().retained_per_client),
+            self.usage@ == before.usage@.insert(flow.quota, if before.usage@.dom().contains(flow.quota) {
+                Usage { active: (before.usage@[flow.quota].active + 1) as usize,
+                    records: (before.usage@[flow.quota].records + 1) as usize }
+            } else { Usage { active: 1, records: 1 } }),
+        ensures self.valid(),
+    {
+        let port = flow.translated_port;
+        let socket = flow.socket_key();
+        assert(self.all_active() =~= before.all_active().insert(id));
+        assert forall|source: Ip| self.source_peers(source) ==
+            (if source == flow.quota { before.source_peers(source).insert(id) } else { before.source_peers(source) }) by {
+            assert(self.source_peers(source) =~=
+                if source == flow.quota { before.source_peers(source).insert(id) } else { before.source_peers(source) });
+        }
+        assert forall|source: Ip| self.active_peers(source) ==
+            (if source == flow.quota { before.active_peers(source).insert(id) } else { before.active_peers(source) }) by {
+            assert(self.active_peers(source) =~=
+                if source == flow.quota { before.active_peers(source).insert(id) } else { before.active_peers(source) });
+        }
+        assert forall|other: u16| before.value().dom().contains(other) implies
+            (self.value()[other].translated_port == port <==> self.value()[other].same_socket(&flow)) by {
+            if let Some(existing_port) = shared {
+                let member = choose|member: u16| before.value().dom().contains(member)
+                    && before.value()[member].original.proto == 17
+                    && socket == (Socket { owner: before.value()[member].owner, source: before.value()[member].original.src,
+                        port: before.value()[member].original.sport, external: before.value()[member].external })
+                    && before.value()[member].translated_port == existing_port;
+                assert(before.value()[member].same_socket(&flow));
+                if other != member {
+                    assert((before.value()[other].translated_port == existing_port)
+                        == before.value()[other].same_socket(&before.value()[member]));
+                }
+            }
+        }
+        assert(self.value().dom().filter(|key: u16| self.value()[key].translated_port == port)
+            =~= before.value().dom().filter(|key: u16| before.value()[key].translated_port == port).insert(id));
+        assert(self.mappings_valid());
+        assert forall|client: Ip| self.usage@.dom().contains(client) implies
+            self.usage@[client].records == self.source_peers(client).len()
+                && self.usage@[client].active == self.active_peers(client).len() by {
+            if client == flow.quota && !before.usage@.dom().contains(client) {
+                assert(before.source_peers(client) =~= Set::empty());
+                assert(before.active_peers(client) =~= Set::empty());
+            }
+        }
+        vstd::set_lib::lemma_len_subset(self.all_active(), self.value().dom());
+        assert forall|client: Ip| self.usage@.dom().contains(client) implies
+            self.usage@[client].active <= self.usage@[client].records
+                && self.usage@[client].active <= self.limits.value().active_per_client
+                && self.usage@[client].records <= self.limits.value().retained_per_client by {
+            vstd::set_lib::lemma_len_subset(self.active_peers(client), self.source_peers(client));
+            if client != flow.quota {
+                assert(before.usage@.dom().contains(client));
+            }
+        }
+        assert forall|client: Ip| self.usage@.dom().contains(client) implies self.source_peers(client).len() > 0 by {
+            if client == flow.quota { assert(self.source_peers(client).contains(id)); }
+            else { assert(before.usage@.dom().contains(client)); }
+        }
+        assert forall|key: u16| self.value().dom().contains(key) implies
+            self.usage@.dom().contains(self.value()[key].quota) by {
+            if key != id { assert(before.value().dom().contains(key)); }
+        }
+        assert(self.accounting_valid());
+        assert forall|p: u16| self.ports@.dom().contains(p) implies
+            self.ports@[p] == self.port_peers(p).len() && 0 < self.ports@[p] <= self.value().len() by {
+            if p != port {
+                assert(self.port_peers(p) =~= before.port_peers(p));
+             } else {
+                assert(self.port_peers(p) =~= before.port_peers(p).insert(id));
+                if !before.ports@.dom().contains(p) { assert(before.port_peers(p) =~= Set::empty()); }
+            }
+            vstd::set_lib::lemma_len_subset(self.port_peers(p), self.value().dom());
+        }
+        assert forall|key: u16| self.value().dom().contains(key) implies
+            self.ports@.dom().contains(self.value()[key].translated_port) by {
+            if key != id { assert(before.value().dom().contains(key)); }
+        }
+        assert forall|key: u16| self.value().dom().contains(key) && self.value()[key].original.proto == 17 implies
+            self.sockets@.dom().contains(self.value()[key].socket_key())
+                && self.sockets@[self.value()[key].socket_key()] == self.value()[key].translated_port by {
+            if key == id { assert(flow.socket_key() == socket); }
+            else {
+                assert(before.value().dom().contains(key));
+                if self.value()[key].socket_key() == socket && flow.original.proto == 17 {
+                    assert(before.sockets@.dom().contains(socket));
+                    assert(shared == Some(port));
+                }
+            }
+        }
+        assert forall|key: Socket| self.sockets@.dom().contains(key) implies
+            exists|member: u16| self.value().dom().contains(member) && self.value()[member].original.proto == 17
+                && self.value()[member].socket_key() == key && self.value()[member].translated_port == self.sockets@[key] by {
+            if key == socket && flow.original.proto == 17 {
+                assert(flow.socket_key() == key);
+                assert(self.value().dom().contains(id) && self.value()[id].socket_key() == key);
+            } else {
+                assert(before.sockets@.dom().contains(key));
+                let member = choose|member: u16| before.value().dom().contains(member) && before.value()[member].original.proto == 17
+                    && before.value()[member].socket_key() == key && before.value()[member].translated_port == before.sockets@[key];
+                assert(self.value().dom().contains(member) && self.value()[member] == before.value()[member]);
+            }
+        }
+        assert(self.socket_index_valid());
+        assert(self.allocation_valid());
     }
 
     /// Link a record with the credits it owns before changing its active charge.
@@ -848,8 +1064,36 @@ impl Table {
         meters.observe(source, now, Occupancy { active_credits: active, stored_records: stored, inactive_records: stored - active });
     }
 
+    /// Commit a validated peer update without changing its reservations.
+    fn replace_peer(&mut self, id: u16, flow: Flow, now: u64, meters: &mut Meters)
+        requires old(self).valid(), old(meters).valid(), old(self).value().dom().contains(id),
+            flow.valid(),
+            flow.quota == old(self).value()[id].quota,
+            flow.owner == old(self).value()[id].owner,
+            flow.original == old(self).value()[id].original,
+            flow.external == old(self).value()[id].external,
+            flow.translated_port == old(self).value()[id].translated_port,
+            flow.wire_tuple() == old(self).value()[id].wire_tuple(),
+            !old(self).value()[id].charged_active && flow.charged_active ==>
+                old(self).active < old(self).limits.value().active_global
+                    && old(self).usage@[flow.quota].active < old(self).limits.value().active_per_client,
+        ensures final(self).valid(), final(meters).valid(), final(self).limits == old(self).limits,
+            final(self).outbound@ == old(self).outbound@,
+            final(self).value() == old(self).value().insert(id, flow),
+    {
+        proof { self.record_holds_credit(id); }
+        let ghost before = *self;
+        let Some(previous) = self.entries.insert(id, flow) else { return; };
+        self.active_transition(flow.quota, previous.charged_active, flow.charged_active, now, meters);
+        proof {
+            self.preserved_flow_change(before, id);
+            self.preserved_active_accounting(before, id);
+        }
+    }
+
     /// Existing UDP may regain an active credit after idle expiry, but only on
     /// a policy-checked outbound packet. Explicit retirement is never revived.
+    #[verifier::spinoff_prover]
     pub(crate) fn accept(&mut self, id: u16, packet: &Packet<'_>, outbound: bool, mac: Option<[u8; 6]>, now: u64, meters: &mut Meters) -> (result: Result<(), AdmissionError>)
         requires old(meters).valid(), old(self).valid(), packet.valid(), old(self).entries@.dom().contains(id),
             packet.tuple.proto == old(self).entries@[id].original.proto,
@@ -865,27 +1109,20 @@ impl Table {
                 && final(self).cursor == old(self).cursor,
             result.is_ok() ==> old(self).entries@[id].accepts(*packet, outbound, now),
     {
+        hide(Table::mappings_valid);
+        hide(Table::allocation_valid);
         proof { self.record_holds_credit(id); }
-        let Some(flow) = self.entries.get(&id) else { return Err(AdmissionError::State); };
+        let Some(flow) = self.get(id) else { return Err(AdmissionError::State); };
+        let mut flow = *flow;
         let source = flow.quota;
         let was_active = flow.charged_active;
         if !was_active {
             if !outbound || matches!(flow.state, State::Retired) || packet.tuple.proto != 17 { return Err(AdmissionError::Transport); }
             if let Some(failure) = self.capacity(source, false) { return Err(failure); }
         }
-        let ghost before = *self;
-        let Some(flow) = self.entries.get_mut(&id) else { return Err(AdmissionError::State); };
-        if !flow.accept(packet, outbound, now) {
-            proof { assert(self.value() =~= before.value()); }
-            return Err(AdmissionError::Transport);
-        }
+        if !flow.accept(packet, outbound, now) { return Err(AdmissionError::Transport); }
         if let Some(mac) = mac { flow.mac = mac; }
-        let is_active = flow.charged_active;
-        self.active_transition(source, was_active, is_active, now, meters);
-        proof {
-            self.preserved_flow_change(before, id);
-            self.preserved_active_accounting(before, id);
-        }
+        self.replace_peer(id, flow, now, meters);
         Ok(())
     }
 
@@ -947,25 +1184,28 @@ impl Table {
             decreases keys.len() - index,
         {
             let id = keys[index];
+            index += 1;
+
             let ghost before = *self;
             proof {
                 if self.entries@.dom().contains(id) { self.record_holds_credit(id); }
             }
-            if self.entries.get(&id).is_some_and(|flow: &Flow| -> (matches: bool)
+            if !self.entries.get(&id).is_some_and(|flow: &Flow| -> (matches: bool)
                 ensures matches == (flow.owner == owner), { flow.owner == owner })
             {
-                if let Some(flow) = self.entries.get_mut(&id) {
-                    let source = flow.quota;
-                    let was_active = flow.charged_active;
-                    flow.retire(now);
-                    self.active_transition(source, was_active, false, now, meters);
-                    proof {
-                        self.preserved_flow_change(before, id);
-                        self.preserved_active_accounting(before, id);
-                    }
+                continue;
+            }
+
+            if let Some(flow) = self.entries.get_mut(&id) {
+                let source = flow.quota;
+                let was_active = flow.charged_active;
+                flow.retire(now);
+                self.active_transition(source, was_active, false, now, meters);
+                proof {
+                    self.preserved_flow_change(before, id);
+                    self.preserved_active_accounting(before, id);
                 }
             }
-            index += 1;
         }
         proof {
             assert forall|id: u16| self.entries@.dom().contains(id) && self.entries@[id].owner == owner
@@ -1050,15 +1290,47 @@ impl Table {
                     if self.value()[key].translated_port == port { assert(owners.remove(id).contains(key)); }
                 }
             }
+            assert forall|key: u16| self.value().dom().contains(key) implies
+                self.ports@.dom().contains(self.value()[key].translated_port) by {
+                assert(before.value().dom().contains(key));
+                if references == 1 { assert(self.value()[key].translated_port != port); }
+            }
             assert forall|key: u16| self.value().dom().contains(key) && self.value()[key].original.proto == 17 implies
-                self.sockets@.dom().contains(Socket { owner: self.value()[key].owner, source: self.value()[key].original.src,
-                    port: self.value()[key].original.sport, external: self.value()[key].external })
-                && self.sockets@[Socket { owner: self.value()[key].owner, source: self.value()[key].original.src,
-                    port: self.value()[key].original.sport, external: self.value()[key].external }] == self.value()[key].translated_port by {
+                self.sockets@.dom().contains(self.value()[key].socket_key())
+                    && self.sockets@[self.value()[key].socket_key()] == self.value()[key].translated_port by {
                 if references == 1 && original.proto == 17 {
                     assert(self.value()[key].translated_port != port);
                     assert(!before.value()[key].same_socket(&before.value()[id]));
                 }
+            }
+            assert forall|key: Socket| self.sockets@.dom().contains(key) implies
+                exists|member: u16| self.value().dom().contains(member) && self.value()[member].original.proto == 17
+                    && self.value()[member].socket_key() == key && self.value()[member].translated_port == self.sockets@[key] by {
+                let member = choose|member: u16| before.value().dom().contains(member) && before.value()[member].original.proto == 17
+                    && before.value()[member].socket_key() == key && before.value()[member].translated_port == before.sockets@[key];
+                if member != id {
+                    assert(self.value().dom().contains(member) && self.value()[member] == before.value()[member]);
+                } else {
+                    assert(key == socket && references > 1);
+                    assert(before.port_peers(port).contains(id));
+                    assert(self.port_peers(port) =~= before.port_peers(port).remove(id));
+                    assert(self.port_peers(port).len() == references - 1 && !self.port_peers(port).is_empty());
+                    let peer = self.port_peers(port).choose();
+                    assert(self.value().dom().contains(peer) && peer != id && self.value()[peer].translated_port == port);
+                    assert(before.value()[peer].same_socket(&before.value()[id]));
+                    assert(self.value()[peer].original.proto == 17 && self.value()[peer].socket_key() == key);
+                }
+            }
+            assert(self.socket_index_valid());
+            assert forall|p: u16| self.ports@.dom().contains(p) implies
+                self.ports@[p] == self.port_peers(p).len() && 0 < self.ports@[p] <= self.value().len() by {
+                if p != port {
+                    assert(self.port_peers(p) =~= before.port_peers(p));
+                } else {
+                    assert(self.port_peers(p) =~= before.port_peers(p).remove(id));
+                    assert(before.port_peers(p).contains(id));
+                }
+                vstd::set_lib::lemma_len_subset(self.port_peers(p), self.value().dom());
             }
             assert(self.allocation_valid());
         }
@@ -1085,25 +1357,41 @@ impl Table {
                 forall|id: u16| old(self).entries@.dom().contains(id) && !self.entries@.dom().contains(id)
                     ==> old(self).entries@[id].release <= now,
         {
+            self.maintain_record(id, now, meters);
+        }
+    }
+
+    /// Release one due reservation or update its active charge in place.
+    #[verifier::spinoff_prover]
+    fn maintain_record(&mut self, id: u16, now: u64, meters: &mut Meters)
+        requires old(meters).valid(), old(self).valid(),
+        ensures final(meters).valid(), final(self).valid(), final(self).limits == old(self).limits,
+            final(self).entries@.dom() == old(self).entries@.dom()
+                || final(self).entries@.dom() == old(self).entries@.dom().remove(id)
+                    && old(self).entries@[id].release <= now,
+            forall|key: u16| final(self).entries@.dom().contains(key) ==>
+                final(self).entries@[key].release >= old(self).entries@[key].release,
+    {
+        proof {
+            if self.entries@.dom().contains(id) { self.record_holds_credit(id); }
+        }
+        let ghost before = *self;
+        if let Some(flow) = self.entries.get_mut(&id) {
+            let source = flow.quota;
+            let was_active = flow.charged_active;
+            flow.expire(now);
+            let is_active = flow.charged_active;
+            let release = now >= flow.release;
+            self.active_transition(source, was_active, is_active, now, meters);
             proof {
-                if self.entries@.dom().contains(id) { self.record_holds_credit(id); }
+                assert(self.value() == before.value().insert(id, self.value()[id]));
+                self.preserved_flow_change(before, id);
+                self.preserved_active_accounting(before, id);
+                assert(self.value()[id].release >= before.value()[id].release);
             }
-            let ghost before = *self;
-            if let Some(flow) = self.entries.get_mut(&id) {
-                let source = flow.quota;
-                let was_active = flow.charged_active;
-                if !flow.live(now) {
-                    flow.charged_active = false;
-                    if flow.original.proto != 17 { flow.retire(now); }
-                }
-                let is_active = flow.charged_active;
-                let release = now >= flow.release;
-                self.active_transition(source, was_active, is_active, now, meters);
-                proof {
-                    self.preserved_flow_change(before, id);
-                    self.preserved_active_accounting(before, id);
-                }
-                if release { self.release(id, now, meters); }
+            if release {
+                proof { assert(before.value()[id].release <= now); }
+                self.release(id, now, meters);
             }
         }
     }

@@ -479,7 +479,9 @@ impl Engine {
         ensures source.is_some() ==> source.unwrap().valid(),
     {
         match owner {
-            Some(owner) => match self.link_index(owner) { Some(index) => Some(self.links[index].quota), None => None },
+            Some(owner) => self.link_index(owner).map(|index: usize| -> (quota: Ip)
+                requires index < self.links@.len(), ensures quota == self.links@[index as int].quota,
+            { self.links[index].quota }),
             None => None,
         }
     }
@@ -635,6 +637,7 @@ impl Engine {
 
     /// Process exactly one frame from a currently permitted native client.
     /// Every drop is silent except bounded router ICMP errors/local echo/ARP.
+    #[verifier::rlimit(25)]
     pub fn client(&mut self, binding: &Bound, view: &View, bytes: &[u8], now: u64)
         requires old(self).valid(), binding.valid(), view.valid(),
         ensures final(self).valid(), old(self).stopped() ==> final(self).stopped(),
@@ -702,7 +705,7 @@ impl Engine {
                 Err(failure) => { self.admission_failed(quota, failure); return; },
             },
         };
-        let Some(flow) = self.flows.entries.get(&flow_id) else { return; };
+        let Some(flow) = self.flows.get(flow_id) else { return; };
         if flow.policy != policy_tuple || flow.external != external || flow.revision != view.generation() { return; }
         let translated = flow.translated();
         if let Err(failure) = self.flows.accept(flow_id, &packet, true, Some(mac), now, &mut self.meters) { self.admission_failed(quota, failure); return; }
@@ -752,7 +755,7 @@ impl Engine {
                 sport: packet.tuple.dport, dport: packet.tuple.sport, proto: packet.tuple.proto }
         };
         let Some(flow_id) = self.flows.translated_id(wire_tuple) else { return; };
-        let Some(flow) = self.flows.entries.get(&flow_id) else { return; };
+        let Some(flow) = self.flows.get(flow_id) else { return; };
         if !flow.live(now) || !flow.reply(packet.tuple, flow.translated_port) || flow.revision != view.generation()
             || !policy::allows(view, flow.policy, if flow.policy.icmp() { flow.policy.request() } else { 0 }, now) { return; }
         if packet.ttl <= 1 || (packet.bytes.len() > MTU && layout.is_none()) {
@@ -1132,7 +1135,7 @@ impl Engine {
         if identity.extensions > 8 || identity.fragment_headers != 1 || identity.routing || identity.authenticated
             || identity.options.iter().any(|kind: &u8| -> (reject: bool) ensures reject == (*kind >= 64), { *kind >= 64 }) { return true; }
         let Some(emission) = self.history.find(&identity, client, now) else { return true; };
-        let Some(flow) = self.flows.entries.get(&emission.flow_id) else { return true; };
+        let Some(flow) = self.flows.get(emission.flow_id) else { return true; };
         if packet.tuple.proto != 58 || !flow.live(now) || flow.quota != emission.quota
             || flow.revision != view.generation() || client.is_some_and(|owner| owner != flow.owner)
             || !policy::allows(view, flow.policy, if flow.policy.icmp() { flow.policy.request() } else { 0 }, now) { return true; }
@@ -1192,7 +1195,7 @@ impl Engine {
                 dport: quote_tuple.sport, proto: quote_tuple.proto }
         };
         let Some(flow_id) = self.flows.find(owner, original) else { return; };
-        let Some(flow) = self.flows.entries.get(&flow_id) else { return; };
+        let Some(flow) = self.flows.get(flow_id) else { return; };
         if packet.tuple.src != flow.original.src || packet.tuple.dst != flow.original.dst
             || !flow.live(now) || flow.revision != view.generation()
             || !policy::allows(view, flow.policy, if flow.policy.icmp() { flow.policy.request() } else { 0 }, now) { return; }
@@ -1223,7 +1226,7 @@ impl Engine {
         if tuple.src.version() != packet.tuple.src.version() { return; }
         if tuple.icmp() && !wire::quoted_echo(&quote, tuple.request()) { return; }
         let Some(id) = self.flows.translated_id(tuple) else { return; };
-        let Some(flow) = self.flows.entries.get(&id) else { return; };
+        let Some(flow) = self.flows.get(id) else { return; };
         let translated = flow.translated();
         if tuple != translated || !flow.live(now) || flow.revision != view.generation()
             || !policy::allows(view, flow.policy, if flow.policy.icmp() { flow.policy.request() } else { 0 }, now) { return; }
