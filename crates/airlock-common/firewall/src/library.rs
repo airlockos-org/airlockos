@@ -144,7 +144,7 @@ pub assume_specification<I: Iterator, P: FnMut(&I::Item) -> bool>[ <core::iter::
 /// NAT sharing, admission, expiry or resource accounting decisions.
 #[verifier::external_body]
 pub(crate) fn port_pool() -> (pool: BTreeSet<u16>)
-    ensures pool@ == Set::new(|port: u16| port >= crate::flow::FIRST),
+    ensures pool@ == Set::new(|port: u16| port >= crate::flow::FIRST).unwrap(),
         pool@.len() == 16384,
 { (crate::flow::FIRST..=u16::MAX).collect() }
 

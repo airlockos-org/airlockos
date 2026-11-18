@@ -82,6 +82,7 @@ fn queues(view: &View) -> (Engine, Vec<Owner>) {
             peer: u16::from(last),
         };
         engine.links.push(Link {
+            quota: Ip::from_ipv4([10, 137, 0, last]),
             owner,
             assigned: vec![Ip::from_ipv4([10, 137, 0, last])],
             incoming: Default::default(),

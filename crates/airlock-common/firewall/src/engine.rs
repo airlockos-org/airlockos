@@ -409,16 +409,21 @@ impl Engine {
         requires self.valid(), ensures *parameters == self.parameters_value(), parameters.supported(),
     { self.parameters.document() }
 
+    /// Correspondence between sampled diagnostics and the core counters.
+    pub closed spec fn describes_resources(&self, snapshot: Snapshot) -> bool {
+        snapshot.current.stored_records == self.connection_count()
+            && snapshot.peaks == self.flows.peaks && snapshot.reclamation == self.flows.reclamation
+            && snapshot.rejections == self.meters.rejections && snapshot.queue_drops == self.meters.queue_drops
+            && snapshot.client_history_evictions == self.meters.history_evictions
+            && snapshot.native_retries == self.meters.native_retries
+    }
+
     /// Read resource observations without changing counters, quotas or readiness.
     /// Each of at most CLIENT_HISTORY port summaries inspects at most MAX_FLOWS
     /// records; only the runtime's configured reporting timer calls this method.
     pub fn resource_snapshot(&self) -> (snapshot: Snapshot)
         requires self.valid(),
-        ensures snapshot.current.stored_records == self.connection_count(),
-            snapshot.peaks == self.flows.peaks, snapshot.reclamation == self.flows.reclamation,
-            snapshot.rejections == self.meters.rejections && snapshot.queue_drops == self.meters.queue_drops,
-            snapshot.client_history_evictions == self.meters.history_evictions,
-            snapshot.native_retries == self.meters.native_retries,
+        ensures self.describes_resources(snapshot),
     {
         let current = self.flows.occupancy(None);
         let limits = self.parameters.document();

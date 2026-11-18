@@ -11,7 +11,7 @@
 
 use crate::diagnostics::{Meters, Occupancy, Peaks, Ports, Reclamation};
 use crate::{
-    CLIENT_FLOWS, MAX_FLOWS, SECOND,
+    MAX_FLOWS, SECOND,
     engine::Owner,
     wire::{Packet, Tcp, Tuple},
 };
@@ -280,13 +280,13 @@ pub(crate) struct NewMapping {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Socket {
     /// Exact admitted native lifetime; old incarnations cannot inherit a port.
-    owner: Owner,
+    pub(crate) owner: Owner,
     /// Assigned source address, keeping IPv4 and IPv6 translations distinct.
-    source: Ip,
+    pub(crate) source: Ip,
     /// Original UDP source port.
-    port: u16,
+    pub(crate) port: u16,
     /// Current masquerade address, preventing reuse across upstream changes.
-    external: Ip,
+    pub(crate) external: Ip,
 }
 
 #[cfg(verus_keep_ghost)]
@@ -298,11 +298,11 @@ impl vstd::std_specs::cmp::PartialEqSpecImpl for Socket {
 
 /// Maintained credits for one stable client, including prior incarnations.
 #[derive(Clone, Copy)]
-struct Usage {
+pub(crate) struct Usage {
     /// Active credits; expired flows retain theirs until maintenance observes them.
-    active: usize,
+    pub(crate) active: usize,
     /// Stored records, each already owning its eventual retirement storage.
-    records: usize,
+    pub(crate) records: usize,
 }
 
 /// Admission failure without packet data or a replacement authorization.
@@ -349,19 +349,19 @@ pub(crate) struct Table {
     /// Exact translated tuple to internal identifier; a port alone grants nothing.
     pub(crate) replies: BTreeMap<Tuple, u16>,
     /// One entry per shared UDP source socket, independent of destination count.
-    sockets: BTreeMap<Socket, u16>,
+    pub(crate) sockets: BTreeMap<Socket, u16>,
     /// References from all retained peer records, including retired UDP peers.
-    ports: BTreeMap<u16, usize>,
+    pub(crate) ports: BTreeMap<u16, usize>,
     /// Available translation ports; std ordered lookup replaces candidate scans.
-    free_ports: BTreeSet<u16>,
+    pub(crate) free_ports: BTreeSet<u16>,
     /// Available internal IDs, independent of shared translated ports.
-    free_ids: BTreeSet<u16>,
+    pub(crate) free_ids: BTreeSet<u16>,
     /// Per-client credits; zero-record entries are removed during reclamation.
-    usage: BTreeMap<Ip, Usage>,
+    pub(crate) usage: BTreeMap<Ip, Usage>,
     /// Sum of active credits; not inferred by rescanning peer records.
-    active: usize,
+    pub(crate) active: usize,
     /// Immutable settings chosen before this table admits its first peer.
-    limits: crate::parameters::Limits,
+    pub(crate) limits: crate::parameters::Limits,
     /// Boot-wide high-water flow occupancy, retained through reclamation.
     pub(crate) peaks: Peaks,
     /// Saturating counters describe actual scheduler and release progress.
@@ -377,12 +377,12 @@ impl Table {
     }
 
     /// Charged active records; conservative until the expiry maintenance turn.
-    open spec fn active_peers(&self, source: Ip) -> Set<u16> {
+    pub(crate) open spec fn active_peers(&self, source: Ip) -> Set<u16> {
         self.source_peers(source).filter(|id: u16| self.entries@[id].charged_active)
     }
 
     /// Exact tuple identity, bounded storage, and source/socket port isolation.
-    open spec fn mappings_valid(&self) -> bool {
+    pub(crate) open spec fn mappings_valid(&self) -> bool {
         vstd::std_specs::btree::key_obeys_cmp_spec::<(Owner, Tuple)>()
             && vstd::std_specs::btree::key_obeys_cmp_spec::<Tuple>()
             && vstd::std_specs::btree::key_obeys_cmp_spec::<Socket>()
@@ -404,23 +404,26 @@ impl Table {
     }
 
     /// Actual index/count correspondence, independent of individual packet claims.
-    open spec fn accounting_valid(&self) -> bool {
+    pub(crate) open spec fn accounting_valid(&self) -> bool {
         self.active == self.entries@.dom().filter(|id: u16| self.entries@[id].charged_active).len()
+            && self.active <= self.entries@.len()
             && self.active <= self.limits.value().active_global
             && self.usage@.dom() == self.entries@.values().map(|flow: Flow| flow.quota)
             && (forall|source: Ip| self.usage@.dom().contains(source) ==>
                 self.usage@[source].records == self.source_peers(source).len()
                 && self.usage@[source].active == self.active_peers(source).len()
+                && self.usage@[source].active <= self.usage@[source].records
                 && self.usage@[source].active <= self.limits.value().active_per_client
-                && self.usage@[source].records <= self.limits.value().retained_per_client <= CLIENT_FLOWS)
+                && self.usage@[source].records <= self.limits.value().retained_per_client <= crate::CLIENT_FLOWS)
     }
 
     /// Free pools complement owned records; shared-port references stay exact.
-    open spec fn allocation_valid(&self) -> bool {
-        self.free_ids@ == Set::new(|id: u16| id >= FIRST && !self.entries@.dom().contains(id))
-            && self.free_ports@ == Set::new(|port: u16| port >= FIRST && !self.ports@.dom().contains(port))
+    pub(crate) open spec fn allocation_valid(&self) -> bool {
+        self.free_ids@ == Set::new(|id: u16| id >= FIRST && !self.entries@.dom().contains(id)).unwrap()
+            && self.free_ports@ == Set::new(|port: u16| port >= FIRST && !self.ports@.dom().contains(port)).unwrap()
             && self.ports@.dom() == self.entries@.values().map(|flow: Flow| flow.translated_port)
             && (forall|port: u16| self.ports@.dom().contains(port) ==> self.ports@[port] > 0
+                && self.ports@[port] <= self.entries@.len()
                 && self.ports@[port] == self.entries@.dom().filter(|id: u16| self.entries@[id].translated_port == port).len())
             && (forall|socket: Socket| self.sockets@.dom().contains(socket) ==>
                 exists|id: u16| self.entries@.dom().contains(id) && self.entries@[id].original.proto == 17
@@ -634,10 +637,11 @@ impl Table {
     /// capacity validation. This helper neither changes records nor allocates.
     fn active_transition(&mut self, source: Ip, was_active: bool, is_active: bool, now: u64, meters: &mut Meters)
         requires old(meters).valid(), self.usage@.dom().contains(source),
+            vstd::std_specs::btree::key_obeys_cmp_spec::<Ip>(),
             self.active <= self.entries@.len(), self.usage@[source].active <= self.usage@[source].records,
             !was_active && is_active ==> self.active < self.entries@.len() && self.usage@[source].active < self.usage@[source].records,
             was_active && !is_active ==> self.active > 0 && self.usage@[source].active > 0,
-            !was_active && is_active ==> self.active < MAX_FLOWS && self.usage@[source].active < CLIENT_FLOWS,
+            !was_active && is_active ==> self.active < MAX_FLOWS && self.usage@[source].active < crate::CLIENT_FLOWS,
         ensures final(meters).valid(), final(self).active == old(self).active + (if is_active { 1int } else { 0int }) - (if was_active { 1int } else { 0int }),
             final(self).usage@.dom() == old(self).usage@.dom(),
             final(self).usage@[source].active == old(self).usage@[source].active + (if is_active { 1int } else { 0int }) - (if was_active { 1int } else { 0int }),
@@ -693,7 +697,7 @@ impl Table {
     {
         let keys = crate::library::port_window(&self.entries, 0, MAX_FLOWS);
         for id in keys
-            invariant self.valid(), view.valid(), self.entries@.dom() == old(self).entries@.dom(),
+            invariant self.valid(), meters.valid(), self.limits == old(self).limits, view.valid(), self.entries@.dom() == old(self).entries@.dom(),
         {
             if let Some(flow) = self.entries.get_mut(&id) {
                 let source = flow.quota;
@@ -724,7 +728,7 @@ impl Table {
         let keys = crate::library::port_window(&self.entries, 0, MAX_FLOWS);
         let mut index = 0;
         while index < keys.len()
-            invariant self.valid(), self.entries@.dom() == old(self).entries@.dom(),
+            invariant self.valid(), meters.valid(), self.limits == old(self).limits, self.entries@.dom() == old(self).entries@.dom(),
                 keys@.len() <= MAX_FLOWS, index <= keys@.len(),
                 forall|i: int| 0 <= i < keys@.len() ==> self.entries@.dom().contains(keys@[i]),
                 forall|id: u16| old(self).entries@.dom().contains(id) ==> keys@.contains(id),
@@ -801,7 +805,7 @@ impl Table {
         if keys.len() < 64 { self.cursor = 0; }
         else { self.cursor = keys.last().copied().unwrap_or(0).saturating_add(1); }
         for id in keys
-            invariant self.valid(), self.entries@.dom().subset_of(old(self).entries@.dom()),
+            invariant self.valid(), meters.valid(), self.limits == old(self).limits, self.entries@.dom().subset_of(old(self).entries@.dom()),
                 forall|id: u16| old(self).entries@.dom().contains(id) && !self.entries@.dom().contains(id)
                     ==> old(self).entries@[id].release <= now,
         {

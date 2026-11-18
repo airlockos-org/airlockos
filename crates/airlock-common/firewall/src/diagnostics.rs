@@ -184,7 +184,7 @@ impl Peaks {
         requires active <= stored,
         ensures final(self).active_credits == if active > old(self).active_credits { active } else { old(self).active_credits },
             final(self).stored_records == if stored > old(self).stored_records { stored } else { old(self).stored_records },
-            final(self).inactive_records == if stored - active > old(self).inactive_records { stored - active } else { old(self).inactive_records },
+            final(self).inactive_records == if stored - active > old(self).inactive_records { stored - active } else { old(self).inactive_records as int },
     {
         self.active_credits = self.active_credits.max(active);
         self.stored_records = self.stored_records.max(stored);
@@ -251,7 +251,7 @@ pub(crate) struct Meters {
     /// Replaced client histories; global totals remain complete for this boot.
     pub(crate) history_evictions: u64,
     /// Next fixed history slot to replace if every slot is occupied.
-    next_slot: usize,
+    pub(crate) next_slot: usize,
 }
 
 impl Meters {
@@ -274,12 +274,12 @@ impl Meters {
     pub(crate) fn client(&mut self, source: Ip, now: u64) -> (slot: usize)
         requires old(self).valid(), source.valid(),
         ensures final(self).valid(), slot < CLIENT_HISTORY,
-            final(self).clients@[slot] is Some && final(self).clients@[slot].unwrap().source == source,
+            final(self).clients@[slot as int] is Some && final(self).clients@[slot as int].unwrap().source == source,
             final(self).rejections == old(self).rejections && final(self).queue_drops == old(self).queue_drops,
             final(self).native_retries == old(self).native_retries,
             forall|i: int| 0 <= i < CLIENT_HISTORY && i != slot ==> final(self).clients@[i] == old(self).clients@[i],
-            old(self).clients@[slot] is Some && old(self).clients@[slot].unwrap().source == source
-                ==> final(self).clients@[slot] == old(self).clients@[slot],
+            old(self).clients@[slot as int] is Some && old(self).clients@[slot as int].unwrap().source == source
+                ==> final(self).clients@[slot as int] == old(self).clients@[slot as int],
     {
         let existing = self.clients.iter().position(|client: &Option<ClientMeter>| -> (same: bool)
             ensures same == (client.is_some() && client.unwrap().source == source),
