@@ -376,6 +376,11 @@ impl Table {
         self.entries@.dom().filter(|id: u16| self.entries@[id].quota == source)
     }
 
+    /// Every active credit has one charged record in the global view.
+    pub(crate) open spec fn all_active(&self) -> Set<u16> {
+        self.entries@.dom().filter(|id: u16| self.entries@[id].charged_active)
+    }
+
     /// Charged active records; conservative until the expiry maintenance turn.
     pub(crate) open spec fn active_peers(&self, source: Ip) -> Set<u16> {
         self.source_peers(source).filter(|id: u16| self.entries@[id].charged_active)
@@ -405,10 +410,12 @@ impl Table {
 
     /// Actual index/count correspondence, independent of individual packet claims.
     pub(crate) open spec fn accounting_valid(&self) -> bool {
-        self.active == self.entries@.dom().filter(|id: u16| self.entries@[id].charged_active).len()
+        self.active == self.all_active().len()
             && self.active <= self.entries@.len()
             && self.active <= self.limits.value().active_global
-            && self.usage@.dom() == self.entries@.values().map(|flow: Flow| flow.quota)
+            && (forall|id: u16| self.entries@.dom().contains(id) ==>
+                self.usage@.dom().contains(self.entries@[id].quota))
+            && (forall|source: Ip| self.usage@.dom().contains(source) ==> self.source_peers(source).len() > 0)
             && (forall|source: Ip| self.usage@.dom().contains(source) ==>
                 self.usage@[source].records == self.source_peers(source).len()
                 && self.usage@[source].active == self.active_peers(source).len()
@@ -419,9 +426,12 @@ impl Table {
 
     /// Free pools complement owned records; shared-port references stay exact.
     pub(crate) open spec fn allocation_valid(&self) -> bool {
-        self.free_ids@ == Set::new(|id: u16| id >= FIRST && !self.entries@.dom().contains(id)).unwrap()
-            && self.free_ports@ == Set::new(|port: u16| port >= FIRST && !self.ports@.dom().contains(port)).unwrap()
-            && self.ports@.dom() == self.entries@.values().map(|flow: Flow| flow.translated_port)
+        (forall|id: u16| #[trigger] self.free_ids@.contains(id)
+            <==> id >= FIRST && !self.entries@.dom().contains(id))
+            && (forall|port: u16| #[trigger] self.free_ports@.contains(port)
+                <==> port >= FIRST && !self.ports@.dom().contains(port))
+            && (forall|id: u16| self.entries@.dom().contains(id) ==>
+                self.ports@.dom().contains(self.entries@[id].translated_port))
             && (forall|port: u16| self.ports@.dom().contains(port) ==> self.ports@[port] > 0
                 && self.ports@[port] <= self.entries@.len()
                 && self.ports@[port] == self.entries@.dom().filter(|id: u16| self.entries@[id].translated_port == port).len())
@@ -464,7 +474,13 @@ impl Table {
             None => (self.active, self.entries.len()),
             Some(source) => match self.usage.get(&source) {
                 Some(usage) => (usage.active, usage.records),
-                None => (0, 0),
+                None => {
+                    proof {
+                        assert(self.source_peers(source) =~= Set::empty());
+                        assert(self.active_peers(source) =~= Set::empty());
+                    }
+                    (0, 0)
+                },
             },
         };
         Occupancy { active_credits: active, stored_records: stored, inactive_records: stored - active }
@@ -511,11 +527,19 @@ impl Table {
         ensures table.valid(), table.value().len() == 0, table.index_value().len() == 0,
             table.limits_value() == limits.value(),
     {
+        let _ = limits.document();
         proof { crate::library::derived_key_order(); }
-        Self { entries: BTreeMap::new(), outbound: BTreeMap::new(), replies: BTreeMap::new(),
+        let table = Self { entries: BTreeMap::new(), outbound: BTreeMap::new(), replies: BTreeMap::new(),
             sockets: BTreeMap::new(), ports: BTreeMap::new(), usage: BTreeMap::new(), active: 0,
             free_ports: crate::library::port_pool(), free_ids: crate::library::port_pool(), limits, cursor: 0,
-            peaks: Peaks::empty(), reclamation: Reclamation::empty() }
+            peaks: Peaks::empty(), reclamation: Reclamation::empty() };
+        proof {
+            assert(table.all_active() =~= Set::empty());
+            assert(table.mappings_valid());
+            assert(table.accounting_valid());
+            assert(table.allocation_valid());
+        }
+        table
     }
 
     /// Exact original tuple within one admitted native lifetime.
@@ -617,6 +641,7 @@ impl Table {
             policy: mapping.policy, external: mapping.external, translated_port: port, mac: mapping.mac,
             deadline, release: deadline.saturating_add(HOLD), revision: mapping.revision, charged_active: true,
             state: if packet.tuple.proto == 6 { State::Syn { client: packet.tcp.seq } } else { State::Datagram } };
+        let ghost before = *self;
         self.free_ids.remove(&id);
         self.free_ports.remove(&port);
         self.ports.insert(port, references + 1);
@@ -626,17 +651,178 @@ impl Table {
         self.outbound.insert((mapping.owner, packet.tuple), id);
         self.replies.insert(translated, id);
         self.entries.insert(id, flow);
+        proof {
+            assert(self.all_active() =~= before.all_active().insert(id));
+            assert forall|source: Ip| self.source_peers(source) ==
+                (if source == flow.quota { before.source_peers(source).insert(id) } else { before.source_peers(source) }) by {
+                assert(self.source_peers(source) =~=
+                    if source == flow.quota { before.source_peers(source).insert(id) } else { before.source_peers(source) });
+            }
+            assert forall|source: Ip| self.active_peers(source) ==
+                (if source == flow.quota { before.active_peers(source).insert(id) } else { before.active_peers(source) }) by {
+                assert(self.active_peers(source) =~=
+                    if source == flow.quota { before.active_peers(source).insert(id) } else { before.active_peers(source) });
+            }
+            assert forall|other: u16| before.value().dom().contains(other) implies
+                (self.value()[other].translated_port == port <==> self.value()[other].same_socket(&flow)) by {
+                if let Some(existing_port) = shared {
+                    let member = choose|member: u16| before.value().dom().contains(member)
+                        && before.value()[member].original.proto == 17
+                        && socket == (Socket { owner: before.value()[member].owner, source: before.value()[member].original.src,
+                            port: before.value()[member].original.sport, external: before.value()[member].external })
+                        && before.value()[member].translated_port == existing_port;
+                    assert(before.value()[member].same_socket(&flow));
+                    if other != member {
+                        assert((before.value()[other].translated_port == existing_port)
+                            == before.value()[other].same_socket(&before.value()[member]));
+                    }
+                }
+            }
+            assert(self.value().dom().filter(|key: u16| self.value()[key].translated_port == port)
+                =~= before.value().dom().filter(|key: u16| before.value()[key].translated_port == port).insert(id));
+            assert(self.mappings_valid());
+            assert forall|client: Ip| self.usage@.dom().contains(client) implies
+                self.usage@[client].records == self.source_peers(client).len()
+                    && self.usage@[client].active == self.active_peers(client).len() by {
+                if client == mapping.quota && !before.usage@.dom().contains(client) {
+                    assert(before.source_peers(client) =~= Set::empty());
+                    assert(before.active_peers(client) =~= Set::empty());
+                }
+            }
+            vstd::set_lib::lemma_len_subset(self.all_active(), self.value().dom());
+            assert forall|client: Ip| self.usage@.dom().contains(client) implies
+                self.usage@[client].active <= self.usage@[client].records
+                    && self.usage@[client].active <= self.limits.value().active_per_client
+                    && self.usage@[client].records <= self.limits.value().retained_per_client by {
+                vstd::set_lib::lemma_len_subset(self.active_peers(client), self.source_peers(client));
+                if client != mapping.quota {
+                    assert(before.usage@.dom().contains(client));
+                }
+            }
+            assert(self.accounting_valid());
+            assert(self.allocation_valid());
+        }
         self.peaks.observe(self.active, self.entries.len());
         meters.observe(mapping.quota, now, Occupancy { active_credits: usage.active + 1,
             stored_records: usage.records + 1, inactive_records: usage.records - usage.active });
         Ok(id)
     }
 
+    /// Link a record with the credits it owns before changing its active charge.
+    proof fn record_holds_credit(&self, id: u16)
+        requires self.valid(), self.entries@.dom().contains(id),
+        ensures self.usage@.dom().contains(self.entries@[id].quota),
+            self.entries@[id].charged_active ==> self.active > 0 && self.usage@[self.entries@[id].quota].active > 0,
+            !self.entries@[id].charged_active ==> self.active < self.entries@.len()
+                && self.usage@[self.entries@[id].quota].active < self.usage@[self.entries@[id].quota].records,
+    {
+        let source = self.entries@[id].quota;
+        assert(self.source_peers(source).contains(id));
+        if self.entries@[id].charged_active {
+            assert(self.all_active().contains(id));
+            assert(self.active_peers(source).contains(id));
+        } else {
+            self.all_active().lemma_subset_not_in_lt(self.entries@.dom(), id);
+            self.active_peers(source).lemma_subset_not_in_lt(self.source_peers(source), id);
+        }
+    }
+
+    /// In-place lifecycle changes preserve tuple and socket keys. Only the active
+    /// subsets can change, by the same single record as their ledger charges.
+    proof fn preserved_flow_change(&self, before: Self, id: u16)
+        requires before.valid(), before.value().dom().contains(id), self.value().dom().contains(id),
+            self.value() == before.value().insert(id, self.value()[id]),
+            self.value()[id].valid(),
+            self.value()[id].quota == before.value()[id].quota,
+            self.value()[id].owner == before.value()[id].owner,
+            self.value()[id].original == before.value()[id].original,
+            self.value()[id].external == before.value()[id].external,
+            self.value()[id].translated_port == before.value()[id].translated_port,
+            self.value()[id].wire_tuple() == before.value()[id].wire_tuple(),
+            self.outbound@ == before.outbound@, self.replies@ == before.replies@,
+            self.free_ids@ == before.free_ids@, self.free_ports@ == before.free_ports@,
+            self.ports@ == before.ports@, self.sockets@ == before.sockets@,
+            self.limits == before.limits,
+        ensures self.mappings_valid(), self.allocation_valid(),
+            self.value().dom() == before.value().dom(),
+            forall|key: u16| self.value().dom().contains(key) ==> self.value()[key].quota == before.value()[key].quota,
+            self.all_active() == if self.value()[id].charged_active { before.all_active().insert(id) } else { before.all_active().remove(id) },
+            forall|source: Ip| self.source_peers(source) == before.source_peers(source),
+            forall|source: Ip| self.active_peers(source) ==
+                if source == self.value()[id].quota {
+                    if self.value()[id].charged_active { before.active_peers(source).insert(id) } else { before.active_peers(source).remove(id) }
+                } else { before.active_peers(source) },
+    {
+        assert(self.value().dom() =~= before.value().dom());
+        assert forall|a: u16, b: u16| self.value().dom().contains(a) && self.value().dom().contains(b) && a != b implies
+            (self.value()[a].translated_port == self.value()[b].translated_port <==> self.value()[a].same_socket(&self.value()[b])) by {
+            assert(before.value().dom().contains(a) && before.value().dom().contains(b));
+            assert(self.value()[a].same_socket(&self.value()[b]) == before.value()[a].same_socket(&before.value()[b]));
+        }
+        assert forall|port: u16| self.ports@.dom().contains(port) implies
+            self.ports@[port] == self.value().dom().filter(|key: u16| self.value()[key].translated_port == port).len() by {
+            assert(self.value().dom().filter(|key: u16| self.value()[key].translated_port == port)
+                =~= before.value().dom().filter(|key: u16| before.value()[key].translated_port == port));
+        }
+
+        assert(self.all_active() =~= if self.value()[id].charged_active {
+            before.all_active().insert(id)
+        } else { before.all_active().remove(id) });
+        assert forall|source: Ip| self.source_peers(source) == before.source_peers(source) by {
+            assert(self.source_peers(source) =~= before.source_peers(source));
+        }
+        assert forall|source: Ip| self.active_peers(source) ==
+            (if source == self.value()[id].quota {
+                if self.value()[id].charged_active { before.active_peers(source).insert(id) }
+                else { before.active_peers(source).remove(id) }
+            } else { before.active_peers(source) }) by {
+            assert(self.active_peers(source) =~= if source == self.value()[id].quota {
+                if self.value()[id].charged_active { before.active_peers(source).insert(id) }
+                else { before.active_peers(source).remove(id) }
+            } else { before.active_peers(source) });
+        }
+    }
+
+    /// Reconcile the active ledger with the one-record transition.
+    proof fn preserved_active_accounting(&self, before: Self, id: u16)
+        requires before.valid(), before.value().dom().contains(id), self.value().dom() == before.value().dom(),
+            self.value()[id].quota == before.value()[id].quota, self.limits == before.limits,
+            self.usage@.dom() == before.usage@.dom(),
+            forall|source: Ip| self.source_peers(source) == before.source_peers(source),
+            self.all_active() == if self.value()[id].charged_active { before.all_active().insert(id) } else { before.all_active().remove(id) },
+            forall|source: Ip| self.active_peers(source) ==
+                (if source == self.value()[id].quota {
+                    if self.value()[id].charged_active { before.active_peers(source).insert(id) }
+                    else { before.active_peers(source).remove(id) }
+                } else { before.active_peers(source) }),
+            self.active == before.active + (if self.value()[id].charged_active { 1int } else { 0int })
+                - (if before.value()[id].charged_active { 1int } else { 0int }),
+            self.active <= self.limits.value().active_global,
+            forall|source: Ip| self.usage@.dom().contains(source) ==>
+                self.usage@[source].records == before.usage@[source].records
+                && self.usage@[source].active <= self.limits.value().active_per_client
+                && self.usage@[source].active == before.usage@[source].active
+                    + (if source == self.value()[id].quota && self.value()[id].charged_active { 1int } else { 0int })
+                    - (if source == self.value()[id].quota && before.value()[id].charged_active { 1int } else { 0int }),
+            forall|key: u16| self.value().dom().contains(key) ==> self.value()[key].quota == before.value()[key].quota,
+        ensures self.accounting_valid(),
+    {
+        let source = self.value()[id].quota;
+        assert(before.all_active().contains(id) == before.value()[id].charged_active);
+        assert(before.active_peers(source).contains(id) == before.value()[id].charged_active);
+        vstd::set_lib::lemma_len_subset(self.all_active(), self.value().dom());
+        assert forall|client: Ip| self.usage@.dom().contains(client) implies
+            self.usage@[client].active == self.active_peers(client).len()
+                && self.usage@[client].active <= self.usage@[client].records by {
+            vstd::set_lib::lemma_len_subset(self.active_peers(client), self.source_peers(client));
+        }
+    }
+
     /// Apply an already checked flow transition's change in active credits.
     /// The caller keeps the same quota/record and permits activation only after
     /// capacity validation. This helper neither changes records nor allocates.
     fn active_transition(&mut self, source: Ip, was_active: bool, is_active: bool, now: u64, meters: &mut Meters)
-        requires old(meters).valid(), self.usage@.dom().contains(source),
+        requires old(meters).valid(), self.usage@.dom().contains(source), source.valid(),
             vstd::std_specs::btree::key_obeys_cmp_spec::<Ip>(),
             self.active <= self.entries@.len(), self.usage@[source].active <= self.usage@[source].records,
             !was_active && is_active ==> self.active < self.entries@.len() && self.usage@[source].active < self.usage@[source].records,
@@ -670,9 +856,16 @@ impl Table {
         ensures final(meters).valid(), final(self).limits == old(self).limits, final(self).limits_value() == old(self).limits_value(),
             final(self).valid(), final(self).entries@.dom() == old(self).entries@.dom(),
             final(self).outbound@ == old(self).outbound@,
-            result.is_err() ==> *final(self) == *old(self),
+            result.is_err() ==> final(self).value() == old(self).value()
+                && final(self).replies@ == old(self).replies@
+                && final(self).active == old(self).active && final(self).usage@ == old(self).usage@
+                && final(self).free_ids@ == old(self).free_ids@ && final(self).free_ports@ == old(self).free_ports@
+                && final(self).sockets@ == old(self).sockets@ && final(self).ports@ == old(self).ports@
+                && final(self).peaks == old(self).peaks && final(self).reclamation == old(self).reclamation
+                && final(self).cursor == old(self).cursor,
             result.is_ok() ==> old(self).entries@[id].accepts(*packet, outbound, now),
     {
+        proof { self.record_holds_credit(id); }
         let Some(flow) = self.entries.get(&id) else { return Err(AdmissionError::State); };
         let source = flow.quota;
         let was_active = flow.charged_active;
@@ -680,11 +873,19 @@ impl Table {
             if !outbound || matches!(flow.state, State::Retired) || packet.tuple.proto != 17 { return Err(AdmissionError::Transport); }
             if let Some(failure) = self.capacity(source, false) { return Err(failure); }
         }
+        let ghost before = *self;
         let Some(flow) = self.entries.get_mut(&id) else { return Err(AdmissionError::State); };
-        if !flow.accept(packet, outbound, now) { return Err(AdmissionError::Transport); }
+        if !flow.accept(packet, outbound, now) {
+            proof { assert(self.value() =~= before.value()); }
+            return Err(AdmissionError::Transport);
+        }
         if let Some(mac) = mac { flow.mac = mac; }
         let is_active = flow.charged_active;
         self.active_transition(source, was_active, is_active, now, meters);
+        proof {
+            self.preserved_flow_change(before, id);
+            self.preserved_active_accounting(before, id);
+        }
         Ok(())
     }
 
@@ -699,6 +900,11 @@ impl Table {
         for id in keys
             invariant self.valid(), meters.valid(), self.limits == old(self).limits, view.valid(), self.entries@.dom() == old(self).entries@.dom(),
         {
+            proof {
+                if self.entries@.dom().contains(id) { self.record_holds_credit(id); }
+            }
+            let ghost before = *self;
+            let ghost before = *self;
             if let Some(flow) = self.entries.get_mut(&id) {
                 let source = flow.quota;
                 let was_active = flow.charged_active;
@@ -713,6 +919,10 @@ impl Table {
                 } else { flow.revision = view.generation(); }
                 let is_active = flow.charged_active;
                 self.active_transition(source, was_active, is_active, now, meters);
+                proof {
+                    self.preserved_flow_change(before, id);
+                    self.preserved_active_accounting(before, id);
+                }
             }
         }
     }
@@ -737,12 +947,22 @@ impl Table {
             decreases keys.len() - index,
         {
             let id = keys[index];
-            if let Some(flow) = self.entries.get_mut(&id) {
-                if flow.owner == owner {
+            let ghost before = *self;
+            proof {
+                if self.entries@.dom().contains(id) { self.record_holds_credit(id); }
+            }
+            if self.entries.get(&id).is_some_and(|flow: &Flow| -> (matches: bool)
+                ensures matches == (flow.owner == owner), { flow.owner == owner })
+            {
+                if let Some(flow) = self.entries.get_mut(&id) {
                     let source = flow.quota;
                     let was_active = flow.charged_active;
                     flow.retire(now);
                     self.active_transition(source, was_active, false, now, meters);
+                    proof {
+                        self.preserved_flow_change(before, id);
+                        self.preserved_active_accounting(before, id);
+                    }
                 }
             }
             index += 1;
@@ -762,6 +982,8 @@ impl Table {
         ensures final(meters).valid(), final(self).limits == old(self).limits, final(self).limits_value() == old(self).limits_value(),
             final(self).valid(), final(self).entries@ == old(self).entries@.remove(id),
     {
+        let ghost before = *self;
+        proof { self.record_holds_credit(id); }
         let Some(flow) = self.entries.get(&id) else { return; };
         let source = flow.quota;
         let owner = flow.owner;
@@ -788,6 +1010,58 @@ impl Table {
         self.reclamation.last_release_ns = Some(now);
         if usage.records == 1 { self.usage.remove(&source); }
         else { self.usage.insert(source, Usage { active: usage.active - if was_active { 1 } else { 0 }, records: usage.records - 1 }); }
+        proof {
+            assert(self.all_active() =~= before.all_active().remove(id));
+            assert forall|client: Ip| self.source_peers(client) == before.source_peers(client).remove(id) by {
+                assert(self.source_peers(client) =~= before.source_peers(client).remove(id));
+            }
+            assert forall|client: Ip| self.active_peers(client) == before.active_peers(client).remove(id) by {
+                assert(self.active_peers(client) =~= before.active_peers(client).remove(id));
+            }
+            assert(self.mappings_valid());
+            assert(before.source_peers(source).contains(id));
+            assert(self.source_peers(source).len() + 1 == before.source_peers(source).len());
+            assert(self.value().dom().filter(|key: u16| self.value()[key].translated_port == port)
+                =~= before.value().dom().filter(|key: u16| before.value()[key].translated_port == port).remove(id));
+            assert forall|client: Ip| self.usage@.dom().contains(client) implies
+                self.usage@[client].records == self.source_peers(client).len()
+                    && self.usage@[client].active == self.active_peers(client).len() by {
+                if client == source {
+                    assert(before.active_peers(client).contains(id) == was_active);
+                } else {
+                    assert(!before.source_peers(client).contains(id));
+                    assert(!before.active_peers(client).contains(id));
+                }
+            }
+            assert forall|key: u16| self.value().dom().contains(key) implies
+                self.usage@.dom().contains(self.value()[key].quota) by {
+                if self.value()[key].quota == source {
+                    assert(self.source_peers(source).contains(key));
+                    assert(self.source_peers(source).len() > 0);
+                }
+            }
+            assert(self.accounting_valid());
+            if references == 1 {
+                let owners = before.value().dom().filter(|key: u16| before.value()[key].translated_port == port);
+                assert(owners.contains(id));
+                assert(owners.len() == 1);
+                assert(owners.remove(id) =~= Set::empty());
+                assert forall|key: u16| self.value().dom().contains(key) implies self.value()[key].translated_port != port by {
+                    if self.value()[key].translated_port == port { assert(owners.remove(id).contains(key)); }
+                }
+            }
+            assert forall|key: u16| self.value().dom().contains(key) && self.value()[key].original.proto == 17 implies
+                self.sockets@.dom().contains(Socket { owner: self.value()[key].owner, source: self.value()[key].original.src,
+                    port: self.value()[key].original.sport, external: self.value()[key].external })
+                && self.sockets@[Socket { owner: self.value()[key].owner, source: self.value()[key].original.src,
+                    port: self.value()[key].original.sport, external: self.value()[key].external }] == self.value()[key].translated_port by {
+                if references == 1 && original.proto == 17 {
+                    assert(self.value()[key].translated_port != port);
+                    assert(!before.value()[key].same_socket(&before.value()[id]));
+                }
+            }
+            assert(self.allocation_valid());
+        }
     }
 
     /// At most 64 records per turn. Inactive credit reclamation and eventual
@@ -806,9 +1080,15 @@ impl Table {
         else { self.cursor = keys.last().copied().unwrap_or(0).saturating_add(1); }
         for id in keys
             invariant self.valid(), meters.valid(), self.limits == old(self).limits, self.entries@.dom().subset_of(old(self).entries@.dom()),
+                forall|key: u16| self.entries@.dom().contains(key) ==>
+                    self.entries@[key].release >= old(self).entries@[key].release,
                 forall|id: u16| old(self).entries@.dom().contains(id) && !self.entries@.dom().contains(id)
                     ==> old(self).entries@[id].release <= now,
         {
+            proof {
+                if self.entries@.dom().contains(id) { self.record_holds_credit(id); }
+            }
+            let ghost before = *self;
             if let Some(flow) = self.entries.get_mut(&id) {
                 let source = flow.quota;
                 let was_active = flow.charged_active;
@@ -819,6 +1099,10 @@ impl Table {
                 let is_active = flow.charged_active;
                 let release = now >= flow.release;
                 self.active_transition(source, was_active, is_active, now, meters);
+                proof {
+                    self.preserved_flow_change(before, id);
+                    self.preserved_active_accounting(before, id);
+                }
                 if release { self.release(id, now, meters); }
             }
         }
