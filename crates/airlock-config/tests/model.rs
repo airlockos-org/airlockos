@@ -1007,6 +1007,45 @@ fn backends_share_roles_and_freeze_independent_snapshots() {
     assert!(machine.finish().is_ok());
 }
 
+/// Typed firewall settings survive finalization as metadata on the native VM.
+#[test]
+fn hermit_firewall_parameters_survive_snapshot_validation() {
+    use airlock_firewall_parameters::{Document, FEATURE, decode};
+
+    let network = Vm::network("sys-net", GiB(2)).unwrap();
+    let firewall = Vm::hermit_firewall("sys-firewall", &network).unwrap();
+    let parameters = Document {
+        report_interval_seconds: 1,
+        ..Document::default()
+    };
+    firewall.set_firewall_parameters(parameters).unwrap();
+    let mut machine = Machine::default();
+    machine.add(&network).unwrap();
+    machine.add(&firewall).unwrap();
+
+    let snapshot = machine.finish().unwrap();
+    let frozen = snapshot
+        .vms()
+        .find(|vm| vm.name.as_str() == "sys-firewall")
+        .unwrap();
+    assert_eq!(
+        *decode(Some(frozen.features[FEATURE].as_bytes()))
+            .unwrap()
+            .document(),
+        parameters
+    );
+
+    assert!(firewall.set_feature(FEATURE, "{}").is_err());
+    assert!(
+        firewall
+            .set_firewall_parameters(Document {
+                report_interval_seconds: 0,
+                ..parameters
+            })
+            .is_err()
+    );
+}
+
 #[test]
 fn hermit_rejects_linux_capabilities_and_unsupported_resources() {
     use model::HermitApplication;

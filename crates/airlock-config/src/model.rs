@@ -1118,7 +1118,6 @@ impl MachineSnapshot {
                         service_providers: [
                             "airlock-clipboard-authority",
                             "airlock-clipboard-service",
-                            airlock_firewall_parameters::FEATURE,
                         ]
                         .iter()
                         .filter_map(|key| {
@@ -1348,12 +1347,17 @@ impl Machine {
                     || settings.vcpus != 1
                     || settings.root_image.0 != 0
                     || !definition.modules.borrow().is_empty()
-                    // Only the network application advertises Qubes' canonical
-                    // IPv6 flag; Linux service and transport features stay closed.
+                    // Allow only the native network settings understood by Hermit.
                     || definition.features.borrow().iter().any(|(name, value)| {
-                        !(application.networking()
-                            && name == "ipv6"
-                            && ["", "1"].contains(&value.as_str()))
+                        !application.networking()
+                            || match name.as_str() {
+                                "ipv6" => !["", "1"].contains(&value.as_str()),
+                                airlock_firewall_parameters::FEATURE => {
+                                    airlock_firewall_parameters::decode(Some(value.as_bytes()))
+                                        .is_err()
+                                }
+                                _ => true,
+                            }
                     })
                     || definition.gui.borrow().is_some())
             {
