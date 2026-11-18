@@ -113,6 +113,15 @@ impl Control {
     /// Exact current-boot synchronization handoff state.
     pub closed spec fn startup(&self) -> Startup { self.startup }
 
+    /// Frozen optional startup document.
+    pub closed spec fn initial_parameter_bytes(&self) -> Option<Option<Seq<u8>>> {
+        match self.initial_parameters {
+            None => None,
+            Some(None) => Some(None),
+            Some(Some(bytes)) => Some(Some(bytes@)),
+        }
+    }
+
     /// Exact native output suffix selected for the transport.
     pub closed spec fn unpublished(&self) -> Seq<u8> { self.native.unpublished() }
 
@@ -183,7 +192,7 @@ impl Control {
     /// Retained bytes remain bounded diagnostics and cannot be replayed.
     pub fn disconnect(&mut self)
         requires old(self).parts_valid(),
-        ensures (old(self).initial_parameters is Some ==> final(self).initial_parameters == old(self).initial_parameters),
+        ensures (old(self).initial_parameter_bytes() is Some ==> final(self).initial_parameter_bytes() == old(self).initial_parameter_bytes()),
             final(self).valid(), final(self).startup() is Lost,
             final(self).view().phase() == crate::projection::Phase::Lost,
     {
@@ -196,7 +205,7 @@ impl Control {
     /// Any failure revokes the network projection before returning to the owner.
     pub fn tick(&mut self, now: u64) -> (live: bool)
         requires old(self).valid(),
-        ensures (old(self).initial_parameters is Some ==> final(self).initial_parameters == old(self).initial_parameters),
+        ensures (old(self).initial_parameter_bytes() is Some ==> final(self).initial_parameter_bytes() == old(self).initial_parameter_bytes()),
             final(self).valid(), !live ==> final(self).startup() is Lost,
             live ==> final(self).view().phase() == old(self).view().phase()
                 && final(self).view().revision() >= old(self).view().revision() && final(self).startup() == old(self).startup(),
@@ -209,7 +218,7 @@ impl Control {
     /// every network gate rather than overwriting unconsumed control data.
     pub fn deliver(&mut self, bytes: &[u8]) -> (accepted: bool)
         requires old(self).valid(),
-        ensures (old(self).initial_parameters is Some ==> final(self).initial_parameters == old(self).initial_parameters),
+        ensures (old(self).initial_parameter_bytes() is Some ==> final(self).initial_parameter_bytes() == old(self).initial_parameter_bytes()),
             final(self).valid(), !accepted ==> final(self).startup() is Lost,
     {
         if !self.native.deliver(bytes) { self.disconnect(); return false; }
@@ -226,7 +235,7 @@ impl Control {
     /// response or permission to commit a boot notice/handled counter locally.
     pub fn published(&mut self, count: usize) -> (accepted: bool)
         requires old(self).valid(),
-        ensures (old(self).initial_parameters is Some ==> final(self).initial_parameters == old(self).initial_parameters),
+        ensures (old(self).initial_parameter_bytes() is Some ==> final(self).initial_parameter_bytes() == old(self).initial_parameter_bytes()),
             final(self).valid(), !accepted ==> final(self).startup() is Lost,
     {
         if !self.native.published(count) { self.disconnect(); return false; }
@@ -238,7 +247,7 @@ impl Control {
     /// the projection alone decides when a complete policy can become usable.
     pub fn step(&mut self) -> (step: Step)
         requires old(self).valid(),
-        ensures (old(self).initial_parameters is Some ==> final(self).initial_parameters == old(self).initial_parameters),
+        ensures (old(self).initial_parameter_bytes() is Some ==> final(self).initial_parameter_bytes() == old(self).initial_parameter_bytes()),
             final(self).valid(), step is Failed ==> final(self).startup() is Lost,
             old(self).startup() is Lost ==> step is Failed,
             step is Synchronized ==> final(self).startup() is Ready,
@@ -333,7 +342,7 @@ impl Control {
     /// is forbidden by the upstream daemon and is never used as a barrier.
     pub fn barrier(&mut self, root: &[u8]) -> (serial: Option<u32>)
         requires old(self).valid(), root@.len() < 64,
-        ensures (old(self).initial_parameters is Some ==> final(self).initial_parameters == old(self).initial_parameters),
+        ensures (old(self).initial_parameter_bytes() is Some ==> final(self).initial_parameter_bytes() == old(self).initial_parameter_bytes()),
             final(self).valid(), serial.is_some() == old(self).can_barrier(root@),
             serial.is_some() ==> serial.unwrap() > 0 && final(self).view() == old(self).view(),
     {
@@ -374,7 +383,7 @@ impl Control {
     /// bypassing the source's original ordered native completion observation.
     pub fn resolve(&mut self, answers: crate::resolution::Resolved, now: u64) -> (accepted: bool)
         requires old(self).valid(), answers.valid(),
-        ensures (old(self).initial_parameters is Some ==> final(self).initial_parameters == old(self).initial_parameters),
+        ensures (old(self).initial_parameter_bytes() is Some ==> final(self).initial_parameter_bytes() == old(self).initial_parameter_bytes()),
             final(self).valid(),
             accepted ==> final(self).view().resolved_for(answers.source_value(), answers)
                 && final(self).view().revision() == old(self).view().revision() + 1,
@@ -413,8 +422,8 @@ impl Control {
     pub fn firewall_parameters(&self) -> (parameters: Option<Option<&[u8]>>)
         requires self.valid(),
         ensures parameters.is_some() == (self.startup() is Ready),
-            parameters.is_some() ==> match (parameters.unwrap(), self.initial_parameters.unwrap()) {
-                (Some(bytes), Some(selected)) => bytes@ == selected@,
+            parameters.is_some() ==> match (parameters.unwrap(), self.initial_parameter_bytes().unwrap()) {
+                (Some(bytes), Some(selected)) => bytes@ == selected,
                 (None, None) => true,
                 _ => false,
             },
