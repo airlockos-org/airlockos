@@ -13,4 +13,7 @@ static HEAP: airlock_bounded_heap::FixedHeap<
 > = airlock_bounded_heap::FixedHeap::new();
 
 #[cfg(target_os = "hermit")]
+mod console;
+
+#[cfg(target_os = "hermit")]
 pub mod service;

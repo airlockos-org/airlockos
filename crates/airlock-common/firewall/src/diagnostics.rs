@@ -13,7 +13,7 @@ verus! {
 broadcast use { vstd::std_specs::iter::group_iter_axioms,
     vstd::seq::Seq::lemma_as_ref_index, vstd::seq_lib::group_seq_properties };
 
-/// Retain the four current client identities plus a small amount of history.
+/// Retain up to eight client histories in a fixed insertion cycle.
 pub const CLIENT_HISTORY: usize = 2 * crate::MAX_CLIENTS;
 
 /// Counter for each distinct admission outcome, excluding policy/parser drops.
@@ -277,6 +277,8 @@ impl Meters {
             final(self).clients@[slot as int] is Some && final(self).clients@[slot as int].unwrap().source == source,
             final(self).rejections == old(self).rejections && final(self).queue_drops == old(self).queue_drops,
             final(self).native_retries == old(self).native_retries,
+            final(self).history_evictions == old(self).history_evictions.saturating_add(
+                if old(self).clients@[slot as int] is Some && old(self).clients@[slot as int].unwrap().source != source { 1 } else { 0 }),
             forall|i: int| 0 <= i < CLIENT_HISTORY && i != slot ==> final(self).clients@[i] == old(self).clients@[i],
             old(self).clients@[slot as int] is Some && old(self).clients@[slot as int].unwrap().source == source
                 ==> final(self).clients@[slot as int] == old(self).clients@[slot as int],

@@ -2,6 +2,7 @@
 //! events, four client owners and upstream frames, then returns to a timed wait.
 //! No Linux processes, lab transport, qrexec service or deployment role is added.
 
+use crate::console::Reports;
 use airlock_boot_core::Challenge;
 use airlock_firewall_core::{Engine, MAX_CLIENTS, Output, Owner, Target};
 use airlock_hermit_control::xen::{Certificate, Event, Pending, Session};
@@ -17,9 +18,6 @@ use xen_transport::hermit::{
 /// polling can issue an actual round trip to drain queued events; its deadline
 /// must allow daemon scheduling independently of the maintenance wake interval.
 const CONTROL_TIMEOUT_NS: u64 = 500_000_000;
-
-/// Keep each optional resource record well inside dom0's 64 KiB console tail.
-const MAX_RESOURCE_REPORT_BYTES: usize = 16 * 1024;
 
 /// Shared failures stop forwarding; downstream failures quarantine only their
 /// owner. Uncertain native resources remain charged until VM teardown. No
@@ -169,9 +167,7 @@ pub fn run(challenge: Challenge, seed: [u8; 32]) -> Result<(), Error> {
     let mut engine = Engine::with_parameters(seed, parameters);
     let mut discovery_at = 0;
     let mut announced = false;
-    let mut status_at = 0;
-    let mut resources_at = 0;
-    let mut previous_status = None;
+    let mut reports = Reports::new(&boot);
     loop {
         // Capture the event generation before work to avoid a lost wakeup.
         let observed = endpoint::generation();
@@ -298,33 +294,17 @@ pub fn run(challenge: Challenge, seed: [u8; 32]) -> Result<(), Error> {
             return Err(Error::State);
         }
         let now = endpoint::now_ns();
-        let resources_due = now >= resources_at;
-        if resources_due {
-            let interval = u64::from(engine.parameters().report_interval_seconds) * 1_000_000_000;
-            resources_at = now.saturating_add(interval);
-            publish_resources(&engine, &boot, now);
-        }
-        // Publish transitions immediately and retain the normal heartbeat.
-        // Follow resource output with fresh lifecycle status so even a one-second
-        // resource interval cannot push the latest status out of dom0's 64 KiB tail.
-        if previous_status != Some(status) || now >= status_at || resources_due {
-            let parameters = airlock_firewall_core::parameters::BootReport {
-                boot: boot.clone(),
-                settings: *engine.parameters(),
-            };
-            publish_bounded::<{ airlock_firewall_core::parameters::MAX_BOOT_REPORT_BYTES }>(
-                "AIRLOCK_FIREWALL_PARAMETERS",
-                &parameters,
-            );
-            let report = airlock_qubes_network::status::Report {
-                boot: boot.clone(),
-                snapshot: status,
-            };
-            let report = serde_json::to_string(&report).map_err(|_| Error::State)?;
-            println!("AIRLOCK_FIREWALL_STATUS {report}");
-            previous_status = Some(status);
-            status_at = now.saturating_add(airlock_qubes_network::status::HEARTBEAT_NS);
-        }
+        reports
+            .publish(
+                now,
+                &engine,
+                status,
+                || crate::HEAP.usage(),
+                |prefix, json| {
+                    println!("{prefix} {json}");
+                },
+            )
+            .map_err(|_| Error::State)?;
         // Maintenance wakeups also drive grant revocation and deadlines when a
         // peer stops producing events. The event counter makes this race safe.
         match endpoint::wait(observed, endpoint::now_ns().saturating_add(1_000_000)) {
@@ -336,48 +316,6 @@ pub fn run(challenge: Challenge, seed: [u8; 32]) -> Result<(), Error> {
                 });
             }
         }
-    }
-}
-
-/// Publish one scheduled observation without changing control/readiness state.
-/// A serialization/size failure skips this optional report and stays rate-limited
-/// by the caller; it never converts resource pressure into a fatal service error.
-fn publish_resources(engine: &Engine, boot: &str, now: u64) {
-    let resources = engine.resource_snapshot();
-    let (requested, peak_requested) = crate::HEAP.usage();
-    let report = airlock_firewall_core::diagnostics::Report {
-        schema: "airlock.firewall.resources.v1",
-        boot,
-        at_ns: now,
-        settings: engine.parameters(),
-        compiled_record_ceiling: airlock_firewall_core::parameters::MAX_RECORDS,
-        compiled_client_record_ceiling: airlock_firewall_core::CLIENT_FLOWS,
-        resources,
-        heap_requested_bytes: requested,
-        heap_peak_requested_bytes: peak_requested,
-        heap_arena_bytes: airlock_firewall_core::parameters::APPLICATION_HEAP_BYTES,
-    };
-    publish_bounded::<MAX_RESOURCE_REPORT_BYTES>("AIRLOCK_FIREWALL_RESOURCES", &report);
-}
-
-/// Serialize either bounded observation with serde and std's fixed slice writer.
-/// Partial output is never printed. Prefixes and limits come from these two fixed
-/// callers; no input can select a console format or enlarge the scratch buffer.
-fn publish_bounded<const N: usize>(prefix: &str, report: &impl serde::Serialize) {
-    let mut storage = [0; N];
-    let mut writer = std::io::Cursor::new(storage.as_mut_slice());
-    if serde_json::to_writer(&mut writer, report).is_err() {
-        log::warn!("operation=firewall-report.publish prefix={prefix} error=serialization_or_size");
-        return;
-    }
-    let length = writer.position() as usize;
-    let Some(bytes) = storage.get(..length) else {
-        log::warn!("operation=firewall-report.publish prefix={prefix} error=writer_length");
-        return;
-    };
-    match core::str::from_utf8(bytes) {
-        Ok(json) => println!("{prefix} {json}"),
-        Err(_) => log::warn!("operation=firewall-report.publish prefix={prefix} error=encoding"),
     }
 }
 

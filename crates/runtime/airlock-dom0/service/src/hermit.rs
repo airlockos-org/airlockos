@@ -384,7 +384,6 @@ pub fn ready(name: &str, artifact: &Descriptor, xid: u32) -> Result<()> {
     );
     let (output, metadata) = console_output(&name, &execution)?;
     if artifact.application.networking() {
-        use airlock_qubes_network::status::{Report, State, classify};
         // Allow one unchanged heartbeat plus scheduling/console slack. A live
         // Xen domain with an old ready line is insufficient progress evidence.
         ensure!(
@@ -392,36 +391,7 @@ pub fn ready(name: &str, artifact: &Descriptor, xid: u32) -> Result<()> {
                 <= airlock_qubes_network::status::FRESHNESS_SECONDS,
             "firewall status has expired"
         );
-        let latest = output
-            .lines()
-            .rev()
-            .map(console_line)
-            .find(|line| {
-                line.starts_with("AIRLOCK_FIREWALL_STATUS ")
-                    || line.starts_with("AIRLOCK_FIREWALL_STOP")
-            })
-            .context("firewall has not published current-boot status")?;
-        let json = latest
-            .strip_prefix("AIRLOCK_FIREWALL_STATUS ")
-            .context("firewall stopped")?;
-        ensure!(json.len() <= 1024, "oversized firewall status");
-        let report: Report = serde_json::from_str(json)?;
-        let status = report.snapshot;
-        ensure!(
-            report.boot == execution.nonce
-                && execution.network.is_some()
-                && status.revision > 0
-                && status.state == State::Ready
-                && classify(true, status.expected, status.interfaces, status.admitted)
-                    == State::Ready,
-            "firewall configuration, policies or native devices are not ready"
-        );
-        if let Some(expected) = execution.parameters {
-            ensure!(
-                observed_parameters(&output, &execution)? == Some(expected),
-                "firewall effective parameters differ from the reviewed boot selection"
-            );
-        }
+        check_firewall_status(&output, &execution)?;
         return Ok(());
     }
     let mode = match artifact.authority {
@@ -440,16 +410,50 @@ pub fn ready(name: &str, artifact: &Descriptor, xid: u32) -> Result<()> {
     Ok(())
 }
 
+/// Check the latest lifecycle observation for the protected execution.
+fn check_firewall_status(output: &str, execution: &Execution) -> Result<()> {
+    use airlock_qubes_network::status::{Report, State, classify};
+
+    let latest = output
+        .lines()
+        .rev()
+        .map(console_line)
+        .find(|line| {
+            line.starts_with("AIRLOCK_FIREWALL_STATUS ")
+                || line.starts_with("AIRLOCK_FIREWALL_STOP")
+        })
+        .context("firewall has not published current-boot status")?;
+    let json = latest
+        .strip_prefix("AIRLOCK_FIREWALL_STATUS ")
+        .context("firewall stopped")?;
+    ensure!(json.len() <= 1024, "oversized firewall status");
+    let report: Report = serde_json::from_str(json)?;
+    let status = report.snapshot;
+    ensure!(
+        report.boot == execution.nonce
+            && execution.network.is_some()
+            && status.revision > 0
+            && status.state == State::Ready
+            && classify(true, status.expected, status.interfaces, status.admitted) == State::Ready,
+        "firewall configuration, policies or native devices are not ready"
+    );
+    if let Some(expected) = execution.parameters {
+        ensure!(
+            observed_parameters(output, execution)? == Some(expected),
+            "firewall effective parameters differ from the reviewed boot selection"
+        );
+    }
+    Ok(())
+}
+
 /// Read a bounded console suffix within the protected boot's original inode.
 fn console_output(
     name: &airlock_nix_core::identity::GuestName,
     execution: &Execution,
 ) -> Result<(String, fs::Metadata)> {
-    use std::io::{Seek, SeekFrom};
-
     let path = console(name);
     crate::state::trusted(&path)?;
-    let mut file = fs::File::open(path)?;
+    let file = fs::File::open(path)?;
     let metadata = file.metadata()?;
     ensure!(
         metadata.is_file()
@@ -464,10 +468,32 @@ fn console_output(
     } else {
         execution.offset
     };
-    file.seek(SeekFrom::Start(start))?;
-    let mut output = String::new();
-    file.take(256 * 1024).read_to_string(&mut output)?;
+    let output = read_console_suffix(file, start, execution.offset)?;
     Ok((output, metadata))
+}
+
+/// Align a truncated tail to a whole line before interpreting console text.
+fn read_console_suffix(
+    mut file: impl Read + std::io::Seek,
+    start: u64,
+    boot_offset: u64,
+) -> Result<String> {
+    let lookbehind = u64::from(start > boot_offset);
+    file.seek(std::io::SeekFrom::Start(start - lookbehind))?;
+    let mut output = Vec::new();
+    file.take(256 * 1024 + lookbehind)
+        .read_to_end(&mut output)?;
+
+    if lookbehind != 0 {
+        // The preceding byte distinguishes an exact line boundary from a partial
+        // line, which might begin mid-character or resemble a lifecycle marker.
+        let first_complete = output
+            .iter()
+            .position(|&byte| byte == b'\n')
+            .map_or(output.len(), |index| index + 1);
+        output.drain(..first_complete);
+    }
+    Ok(String::from_utf8(output)?)
 }
 
 /// Decode the latest settings-only observation for this exact boot. The small
