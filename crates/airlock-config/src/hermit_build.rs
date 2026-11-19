@@ -256,7 +256,9 @@ pub(crate) fn constructor(
                     }.merge_attrs(NixValue::if_else(network.clone().and(request.clone().select("ipv6")), nix_record! { "ipv6": "1" }, nix_record! {}))
                         .merge_attrs(NixValue::if_else(request.clone().select("clipboardAuthority").equals(NixValue::null()), nix_record! {}, nix_record! { "airlock-clipboard-authority": request.clone().select("clipboardAuthority") }))
                         .merge_attrs(NixValue::if_else(network.clone().and(request.clone().select("firewallParameters").equals(NixValue::null()).equals(false)),
-                            NixValue::record([(airlock_firewall_parameters::FEATURE, request.clone().select("firewallParameters"))]), nix_record! {})),
+                            NixValue::record([(airlock_firewall_parameters::FEATURE, request.clone().select("firewallParameters"))]), nix_record! {}))
+                        .merge_attrs(NixValue::if_else(network.clone().and(request.clone().attr_or("firewallSettingsSource", NixValue::null()).equals(crate::model::FIREWALL_SETTINGS_FILE)),
+                            NixValue::record([(crate::model::FIREWALL_SETTINGS_SOURCE, crate::model::FIREWALL_SETTINGS_FILE.into())]), nix_record! {})),
                     "services": nix_record! {}, "devices": nix_record! {},
                     "backend": nix_record! { "type": "hermit", "system": nix_record! { "source": image.to_text() }, "artifact": artifact,
                         "scratch": NixValue::if_else(request.clone().select("scratchMiB").equals(NixValue::null()), NixValue::null(), nix_record! { "bytes": NixValue::builtin("mul").call(request.clone().select("scratchMiB")).call(1024_i64*1024) }),

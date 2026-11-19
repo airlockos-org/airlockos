@@ -113,6 +113,7 @@ pub(crate) fn builders(machine: &MachineSnapshot) -> PackageFunction {
                                 "ipv6": vm.features.get("ipv6").is_some_and(|value| value == "1"),
                                 "clipboardAuthority": vm.features.get("airlock-clipboard-authority").map_or_else(NixValue::null, |name| name.as_str().into()),
                                 "firewallParameters": vm.features.get(airlock_firewall_parameters::FEATURE).map_or_else(NixValue::null, |value| value.as_str().into()),
+                                "firewallSettingsSource": vm.features.get(crate::model::FIREWALL_SETTINGS_SOURCE).map_or_else(NixValue::null, |value| value.as_str().into()),
                                 "scratchMiB": scratch.map_or_else(NixValue::null, |size| i64::from(size.0).into()),
                                 "compiledApplication": inputs.extra_vm_special_args().as_expression()
                                     .attr_or("airlockCompiledApplications", nix_record! {})
