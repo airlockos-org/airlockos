@@ -35,6 +35,7 @@ const MANIFESTS: &[(&str, &str)] = manifests![
     "airlock-common/clipboard",
     "airlock-common/bounded-heap",
     "airlock-common/firewall",
+    "airlock-common/firewall-parameters",
     "runtime/airlock-sys-firewall",
     "runtime/airlock-sys-clipboard",
     "runtime/airlock-hermit-control",
