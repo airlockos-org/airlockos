@@ -183,6 +183,7 @@ pub(crate) fn constructor(
             "ipv6",
             "clipboardAuthority",
             "firewallParameters",
+            "firewallSettingsSource",
             "scratchMiB",
             "compiledApplication",
         ],
@@ -257,7 +258,7 @@ pub(crate) fn constructor(
                         .merge_attrs(NixValue::if_else(request.clone().select("clipboardAuthority").equals(NixValue::null()), nix_record! {}, nix_record! { "airlock-clipboard-authority": request.clone().select("clipboardAuthority") }))
                         .merge_attrs(NixValue::if_else(network.clone().and(request.clone().select("firewallParameters").equals(NixValue::null()).equals(false)),
                             NixValue::record([(airlock_firewall_parameters::FEATURE, request.clone().select("firewallParameters"))]), nix_record! {}))
-                        .merge_attrs(NixValue::if_else(network.clone().and(request.clone().attr_or("firewallSettingsSource", NixValue::null()).equals(crate::model::FIREWALL_SETTINGS_FILE)),
+                        .merge_attrs(NixValue::if_else(network.clone().and(request.clone().select("firewallSettingsSource").equals(crate::model::FIREWALL_SETTINGS_FILE)),
                             NixValue::record([(crate::model::FIREWALL_SETTINGS_SOURCE, crate::model::FIREWALL_SETTINGS_FILE.into())]), nix_record! {})),
                     "services": nix_record! {}, "devices": nix_record! {},
                     "backend": nix_record! { "type": "hermit", "system": nix_record! { "source": image.to_text() }, "artifact": artifact,
@@ -300,7 +301,7 @@ pub(crate) fn constructor(
                             .equals(NixValue::null()),
                     ),
             );
-            (vec![("application", "clipboard".into()), ("upstream", NixValue::null()), ("autostart", false.into()), ("ipv6", false.into()), ("clipboardAuthority", NixValue::null()), ("scratchMiB", NixValue::null()), ("compiledApplication", NixValue::null()), ("firewallParameters", NixValue::null())],
+            (vec![("application", "clipboard".into()), ("upstream", NixValue::null()), ("autostart", false.into()), ("ipv6", false.into()), ("clipboardAuthority", NixValue::null()), ("scratchMiB", NixValue::null()), ("compiledApplication", NixValue::null()), ("firewallParameters", NixValue::null()), ("firewallSettingsSource", NixValue::null())],
             NixValue::if_else(pinned.and(capabilities), output, NixValue::builtin("throw").call("Hermit requires the reviewed integration, source identity and application capabilities")))
         },
     )
