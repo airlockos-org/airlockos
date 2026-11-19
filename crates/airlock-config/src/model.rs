@@ -1369,6 +1369,7 @@ impl Machine {
                                     airlock_firewall_parameters::decode(Some(value.as_bytes()))
                                         .is_err()
                                 }
+                                FIREWALL_SETTINGS_SOURCE => value != FIREWALL_SETTINGS_FILE,
                                 _ => true,
                             }
                     })
