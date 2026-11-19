@@ -3,7 +3,10 @@
 use crate::model::*;
 use crate::relationships::{Relationships, guests, strings};
 use airlock_machine_planning::deployment::{Change, Configuration, SeedPlan};
-use airlock_nix_core::identity::GuestName;
+use airlock_nix_core::{
+    identity::GuestName,
+    review::{FirewallParameterActivation, FirewallParameterChange, PciHandoff},
+};
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 use serde_json::Value;
@@ -239,16 +242,15 @@ pub fn plan(
     if let (Some(a), Some(b)) = (pci_owner(old)?, pci_owner(new)?)
         && a != b
     {
-        result.pci_handoff = Some(serde_json::json!({"from":a,"to":b}));
+        result.pci_handoff = Some(PciHandoff { from: a, to: b });
     }
 
-    let mut parameters = BTreeMap::new();
     for (name, domain) in &new.domains {
         let after = if domain
             .features
             .contains_key(airlock_firewall_parameters::FEATURE)
         {
-            domain.firewall_parameters()?
+            domain.firewall_limits()?
         } else {
             None
         };
@@ -260,22 +262,26 @@ pub fn plan(
                     .features
                     .contains_key(airlock_firewall_parameters::FEATURE)
             })
-            .map(Domain::firewall_parameters)
+            .map(Domain::firewall_limits)
             .transpose()?
             .flatten();
         if after != before {
-            parameters.insert(name.to_string(), serde_json::json!({
-                "before": before, "after": after, "activation": "next-vm-start",
-                "restart_required": running.contains(name),
-                "executable_unchanged": old.domains.get(name).map(|domain| &domain.backend) == Some(&domain.backend),
-            }));
+            result.firewall_parameters.insert(
+                name.clone(),
+                FirewallParameterChange {
+                    before,
+                    after,
+                    activation: FirewallParameterActivation::NextVmStart,
+                    restart_required: running.contains(name),
+                    executable_unchanged: old.domains.get(name).map(|domain| &domain.backend)
+                        == Some(&domain.backend),
+                    executable: domain
+                        .backend
+                        .hermit()
+                        .map(|artifact| artifact.executable.clone()),
+                },
+            );
         }
-    }
-    if !parameters.is_empty() {
-        result.extra.insert(
-            "firewall_parameters".into(),
-            serde_json::to_value(parameters)?,
-        );
     }
 
     Ok(result)

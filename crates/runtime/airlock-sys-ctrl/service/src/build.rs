@@ -30,6 +30,7 @@ use std::{
 };
 
 mod cache;
+mod firewall_settings;
 
 const MACHINE_SCHEMA: &str = "airlock.sys-ctrl-machine-release.v2";
 
@@ -176,16 +177,21 @@ fn build_release(store: &StateStore, grant: &Grant, lock: &OperationLock) -> Res
 pub(super) fn execute(store: &StateStore, grant: &Grant, lock: &OperationLock) -> Result<Value> {
     grant.check(lock)?;
     if grant.header.action.is_machine() {
+        if grant.header.action != Action::MachineBuild
+            && let Some(result) = firewall_settings::execute(grant, lock, profile()?)?
+        {
+            return Ok(result);
+        }
         let release = progress::phase("building_release", || build_release(store, grant, lock))?;
-        let publication = cache::publish(store, grant, lock, &release)?;
         if grant.header.action == Action::MachineBuild {
+            let publication = cache::publish(store, grant, lock, &release)?;
             return Ok(
                 json!({"schema":MACHINE_SCHEMA,"release":release,"revision":grant.header.revision,"lock_hash":grant.header.lock_hash,"build_publication":publication}),
             );
         }
-        let mut result = send_release(store, grant, lock, &release)?;
-        result["build_publication"] = publication;
-        return Ok(result);
+        // Release admission still checks the host and guest artifacts selected
+        // for activation. Publishing reusable builder inputs is independent.
+        return send_release(store, grant, lock, &release);
     }
 
     let target = grant

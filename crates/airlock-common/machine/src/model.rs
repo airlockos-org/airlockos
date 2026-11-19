@@ -23,6 +23,8 @@ pub use journal::*;
 pub use protocol::*;
 pub use storage::*;
 
+pub use airlock_nix_core::review::DeploymentPlan as Plan;
+
 pub use airlock_nix_core::store_path::{StoreArtifact, StoreFile, StorePath};
 
 /// Wire format accepted by runtime topology admission and native machine authoring.
@@ -307,6 +309,11 @@ impl Domain {
     /// Decode complete settings for a native firewall; older declarations without
     /// a setting use the shared fallback. Other backends cannot carry this feature.
     pub fn firewall_parameters(&self) -> Result<Option<airlock_firewall_parameters::Document>> {
+        Ok(self.firewall_limits()?.map(|limits| *limits.document()))
+    }
+
+    /// Return the validated startup selection without exposing a mutable document.
+    pub fn firewall_limits(&self) -> Result<Option<airlock_firewall_parameters::Limits>> {
         let supplied = self.features.get(airlock_firewall_parameters::FEATURE);
         if !self
             .backend
@@ -328,7 +335,7 @@ impl Domain {
             .transpose()?;
         let limits = airlock_firewall_parameters::decode(bytes.map(str::as_bytes))
             .map_err(|error| anyhow::anyhow!("invalid firewall parameters: {error:?}"))?;
-        Ok(Some(*limits.document()))
+        Ok(Some(limits))
     }
 }
 
@@ -643,45 +650,6 @@ impl Phase {
     pub fn verified(self) -> bool {
         matches!(self, Self::Complete | Self::RebootRequired)
     }
-}
-
-/// Computed VM effects and reboot requirement presented before activation.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct Plan {
-    /// VMs whose configuration will be reconciled, including unchanged declarations.
-    #[serde(default)]
-    pub configure: Vec<GuestName>,
-    /// VMs whose declared configuration differs from the baseline.
-    pub changed: Vec<GuestName>,
-    /// VMs whose new system generations must be prepared before activation.
-    pub stage: Vec<GuestName>,
-    /// VMs to stop before applying the configuration.
-    pub stop: Vec<GuestName>,
-    /// VMs to start after applying the configuration.
-    pub start: Vec<GuestName>,
-    /// Additional VM impact explicitly reported by the plan producer.
-    pub affected: Vec<GuestName>,
-    /// VMs to remove from active configuration while retaining recoverable data.
-    pub retire: Vec<GuestName>,
-    /// Previously retired VMs to restore to active configuration.
-    pub restore: Vec<GuestName>,
-    /// Existing guests kept running although no longer declared.
-    pub retained_undeclared: Vec<GuestName>,
-    /// GUI-provider names mapped to unchanged guests whose windows may reconnect.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub gui_reconnect: BTreeMap<GuestName, Vec<GuestName>>,
-    /// Optional device ownership handoff details retained for activation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pci_handoff: Option<Value>,
-    /// Whether the selected host differs enough to need a reboot.
-    #[serde(default)]
-    pub host_reboot_required: bool,
-    /// Git commit identifying the candidate source tree.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub revision: Option<GitRevision>,
-    /// Additional protocol metadata retained without treating it as authority.
-    #[serde(flatten)]
-    pub extra: BTreeMap<String, Value>,
 }
 
 /// Selected and observed running system identities for one guest.

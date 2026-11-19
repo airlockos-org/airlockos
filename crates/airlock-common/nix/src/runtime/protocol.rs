@@ -2,7 +2,7 @@
 
 use super::{Result, process, require};
 use crate::{
-    identity::{GuestName, SourceIdentity},
+    identity::{GuestName, ReviewId, SourceIdentity},
     review::{CandidateIdentity, DeploymentTarget},
     wire::string_enum,
 };
@@ -13,6 +13,39 @@ use std::{fs, path::Path};
 
 /// Maximum compressed source bundle size accepted by both transport endpoints.
 pub const ARCHIVE_LIMIT: u64 = 512 * 1024 * 1024;
+
+/// The committed parameter document understood by the machine compiler and sys-ctrl.
+pub const FIREWALL_SETTINGS_FILE: &str = "firewall-parameters.json";
+
+/// A deployment carries this feature only if its machine compiler consumes the data file.
+pub const FIREWALL_SETTINGS_SOURCE: &str = "airlock-hermit-firewall-settings-source";
+
+string_enum! {
+    /// Schema of the settings-only request on the existing machine deployment service.
+    pub enum FirewallSettingsSchema ("firewall settings request schema") {
+        /// Change one protected startup document while retaining the selected release's artifacts.
+        V1 => "airlock.firewall-settings-update.v1",
+    }
+}
+
+/// A settings-only candidate derived from two committed trees by sys-ctrl.
+/// Dom0 still checks source approval, the selected baseline and the generated plan.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FirewallSettingsUpdate {
+    /// Protocol version understood by both deployment endpoints.
+    pub schema: FirewallSettingsSchema,
+    /// Source currently selected by the machine.
+    pub baseline: SourceIdentity,
+    /// Candidate committed source, with the same dependency lock.
+    pub candidate: SourceIdentity,
+    /// Setting observed in the baseline source tree.
+    pub before: airlock_firewall_parameters::Limits,
+    /// Setting read from the approved candidate tree.
+    pub after: airlock_firewall_parameters::Limits,
+    /// Exact source approval issued by dom0 for this candidate.
+    pub review_authorization: ReviewId,
+}
 
 string_enum! {
     /// Versioned source-submission format shared by sender and receiver.

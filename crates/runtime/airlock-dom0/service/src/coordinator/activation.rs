@@ -236,9 +236,7 @@ impl Coordinator {
             &r,
             latest.as_ref().filter(|_| mode.is_recovery()),
         )?;
-        if !copies.is_empty() {
-            plan.extra.insert("private_copies".into(), json!(copies));
-        }
+        plan.private_copies = serde_json::from_value(serde_json::to_value(&copies)?)?;
         let trash = self.active_trash()?;
         plan.restore = r
             .topology

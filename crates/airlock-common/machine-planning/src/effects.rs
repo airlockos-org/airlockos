@@ -37,6 +37,8 @@ pub struct PlanEffects<'a> {
     pub pci_sources: Vec<&'a str>,
     /// New owners of transferred PCI devices.
     pub pci_targets: Vec<&'a str>,
+    /// Firewalls whose reviewed startup settings change.
+    pub firewall_parameters: Vec<&'a str>,
     /// Unclassified wire fields; even exempt operations must reject these.
     pub unknown: Vec<&'a str>,
     /// Only an explicit false establishes that host reboot permission is unnecessary.
@@ -63,6 +65,7 @@ pub open spec fn affects(p: &PlanEffects, name: Seq<char>) -> bool {
         || member(p.gui_clients@, name)
         || member(p.pci_sources@, name)
         || member(p.pci_targets@, name)
+        || member(p.firewall_parameters@, name)
 }
 
 /// Required and unestablished reboot outcomes both consume reboot permission.
@@ -145,6 +148,7 @@ impl<'a> PlanEffects<'a> {
         append(&mut out, self.gui_clients.as_slice());
         append(&mut out, self.pci_sources.as_slice());
         append(&mut out, self.pci_targets.as_slice());
+        append(&mut out, self.firewall_parameters.as_slice());
         Some(out)
     }
 

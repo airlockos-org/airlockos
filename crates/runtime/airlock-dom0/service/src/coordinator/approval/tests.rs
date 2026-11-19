@@ -351,6 +351,7 @@ fn scenarios() -> Result<()> {
     state::test_interrupted_publication(publication.path())?;
     preparation_defers_maintenance()?;
     legacy_gap()?;
+    reviewed_firewall_change()?;
     verified_adapter()?;
     effect_requests()?;
     configuration_requests()?;
@@ -490,6 +491,193 @@ fn lifecycle_topology(fixture: &Fixture) -> Result<Topology> {
     topology["domains"]["sys-net"] = domain.clone();
     topology["domains"]["sys-gui"] = domain;
     Ok(serde_json::from_value(topology)?)
+}
+
+/// Round-trip a planner-generated native settings change through scope and dom0 authorization.
+fn reviewed_firewall_change() -> Result<()> {
+    use airlock_nix_core::hermit_artifact::{Application, AuthorityMode, Descriptor, Schema};
+    use airlock_nix_core::runtime::protocol::{
+        FIREWALL_SETTINGS_FILE, FIREWALL_SETTINGS_SOURCE, FirewallSettingsSchema,
+        FirewallSettingsUpdate,
+    };
+
+    let fixture = Fixture::new()?;
+    let firewall = "sys-firewall".parse::<GuestName>()?;
+    let settings = airlock_firewall_parameters::Document::default();
+    let system = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-firewall";
+    let artifact = Descriptor {
+        schema: Schema::V1,
+        executable: format!("{system}/kernel.elf").parse()?,
+        bytes: 1024,
+        sha256: "a".repeat(64).parse()?,
+        source_revision: fixture.release.manifest.revision.clone(),
+        integration_revision: "b".repeat(40).parse()?,
+        build_lock: fixture.release.manifest.lock_hash.clone(),
+        authority: AuthorityMode::Disconnected,
+        application: Application::Firewall,
+    };
+    let mut before = lifecycle_topology(&fixture)?;
+    before.domains.retain(|name, _| name.as_str() == "sys-net");
+    before
+        .domains
+        .get_mut(&"sys-net".parse()?)
+        .unwrap()
+        .prefs
+        .insert("provides_network".into(), json!(true));
+    before.domains.insert(
+        firewall.clone(),
+        serde_json::from_value(json!({
+            "class": "HermitVM", "netvm": "sys-net", "template": null,
+            "prefs": {"provides_network": true, "memory": 256, "maxmem": 256,
+                    "virt_mode": "pvh", "kernel": "", "vcpus": 1, "guivm": null, "audiovm": null},
+            "features": {"qrexec": "", "gui": ""},
+            "backend": {"type": "hermit", "system": {"source": system}, "artifact": artifact}
+        }))?,
+    );
+    let set = |topology: &mut Topology, value| -> Result<()> {
+        topology
+            .domains
+            .get_mut(&firewall)
+            .unwrap()
+            .features
+            .insert(
+                airlock_firewall_parameters::FEATURE.into(),
+                json!(
+                    airlock_firewall_parameters::encode(value)
+                        .map_err(|_| anyhow::anyhow!("invalid test settings"))?
+                ),
+            );
+        Ok(())
+    };
+    set(&mut before, settings)?;
+    before.domains.get_mut(&firewall).unwrap().features.insert(
+        FIREWALL_SETTINGS_SOURCE.into(),
+        json!(FIREWALL_SETTINGS_FILE),
+    );
+    let mut after = before.clone();
+    set(
+        &mut after,
+        airlock_firewall_parameters::Document {
+            report_interval_seconds: 15,
+            ..settings
+        },
+    )?;
+
+    let plan = planning::plan(
+        &before,
+        &after,
+        &BTreeSet::from([firewall.clone()]),
+        &[],
+        false,
+    )?;
+    let wire = serde_json::to_value(plan)?;
+    let plan: Plan = serde_json::from_value(wire.clone())?;
+    let change = &plan.firewall_parameters[&firewall];
+    assert_eq!(
+        change.before.unwrap().document().report_interval_seconds,
+        30
+    );
+    assert_eq!(change.after.unwrap().document().report_interval_seconds, 15);
+    assert!(change.executable_unchanged && change.restart_required);
+    assert_eq!(plan.stop, std::slice::from_ref(&firewall));
+    assert!(plan.stage.is_empty());
+
+    let mut approval = fixture.approval()?;
+    let binding = ReleaseBinding {
+        request_id: approval.request_id.clone(),
+        release: ReleasePath::from_path(&fixture.release.path)?,
+        revision: fixture.release.manifest.revision.clone(),
+        lock_hash: fixture.release.manifest.lock_hash.clone(),
+    };
+    let activate = |approval: &ApprovalRecord| {
+        check_review(
+            approval,
+            &binding,
+            &fixture.release,
+            &plan,
+            Some(&approval.baseline_state),
+            None,
+            PlanBinding::new("firewall parameter fixture".into()),
+        )
+    };
+    assert!(approval.scope.check(&plan).is_err());
+    assert!(activate(&approval).is_err());
+    approval.scope = airlock_nix_core::review::Scope::new(
+        vec![firewall.clone().into(), "sys-net".parse()?],
+        false,
+    )?;
+    approval.scope.check(&plan)?;
+    activate(&approval)?;
+
+    let mut invalid = wire;
+    invalid["firewall_parameters"]["sys-firewall"]["after"]["report_interval_seconds"] = json!(0);
+    assert!(serde_json::from_value::<Plan>(invalid).is_err());
+
+    // Use the production candidate path with a finite inventory and an existing host pin.
+    let helpers = Path::new("/var/lib/airlock/helpers");
+    fs::create_dir_all(helpers)?;
+    let peer = std::env::var_os("AIRLOCK_TEST_PEER_BIN").context("missing Rust command peer")?;
+    for program in ["qvm-ls", "nix-store"] {
+        std::os::unix::fs::symlink(&peer, helpers.join(program))?;
+    }
+    state::save(
+        &helpers.join("replies.json"),
+        &json!({"commands": {
+            "qvm-ls": [{"args": ["--raw-data", "--fields", "NAME,STATE"],
+                "stdout": "sys-net|Running\nsys-firewall|Running\n"}],
+            "nix-store": [{"prefix": ["--add-root"], "contains": "--realise", "argc": 4}],
+        }}),
+    )?;
+    fs::write("/etc/airlock/machine-profile", "usb-lab\n")?;
+    let manifest_path = fixture.baseline.path.join("release.json");
+    let mut baseline_manifest: Value = state::read(&manifest_path)?;
+    baseline_manifest["profile"] = json!("usb-lab");
+    baseline_manifest["revision"] = json!("f".repeat(40));
+    state::save(&manifest_path, &baseline_manifest)?;
+    state::save(
+        &fixture.baseline.path.join("topology.json"),
+        &serde_json::to_value(&before)?,
+    )?;
+    let (selected, fingerprint) = fixture.coordinator.review_baseline()?;
+    approval.baseline_state = fingerprint;
+    state::save(
+        &fixture.coordinator.review_path(&fixture.request),
+        &approval,
+    )?;
+    let mut request = FirewallSettingsUpdate {
+        schema: FirewallSettingsSchema::V1,
+        baseline: airlock_nix_core::identity::SourceIdentity {
+            revision: selected.manifest.revision.clone(),
+            lock_hash: selected.manifest.lock_hash.clone(),
+        },
+        candidate: airlock_nix_core::identity::SourceIdentity {
+            revision: approval.binding.revision.clone(),
+            lock_hash: approval.binding.lock_hash.clone(),
+        },
+        before: change.before.unwrap(),
+        after: change.after.unwrap(),
+        review_authorization: fixture.request.clone(),
+    };
+    let path = fixture.coordinator.firewall_settings_candidate(&request)?;
+    let candidate = Release::load(path.as_path())?;
+    assert_eq!(candidate.manifest.host, selected.manifest.host);
+    assert_eq!(candidate.raw_topology, serde_json::to_value(after)?);
+    assert_eq!(
+        candidate.topology.domains[&firewall].backend,
+        selected.topology.domains[&firewall].backend
+    );
+    request.before = request.after;
+    assert!(
+        fixture
+            .coordinator
+            .firewall_settings_candidate(&request)
+            .is_err()
+    );
+    fs::remove_file("/etc/airlock/machine-profile")?;
+    for program in ["qvm-ls", "nix-store"] {
+        fs::remove_file(helpers.join(program))?;
+    }
+    Ok(())
 }
 
 /// Exercise the complete production adapter with a bounded fake Qubes executable.
@@ -1085,13 +1273,12 @@ fn verified_adapter() -> Result<()> {
         );
     }
     for (source, target) in [("sys-net", "usr-home"), ("usr-home", "sys-net")] {
-        let mut plan = Plan::default();
-        plan.extra.insert(
-            "private_copies".into(),
-            json!([
+        let plan = Plan {
+            private_copies: serde_json::from_value(json!([
                 {"source": {"domain": source}, "target_name": target}
-            ]),
-        );
+            ]))?,
+            ..Plan::default()
+        };
         assert!(
             fixture
                 .coordinator
@@ -1110,7 +1297,10 @@ fn verified_adapter() -> Result<()> {
     // Device ownership is independent of the lifecycle lists and needs both endpoints.
     for (source, target) in [("sys-net", "usr-home"), ("usr-home", "sys-net")] {
         let plan = Plan {
-            pci_handoff: Some(json!({"from": source, "to": target})),
+            pci_handoff: Some(airlock_nix_core::review::PciHandoff {
+                from: source.parse()?,
+                to: target.parse()?,
+            }),
             ..Plan::default()
         };
         assert!(
@@ -1126,29 +1316,10 @@ fn verified_adapter() -> Result<()> {
                 .is_err()
         );
     }
-    for (field, value) in [
-        ("future_effect", json!({"vm": "sys-net"})),
-        ("changed", json!([])),
-        ("host_reboot_required", json!(false)),
-    ] {
-        let mut plan = Plan::default();
-        plan.extra.insert(field.into(), value);
-        for administrative in [false, true] {
-            assert!(
-                fixture
-                    .coordinator
-                    .authorize(
-                        &fixture.release,
-                        &fixture.baseline,
-                        &plan,
-                        None,
-                        administrative
-                    )
-                    .is_err(),
-                "unclassified or shadowed field {field}"
-            );
-        }
-    }
+    let mut unclassified = serde_json::to_value(Plan::default())?;
+    unclassified["future_effect"] = json!({"vm": "sys-net"});
+    assert!(serde_json::from_value::<Plan>(unclassified).is_err());
+
     // Explicit policy exemptions retain their meaning for a completely classified plan.
     let exempt = Plan {
         changed: vec!["sys-net".parse()?],
@@ -1161,14 +1332,6 @@ fn verified_adapter() -> Result<()> {
     fixture
         .coordinator
         .authorize(&fixture.release, &fixture.baseline, &exempt, None, false)?;
-    let mut unknown = exempt;
-    unknown.extra.insert("future_effect".into(), json!(true));
-    assert!(
-        fixture
-            .coordinator
-            .authorize(&fixture.release, &fixture.baseline, &unknown, None, false)
-            .is_err()
-    );
     fs::write("/etc/airlock/review-required", "")?;
 
     // The approved record cannot be exchanged under an already published token.
@@ -1198,7 +1361,7 @@ fn verified_adapter() -> Result<()> {
         &approval,
     )?;
     let mut plan = Plan {
-        host_reboot_required: true,
+        host_reboot_required: Some(true),
         ..Plan::default()
     };
     assert!(
@@ -1210,7 +1373,7 @@ fn verified_adapter() -> Result<()> {
                 Some(airlock_nix_core::Error::RebootNotApproved)
             ))
     );
-    plan.host_reboot_required = false;
+    plan.host_reboot_required = Some(false);
     fixture
         .coordinator
         .authorize(&fixture.release, &fixture.baseline, &plan, None, false)?;

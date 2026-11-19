@@ -133,6 +133,22 @@ pub fn document_size_allowed(length: usize) -> (allowed: bool)
 
 }
 
+#[cfg(not(verus_keep_ghost))]
+impl serde::Serialize for Limits {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.document().serialize(serializer)
+    }
+}
+
+#[cfg(not(verus_keep_ghost))]
+impl<'de> serde::Deserialize<'de> for Limits {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let claim = Document::deserialize(deserializer)?;
+        Self::validate(claim)
+            .ok_or_else(|| serde::de::Error::custom("unsupported firewall settings"))
+    }
+}
+
 /// Startup failure categories, without echoing untrusted configuration bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DecodeError {

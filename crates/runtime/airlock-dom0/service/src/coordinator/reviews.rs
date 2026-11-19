@@ -368,12 +368,7 @@ impl Coordinator {
             );
         }
         let plan = self.plan(&r)?;
-        if let Err(error) = record
-            .scope
-            .check(&serde_json::from_value::<DeploymentPlan>(
-                serde_json::to_value(&plan)?,
-            )?)
-        {
+        if let Err(error) = record.scope.check(&plan) {
             record.status = ApprovalStatus::ScopeExceeded;
             record.extra.insert("plan".into(), json!(plan));
             state::save(&self.review_path(id), &record)?;

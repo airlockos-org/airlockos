@@ -22,6 +22,7 @@ job-writer = []
 artifacts = ["dep:airlock-store-packer", "runtime", "dep:anyhow", "dep:tar", "dep:flate2"]
 
 [dependencies]
+airlock-firewall-parameters = { path = "../firewall-parameters" }
 airlock-boot-core = { path = "../boot" }
 airlock-store-packer = { path = "../../tooling/airlock-store-packer", optional = true }
 airlock-machine-planning = { path = "../machine-planning" }

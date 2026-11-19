@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::qubes::{self, PrivateIdentity};
+use airlock_nix_core::review::PciHandoff;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,12 +33,8 @@ pub(super) struct PrivateCopy {
 pub(super) fn copy_definitions(
     plan: &Plan,
 ) -> Result<Vec<airlock_deployment_core::copy::Definition>> {
-    let copies: Vec<PrivateCopy> = plan
-        .extra
-        .get("private_copies")
-        .map(|v| serde_json::from_value(v.clone()))
-        .transpose()?
-        .unwrap_or_default();
+    let copies: Vec<PrivateCopy> =
+        serde_json::from_value(serde_json::to_value(&plan.private_copies)?)?;
     copies.iter().map(copy_definition).collect()
 }
 
@@ -256,13 +253,11 @@ impl Coordinator {
     /// Observe the entire expected device set before issuing any unassignment.
     pub(super) fn check_pci_handoff(
         &self,
-        handoff: &Value,
+        handoff: &PciHandoff,
         recovery: bool,
     ) -> Result<airlock_deployment_core::pci::CheckedObservation> {
-        let previous: GuestName = serde_json::from_value(handoff["from"].clone())?;
-        let target: GuestName = serde_json::from_value(handoff["to"].clone())?;
         crate::qubes::pci::observe()?
-            .check(previous.as_str().into(), target.as_str().into(), recovery)
+            .check(handoff.from.as_str().into(), handoff.to.as_str().into(), recovery)
             .context("network PCI handoff has unsupported endpoints, no controllers, or conflicting/foreign ownership")
     }
 

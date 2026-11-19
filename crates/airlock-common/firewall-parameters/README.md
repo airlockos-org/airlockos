@@ -4,12 +4,13 @@ This contract lets the machine authoring tools, dom0 and Hermit validate the sam
 resource settings without pulling packet processing into the host tools. Serde
 handles JSON; the typed validator owns the limits and their relationships.
 
-Edit the firewall's `set_firewall_parameters` call in the machine's
-[src/machine.rs](../../../airlock-machine/src/machine.rs), then use the existing
-reviewed [machine deployment workflow](../../../docs/development-operations.md).
-The plan shows old/new values, restart impact and executable reuse. Tuning these
-values changes topology metadata independently of the projected Hermit sources;
-normal machine planning and configuration work still applies.
+Edit the physical machine's committed
+[`firewall-parameters.json`](../../../airlock-machine/firewall-parameters.json)
+and submit it through the reviewed machine workflow. When the document is the
+only change from the selected source, dom0 prepares a candidate using the
+installed release's artifacts. The plan reports the old and new values, the
+executable and the VM restart order. Changes to other source files continue
+through whole-machine planning. [Deployment workflow](../../../docs/development-operations.md)
 
 Dom0 captures the reviewed document before spawn and publishes it before unpause.
 The guest selects it once. Status shows selected and observed effective values;

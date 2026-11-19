@@ -578,15 +578,6 @@ fn gui_plan(plan: &Plan) -> Vec<GuiPreservation> {
         .collect()
 }
 
-/// Decode the complete plan without allowing flattened metadata to shadow typed effects.
-fn review_plan(plan: &Plan) -> Result<DeploymentPlan> {
-    ensure!(
-        plan.extra.keys().all(|key| key == "private_copies"),
-        "deployment contains unsupported or shadowed effect fields"
-    );
-    Ok(serde_json::from_value(serde_json::to_value(plan)?)?)
-}
-
 /// Pure authorization checks shared by initial publication and every recovery attempt.
 fn check_review(
     approval: &ApprovalRecord,
@@ -598,7 +589,6 @@ fn check_review(
     plan_binding: PlanBinding,
 ) -> Result<AuthorizedPlan> {
     let gui = gui_plan(plan);
-    let plan = review_plan(plan)?;
     let review = review::Review {
         request: approval.request_id.as_str(),
         revision: approval.binding.revision.as_str(),
@@ -670,7 +660,7 @@ fn check_review(
                 // a verified denial into success if the diagnostic code disagrees.
                 return approval
                     .scope
-                    .check(&plan)
+                    .check(plan)
                     .err()
                     .map(anyhow::Error::from)
                     .unwrap_or_else(|| {
@@ -698,7 +688,6 @@ impl Coordinator {
                 .is_none_or(|revision| revision == &release.manifest.revision),
             "plan revision differs from deployment target"
         );
-        let classified = review_plan(plan)?;
         let recovery = previous
             .map(|previous| -> Result<_> {
                 Ok(RecoveryAuthorization {
@@ -722,7 +711,7 @@ impl Coordinator {
         let (checked_plan, authority, approval) =
             if administrative || !Path::new("/etc/airlock/review-required").try_exists()? {
                 let checked_plan = AuthorizedPlan::policy_exempt(
-                    &classified.effects(),
+                    &plan.effects(),
                     gui_plan(plan),
                     PlanBinding::new(plan_binding),
                 )

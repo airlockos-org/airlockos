@@ -299,6 +299,7 @@ name = "airlock-nix-core"
 version = "0.1.0"
 dependencies = [
  "airlock-boot-core",
+ "airlock-firewall-parameters",
  "airlock-machine-planning",
  "airlock-store-packer",
  "anyhow",
@@ -405,6 +406,7 @@ dependencies = [
 name = "airlock-sys-ctrl-service"
 version = "0.1.0"
 dependencies = [
+ "airlock-firewall-parameters",
  "airlock-nix-core",
  "clap",
  "flate2",

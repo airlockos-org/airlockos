@@ -7,7 +7,10 @@ use crate::{
     model::{GuestTransport, StoreFile, StorePath},
     state,
 };
-use airlock_nix_core::identity::{BaselineFingerprint, GitRevision, GuestName, LockHash};
+use airlock_nix_core::{
+    identity::{BaselineFingerprint, GitRevision, GuestName, LockHash},
+    runtime::protocol::FirewallSettingsUpdate,
+};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, time::Instant};
 
@@ -51,6 +54,19 @@ struct Header {
     prepared: Option<ReviewId>,
     // Human source authorization checked by the installed coordinator.
     review_authorization: Option<ReviewId>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Request {
+    Release(
+        // The normal release header and optional artifact transfer coordinates.
+        Header,
+    ),
+    FirewallSettings(
+        // A reviewed configuration change that reuses selected artifacts.
+        FirewallSettingsUpdate,
+    ),
 }
 
 #[derive(Deserialize)]
@@ -208,7 +224,10 @@ impl Receiver {
         action: MachineAction,
         input: &mut transfer::Input,
     ) -> Result<Value> {
-        let header: Header = message(input, state::LIMIT)?;
+        let header = match message(input, state::LIMIT)? {
+            Request::Release(header) => header,
+            Request::FirewallSettings(settings) => return self.firewall_settings(action, settings),
+        };
         if header.prepared.is_some() {
             ensure!(
                 action == MachineAction::Apply,
@@ -350,6 +369,39 @@ impl Receiver {
             result["plan"] = checked.plan;
         } else {
             result["unit"] = json!(self.detach(&engine, &["apply", candidate.as_str()])?);
+        }
+        Ok(result)
+    }
+
+    /// Run the same bind and detached apply checks against a candidate that reuses the baseline.
+    fn firewall_settings(
+        &self,
+        action: MachineAction,
+        settings: FirewallSettingsUpdate,
+    ) -> Result<Value> {
+        ensure!(
+            self.review_required && action != MachineAction::Prepare,
+            "firewall settings require reviewed machine plan or apply"
+        );
+        let coordinator = crate::coordinator::Coordinator::new(self.state.clone());
+        let candidate = coordinator.firewall_settings_candidate(&settings)?;
+        self.bind(Some(&settings.review_authorization), &candidate)?;
+        let checked = self.checked(&self.engine, &candidate)?;
+        let mut result = json!({
+            "schema": SCHEMA, "release": candidate, "plan": checked.plan,
+            "paths_transferred": 0, "nar_bytes": 0, "compressed_bytes": 0,
+            "build_seconds": 0, "settings_only": true,
+        });
+        if action == MachineAction::Apply {
+            result["unit"] = json!(self.detach(
+                &self.engine,
+                &[
+                    "apply",
+                    candidate.as_str(),
+                    "--expected-state",
+                    checked.state.as_str()
+                ],
+            )?);
         }
         Ok(result)
     }

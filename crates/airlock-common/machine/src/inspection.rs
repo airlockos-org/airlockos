@@ -91,7 +91,7 @@ pub fn inspect(
         &after.manifest.retire_domains,
         false,
     )?;
-    plan.host_reboot_required = *host != after.manifest.host;
+    plan.host_reboot_required = Some(*host != after.manifest.host);
     plan.revision = Some(after.manifest.revision.clone());
     Ok(Inspection {
         authority: InspectionAuthority::LocalInspectionOnly,

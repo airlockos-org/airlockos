@@ -553,63 +553,114 @@ pub enum RebootRequirement {
 }
 
 /// Complete classified deployment impact, including copy, GUI and PCI endpoints.
-/// Unknown extensions remain inspectable but prevent authorization.
+/// Shared by planning, review, activation and the durable deployment journal.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeploymentPlan {
     /// VMs explicitly reconciled by the configuration executor.
     #[serde(default)]
-    configure: Vec<VmName>,
+    pub configure: Vec<GuestName>,
     /// Git commit identifying the candidate source tree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    revision: Option<GitRevision>,
+    pub revision: Option<GitRevision>,
     /// SHA-256 of flake.lock, binding the source to its dependency versions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    lock_hash: Option<LockHash>,
+    pub lock_hash: Option<LockHash>,
     /// VMs whose declared configuration differs from the baseline.
-    changed: Vec<VmName>,
+    pub changed: Vec<GuestName>,
     /// VMs to stop before applying the configuration.
-    stop: Vec<VmName>,
+    pub stop: Vec<GuestName>,
     /// VMs to start after applying the configuration.
-    start: Vec<VmName>,
+    pub start: Vec<GuestName>,
     /// VMs to remove from active configuration while retaining recoverable data.
     #[serde(default)]
-    retire: Vec<VmName>,
+    pub retire: Vec<GuestName>,
     /// Previously retired VMs to restore to active configuration.
     #[serde(default)]
-    restore: Vec<VmName>,
+    pub restore: Vec<GuestName>,
     /// VMs whose new system generations must be prepared before activation.
     #[serde(default)]
-    stage: Vec<VmName>,
+    pub stage: Vec<GuestName>,
     /// Additional VM impact explicitly reported by the plan producer.
     #[serde(default)]
-    affected: Vec<VmName>,
+    pub affected: Vec<GuestName>,
     /// Private-volume transfers whose source and destination both count as impact.
-    #[serde(default)]
-    private_copies: Vec<PrivateCopy>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub private_copies: Vec<PrivateCopy>,
     /// GUI providers and surviving clients affected by a forced provider restart.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    gui_reconnect: BTreeMap<VmName, Vec<VmName>>,
+    pub gui_reconnect: BTreeMap<GuestName, Vec<GuestName>>,
     /// Device ownership changes count at both the previous and new VM.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pci_handoff: Option<PciHandoff>,
+    pub pci_handoff: Option<PciHandoff>,
     /// Retained declarations are informational; this field requests no VM operation.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    retained_undeclared: Vec<VmName>,
+    #[serde(default)]
+    pub retained_undeclared: Vec<GuestName>,
     /// Whether the selected host differs enough to need a reboot.
-    host_reboot_required: Option<bool>,
-    /// Additional record metadata retained without treating it as authority.
-    #[serde(flatten)]
-    details: BTreeMap<String, serde_json::Value>,
+    pub host_reboot_required: Option<bool>,
+    /// Changes to reviewed startup settings, indexed by their affected firewall VM.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub firewall_parameters: BTreeMap<GuestName, FirewallParameterChange>,
+}
+
+impl Default for DeploymentPlan {
+    fn default() -> Self {
+        Self {
+            configure: Vec::new(),
+            revision: None,
+            lock_hash: None,
+            changed: Vec::new(),
+            stop: Vec::new(),
+            start: Vec::new(),
+            retire: Vec::new(),
+            restore: Vec::new(),
+            stage: Vec::new(),
+            affected: Vec::new(),
+            private_copies: Vec::new(),
+            gui_reconnect: BTreeMap::new(),
+            pci_handoff: None,
+            retained_undeclared: Vec::new(),
+            host_reboot_required: Some(false),
+            firewall_parameters: BTreeMap::new(),
+        }
+    }
+}
+
+/// When a reviewed firewall parameter selection becomes effective.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FirewallParameterActivation {
+    /// The firewall reads the selected settings when it starts.
+    NextVmStart,
+}
+
+/// Reviewed before and after settings for one firewall VM.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FirewallParameterChange {
+    /// Previous explicit settings, if the old declaration supplied them.
+    pub before: Option<airlock_firewall_parameters::Limits>,
+    /// New explicit settings, if the new declaration supplies them.
+    pub after: Option<airlock_firewall_parameters::Limits>,
+    /// The lifecycle point at which the new settings take effect.
+    pub activation: FirewallParameterActivation,
+    /// Whether the observed VM must restart to select the new settings.
+    pub restart_required: bool,
+    /// Whether the candidate retains the old executable backend.
+    pub executable_unchanged: bool,
+    /// Immutable executable selected by the new declaration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable: Option<crate::store_path::StoreFile>,
 }
 
 /// PCI ownership transfer, with no implicit or unclassified extra operations.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PciHandoff {
+pub struct PciHandoff {
     /// Previous owner of the transferred hardware.
-    from: VmName,
+    pub from: GuestName,
     /// New owner of the transferred hardware.
-    to: VmName,
+    pub to: GuestName,
 }
 
 /// Private-data transfer between VMs, counted at both ends during scope checking.
@@ -675,48 +726,43 @@ impl DeploymentPlan {
     }
 
     /// Return VMs whose declared configuration changed.
-    pub fn changed(&self) -> &[VmName] {
+    pub fn changed(&self) -> &[GuestName] {
         &self.changed
     }
 
     /// Return VMs the plan intends to stop before configuration.
-    pub fn stop(&self) -> &[VmName] {
+    pub fn stop(&self) -> &[GuestName] {
         &self.stop
     }
 
     /// Return VMs the plan intends to start after configuration.
-    pub fn start(&self) -> &[VmName] {
+    pub fn start(&self) -> &[GuestName] {
         &self.start
     }
 
     /// Return VMs to remove from active configuration while retaining their data.
-    pub fn retire(&self) -> &[VmName] {
+    pub fn retire(&self) -> &[GuestName] {
         &self.retire
     }
 
     /// Return previously retired VMs to restore.
-    pub fn restore(&self) -> &[VmName] {
+    pub fn restore(&self) -> &[GuestName] {
         &self.restore
     }
 
     /// Return VMs whose new system generations must be prepared.
-    pub fn stage(&self) -> &[VmName] {
+    pub fn stage(&self) -> &[GuestName] {
         &self.stage
     }
 
     /// Return additional VM impact explicitly reported by the producer.
-    pub fn affected(&self) -> &[VmName] {
+    pub fn affected(&self) -> &[GuestName] {
         &self.affected
     }
 
     /// Return private-volume transfers; both endpoints count as affected.
     pub fn private_copies(&self) -> &[PrivateCopy] {
         &self.private_copies
-    }
-
-    /// Borrow unmodeled plan metadata without interpreting it as authority.
-    pub fn details(&self) -> &BTreeMap<String, serde_json::Value> {
-        &self.details
     }
 
     /// Classify every wire field before the verified projection is evaluated.
@@ -739,14 +785,14 @@ impl DeploymentPlan {
             pci_handoff,
             retained_undeclared: _,
             host_reboot_required,
-            details,
+            firewall_parameters,
         } = self;
         // Borrow typed names without changing their identities at the proof boundary.
-        fn names(values: &[VmName]) -> Vec<&str> {
-            values.iter().map(VmName::as_str).collect()
+        fn names(values: &[GuestName]) -> Vec<&str> {
+            values.iter().map(GuestName::as_str).collect()
         }
 
-        let mut unknown = details.keys().map(String::as_str).collect::<Vec<_>>();
+        let mut unknown = Vec::new();
         for PrivateCopy {
             source,
             target_name: _,
@@ -788,22 +834,23 @@ impl DeploymentPlan {
                 .iter()
                 .map(|copy| copy.target_name.as_str())
                 .collect(),
-            gui_providers: gui_reconnect.keys().map(VmName::as_str).collect(),
+            gui_providers: gui_reconnect.keys().map(GuestName::as_str).collect(),
             gui_clients: gui_reconnect
                 .values()
                 .flatten()
-                .map(VmName::as_str)
+                .map(GuestName::as_str)
                 .collect(),
             pci_sources: pci_handoff
                 .iter()
                 .map(|PciHandoff { from, to: _ }| from)
-                .map(VmName::as_str)
+                .map(GuestName::as_str)
                 .collect(),
             pci_targets: pci_handoff
                 .iter()
                 .map(|PciHandoff { from: _, to }| to)
-                .map(VmName::as_str)
+                .map(GuestName::as_str)
                 .collect(),
+            firewall_parameters: firewall_parameters.keys().map(GuestName::as_str).collect(),
             unknown,
             reboot: *host_reboot_required,
         }
@@ -823,20 +870,22 @@ impl DeploymentPlan {
         ]
         .into_iter()
         .flatten()
+        .map(GuestName::as_vm_name)
         .collect::<BTreeSet<_>>();
         for copy in &self.private_copies {
             names.insert(&copy.source.domain);
             names.insert(&copy.target_name);
         }
         for (provider, clients) in &self.gui_reconnect {
-            names.insert(provider);
-            names.extend(clients);
+            names.insert(provider.as_vm_name());
+            names.extend(clients.iter().map(GuestName::as_vm_name));
         }
 
         if let Some(handoff) = &self.pci_handoff {
-            names.insert(&handoff.from);
-            names.insert(&handoff.to);
+            names.insert(handoff.from.as_vm_name());
+            names.insert(handoff.to.as_vm_name());
         }
+        names.extend(self.firewall_parameters.keys().map(GuestName::as_vm_name));
         names
     }
 
@@ -930,7 +979,6 @@ mod tests {
         let base = json!({"changed": [], "stop": [], "start": [], "host_reboot_required": false});
         let scope = Scope::new(vec!["usr-home".parse().unwrap()], false).unwrap();
         for (field, value) in [
-            ("future_effect", json!({"vm": "sys-net"})),
             (
                 "private_copies",
                 json!([{"source": {"domain": "usr-home"}, "target_name": "usr-home", "future_effect": "sys-net"}]),
@@ -945,6 +993,9 @@ mod tests {
             let plan: DeploymentPlan = serde_json::from_value(raw).unwrap();
             assert!(scope.check(&plan).is_err(), "unclassified {field}");
         }
+        let mut unknown = base.clone();
+        unknown["future_effect"] = json!({"vm": "sys-net"});
+        assert!(serde_json::from_value::<DeploymentPlan>(unknown).is_err());
         for value in [
             json!({"from": "usr-home"}),
             json!({"from": null, "to": "usr-home"}),

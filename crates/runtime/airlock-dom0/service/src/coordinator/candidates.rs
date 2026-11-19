@@ -64,7 +64,7 @@ impl Coordinator {
         CheckedAdmission::check(receipt, info)
     }
 
-    fn publish_candidate(
+    pub(super) fn publish_candidate(
         &self,
         manifest: &Value,
         topology: &Value,

@@ -20,6 +20,7 @@ pub fn effects() -> PlanEffects<'static> {
         gui_clients: vec![],
         pci_sources: vec![],
         pci_targets: vec![],
+        firewall_parameters: vec![],
         unknown: vec![],
         reboot: Some(false),
     }

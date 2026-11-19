@@ -145,6 +145,7 @@ fn complete_snapshot_and_uncertain_unassignment_reconcile_without_duplicate_effe
         gui_clients: vec![],
         pci_sources: vec!["usr-assistant"],
         pci_targets: vec!["sys-net"],
+        firewall_parameters: vec![],
         unknown: vec![],
         reboot: Some(false),
     };
@@ -270,6 +271,7 @@ fn device_gate() -> Result<(
         gui_clients: vec![],
         pci_sources: vec![],
         pci_targets: vec![],
+        firewall_parameters: vec![],
         unknown: vec![],
         reboot: Some(false),
     };

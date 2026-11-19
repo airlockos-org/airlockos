@@ -404,24 +404,24 @@ fn stage(
     ))?;
     let slot = cache.slot(name)?;
     let previous = cache.slots[slot].as_ref();
-    let retained = match previous {
-        Some(saved)
-            if saved.source == root.source
-                && saved.input == input
-                && replay(
-                    input.as_str(),
-                    saved.input.as_str(),
-                    nix.registered(&saved.recipe.derivation)?,
-                ) =>
-        {
-            Some(saved.recipe.clone())
+    let (retained, reason) = match previous {
+        None => (None, "no retained recipe"),
+        Some(saved) if saved.source != root.source => (None, "captured source changed"),
+        Some(saved) if saved.input != input => (None, "evaluation inputs changed"),
+        Some(saved) => {
+            let registered = nix.registered(&saved.recipe.derivation)?;
+            if replay(input.as_str(), saved.input.as_str(), registered) {
+                (Some(saved.recipe.clone()), "retained recipe is registered")
+            } else {
+                (None, "retained recipe is unavailable")
+            }
         }
-        _ => None,
     };
 
     let mut span = progress::Span::start(&format!("component_{name}"));
     span.update(
-        json!({"component":name, "reused_evaluation":retained.is_some(), "scope":root.scope}),
+        json!({"component":name, "reused_evaluation":retained.is_some(), "scope":root.scope,
+            "reuse_reason":reason, "capture_reason":root.reason}),
     );
     let recipe = match retained {
         Some(recipe) => recipe,

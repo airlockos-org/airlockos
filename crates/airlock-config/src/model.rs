@@ -21,6 +21,8 @@ pub use error::AuthoringError;
 /// Editable native firewall resource settings, validated before topology generation.
 pub use airlock_firewall_parameters::Document as FirewallParameters;
 
+pub use airlock_nix_core::runtime::protocol::{FIREWALL_SETTINGS_FILE, FIREWALL_SETTINGS_SOURCE};
+
 /// Reviewed native application profile shared with artifact admission.
 pub use airlock_nix_core::hermit_artifact::Application as HermitApplication;
 
@@ -155,6 +157,17 @@ impl<R> VmHandle<R, Nixos> {
 }
 
 impl VmHandle<Firewall, Hermit> {
+    /// Select startup settings from the machine's committed parameter document.
+    pub fn set_firewall_parameters_json(&self, bytes: &[u8]) -> Result<(), AuthoringError> {
+        let limits = airlock_firewall_parameters::decode(Some(bytes)).map_err(|_| {
+            AuthoringError::InvalidResources {
+                vm: self.name().to_string(),
+                reason: "invalid firewall parameter document",
+            }
+        })?;
+        self.set_firewall_parameters(*limits.document())
+    }
+
     /// Select complete startup resource settings for the next normal VM start.
     /// Invalid settings fail authoring. A running firewall keeps its previous
     /// selection until the reviewed machine plan stops and starts that VM.

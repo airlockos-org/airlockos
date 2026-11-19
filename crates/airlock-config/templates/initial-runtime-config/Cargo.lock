@@ -104,6 +104,7 @@ name = "airlock-nix-core"
 version = "0.1.0"
 dependencies = [
  "airlock-boot-core",
+ "airlock-firewall-parameters",
  "airlock-machine-planning",
  "rustix",
  "serde",

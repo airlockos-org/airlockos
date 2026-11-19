@@ -9,7 +9,7 @@ use crate::{
     state::{self, Release},
     store::Store,
 };
-use airlock_nix_core::{identity::GuestName, review::DeploymentPlan};
+use airlock_nix_core::identity::GuestName;
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -442,10 +442,8 @@ impl Coordinator {
             }
         }
         let copies = self.private_copy_plan(baseline, release, None)?;
-        if !copies.is_empty() {
-            p.extra.insert("private_copies".into(), json!(copies));
-        }
-        p.host_reboot_required = state::host()? != release.manifest.host;
+        p.private_copies = serde_json::from_value(serde_json::to_value(copies)?)?;
+        p.host_reboot_required = Some(state::host()? != release.manifest.host);
         p.revision = Some(release.manifest.revision.clone());
         Ok(p)
     }
